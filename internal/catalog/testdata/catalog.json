@@ -1,0 +1,866 @@
+{
+  "format": 1,
+  "catalog": {
+    "store": "analytics",
+    "regions": [
+      "us-east-1",
+      "us-west-2"
+    ],
+    "timeout_seconds": 60,
+    "streams": [
+      {
+        "name": "api_calls",
+        "go_type": "APICall",
+        "columns": [
+          {
+            "name": "account_id",
+            "type": "String"
+          },
+          {
+            "name": "endpoint",
+            "type": "String"
+          },
+          {
+            "name": "units",
+            "type": "UInt32"
+          },
+          {
+            "name": "request_id",
+            "type": "UUID"
+          }
+        ],
+        "primary_key": [
+          "account_id"
+        ],
+        "dedup_by": [
+          "request_id"
+        ],
+        "log_retention": "FOREVER",
+        "accept": {
+          "future": "5 MINUTE"
+        },
+        "shards": 4,
+        "storage_format": 1
+      },
+      {
+        "name": "page_views",
+        "columns": [
+          {
+            "name": "user_id",
+            "type": "String"
+          },
+          {
+            "name": "page",
+            "type": "String"
+          },
+          {
+            "name": "referrer",
+            "type": "Nullable(String)"
+          },
+          {
+            "name": "tags",
+            "type": "Array(String)",
+            "default": {
+              "op": "array",
+              "type": "Array(String)"
+            }
+          },
+          {
+            "name": "duration_ms",
+            "type": "UInt32"
+          },
+          {
+            "name": "country",
+            "type": "String",
+            "default": {
+              "op": "literal",
+              "type": "String"
+            }
+          }
+        ],
+        "primary_key": [
+          "user_id"
+        ],
+        "log_retention": "2 DAY",
+        "accept": {
+          "past": "30 DAY",
+          "future": "5 MINUTE"
+        },
+        "shards": 1,
+        "archive": {
+          "regions": [
+            "us-east-1",
+            "us-west-2"
+          ],
+          "events": "all"
+        },
+        "storage_format": 1
+      }
+    ],
+    "views": [
+      {
+        "name": "page_daily",
+        "versions": [
+          {
+            "number": 1,
+            "state": "retained",
+            "fingerprint": "ddde3c055025d1b4a545162930ba400594d0f4f4ae526a2f73adfe985c341508",
+            "mode": "async",
+            "stream": "page_views",
+            "where": {
+              "op": "notEquals",
+              "type": "Bool",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "String",
+                  "name": "page"
+                },
+                {
+                  "op": "literal",
+                  "type": "String"
+                }
+              ]
+            },
+            "keys": [
+              {
+                "name": "page",
+                "expr": {
+                  "op": "column",
+                  "type": "String",
+                  "name": "page"
+                }
+              },
+              {
+                "name": "day",
+                "expr": {
+                  "op": "toStartOfDay",
+                  "type": "DateTime",
+                  "args": [
+                    {
+                      "op": "column",
+                      "type": "DateTime64(6)",
+                      "name": "event_time"
+                    }
+                  ]
+                }
+              }
+            ],
+            "partition_key_len": 1,
+            "ttl": {
+              "key": "day",
+              "plus": "2 YEAR"
+            },
+            "split": 1,
+            "aggregates": [
+              {
+                "fn": "count",
+                "type": "UInt64",
+                "name": "views"
+              },
+              {
+                "fn": "uniqExact",
+                "args": [
+                  {
+                    "op": "column",
+                    "type": "String",
+                    "name": "user_id"
+                  }
+                ],
+                "type": "UInt64",
+                "name": "visitors"
+              }
+            ],
+            "storage_format": 1
+          },
+          {
+            "number": 2,
+            "state": "current",
+            "fingerprint": "a3e853dc10c9a79c54e83e5cddbe4dc96159e25893a0f531d4739bdc8ec1c1e8",
+            "mode": "async",
+            "stream": "page_views",
+            "where": {
+              "op": "notEquals",
+              "type": "Bool",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "String",
+                  "name": "page"
+                },
+                {
+                  "op": "literal",
+                  "type": "String"
+                }
+              ]
+            },
+            "keys": [
+              {
+                "name": "page",
+                "expr": {
+                  "op": "column",
+                  "type": "String",
+                  "name": "page"
+                }
+              },
+              {
+                "name": "day",
+                "expr": {
+                  "op": "toStartOfDay",
+                  "type": "DateTime",
+                  "args": [
+                    {
+                      "op": "column",
+                      "type": "DateTime64(6)",
+                      "name": "event_time"
+                    }
+                  ]
+                }
+              }
+            ],
+            "partition_key_len": 1,
+            "ttl": {
+              "key": "day",
+              "plus": "2 YEAR"
+            },
+            "split": 1,
+            "aggregates": [
+              {
+                "fn": "max",
+                "args": [
+                  {
+                    "op": "column",
+                    "type": "DateTime64(6)",
+                    "name": "event_time"
+                  }
+                ],
+                "type": "DateTime64(6)",
+                "name": "last_view"
+              },
+              {
+                "fn": "sum",
+                "args": [
+                  {
+                    "op": "column",
+                    "type": "UInt32",
+                    "name": "duration_ms"
+                  }
+                ],
+                "type": "UInt64",
+                "name": "total_ms"
+              },
+              {
+                "fn": "count",
+                "type": "UInt64",
+                "name": "views"
+              },
+              {
+                "fn": "uniqExact",
+                "args": [
+                  {
+                    "op": "column",
+                    "type": "String",
+                    "name": "user_id"
+                  }
+                ],
+                "type": "UInt64",
+                "name": "visitors"
+              }
+            ],
+            "storage_format": 1
+          }
+        ]
+      },
+      {
+        "name": "quota_usage",
+        "versions": [
+          {
+            "number": 1,
+            "state": "current",
+            "fingerprint": "5f93bf7a2634e6e6758f37d25a2ea4c4fa0ac575ae62271efc8f51d7a1ffb308",
+            "mode": "sync",
+            "stream": "api_calls",
+            "keys": [
+              {
+                "name": "account_id",
+                "expr": {
+                  "op": "column",
+                  "type": "String",
+                  "name": "account_id"
+                }
+              },
+              {
+                "name": "month",
+                "expr": {
+                  "op": "toStartOfMonth",
+                  "type": "Date",
+                  "args": [
+                    {
+                      "op": "column",
+                      "type": "DateTime64(6)",
+                      "name": "event_time"
+                    }
+                  ]
+                }
+              }
+            ],
+            "partition_key_len": 1,
+            "ttl": {
+              "key": "month",
+              "plus": "13 MONTH"
+            },
+            "split": 1,
+            "aggregates": [
+              {
+                "fn": "count",
+                "type": "UInt64",
+                "name": "calls"
+              },
+              {
+                "fn": "quantile",
+                "params": [
+                  0.9
+                ],
+                "args": [
+                  {
+                    "op": "column",
+                    "type": "UInt32",
+                    "name": "units"
+                  }
+                ],
+                "type": "Nullable(Float64)",
+                "name": "p90_units"
+              },
+              {
+                "fn": "count",
+                "cond": {
+                  "op": "equals",
+                  "type": "Bool",
+                  "args": [
+                    {
+                      "op": "column",
+                      "type": "String",
+                      "name": "endpoint"
+                    },
+                    {
+                      "op": "literal",
+                      "type": "String",
+                      "value": "search"
+                    }
+                  ]
+                },
+                "type": "UInt64",
+                "name": "searches"
+              },
+              {
+                "fn": "sum",
+                "args": [
+                  {
+                    "op": "column",
+                    "type": "UInt32",
+                    "name": "units"
+                  }
+                ],
+                "type": "UInt64",
+                "name": "used_units"
+              }
+            ],
+            "storage_format": 1
+          }
+        ]
+      },
+      {
+        "name": "tag_hourly",
+        "versions": [
+          {
+            "number": 1,
+            "state": "current",
+            "fingerprint": "c1c64f23b6306d15fe7b563578de93f97a6d7d58d767b3addd9a0cb694c96180",
+            "mode": "async",
+            "stream": "page_views",
+            "array_join": {
+              "array": {
+                "op": "column",
+                "type": "Array(String)",
+                "name": "tags"
+              },
+              "alias": "tag"
+            },
+            "keys": [
+              {
+                "name": "tag",
+                "expr": {
+                  "op": "column",
+                  "type": "String",
+                  "name": "tag"
+                }
+              },
+              {
+                "name": "hour",
+                "expr": {
+                  "op": "toStartOfHour",
+                  "type": "DateTime",
+                  "args": [
+                    {
+                      "op": "column",
+                      "type": "DateTime64(6)",
+                      "name": "event_time"
+                    }
+                  ]
+                }
+              }
+            ],
+            "partition_key_len": 1,
+            "ttl": {
+              "key": "hour",
+              "plus": "30 DAY"
+            },
+            "split": 2,
+            "aggregates": [
+              {
+                "fn": "uniq",
+                "args": [
+                  {
+                    "op": "column",
+                    "type": "String",
+                    "name": "user_id"
+                  }
+                ],
+                "type": "UInt64",
+                "name": "users"
+              },
+              {
+                "fn": "count",
+                "type": "UInt64",
+                "name": "views"
+              }
+            ],
+            "storage_format": 1
+          }
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "name": "PageStats",
+        "cardinality": "many",
+        "params": [
+          {
+            "name": "page",
+            "type": "String"
+          },
+          {
+            "name": "from",
+            "type": "Date"
+          },
+          {
+            "name": "to",
+            "type": "Date"
+          }
+        ],
+        "source": {
+          "kind": "view",
+          "name": "page_daily"
+        },
+        "keys": {
+          "partition": [
+            {
+              "column": "page",
+              "values": [
+                {
+                  "op": "param",
+                  "type": "String",
+                  "name": "page"
+                }
+              ]
+            }
+          ],
+          "range": {
+            "column": "day",
+            "lower": {
+              "value": {
+                "op": "param",
+                "type": "Date",
+                "name": "from"
+              },
+              "inclusive": true
+            },
+            "upper": {
+              "value": {
+                "op": "param",
+                "type": "Date",
+                "name": "to"
+              },
+              "inclusive": true
+            }
+          }
+        },
+        "columns": [
+          {
+            "name": "day",
+            "expr": {
+              "op": "column",
+              "type": "DateTime",
+              "name": "day"
+            }
+          },
+          {
+            "name": "views",
+            "expr": {
+              "op": "column",
+              "type": "UInt64",
+              "name": "views"
+            }
+          },
+          {
+            "name": "visitors",
+            "expr": {
+              "op": "column",
+              "type": "UInt64",
+              "name": "visitors"
+            }
+          }
+        ],
+        "order_by": [
+          {
+            "expr": {
+              "op": "column",
+              "type": "DateTime",
+              "name": "day"
+            }
+          },
+          {
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          }
+        ]
+      },
+      {
+        "name": "QuotaUsed",
+        "cardinality": "one",
+        "params": [
+          {
+            "name": "account_id",
+            "type": "String"
+          },
+          {
+            "name": "at",
+            "type": "DateTime64(6)"
+          }
+        ],
+        "source": {
+          "kind": "view",
+          "name": "quota_usage"
+        },
+        "keys": {
+          "partition": [
+            {
+              "column": "account_id",
+              "values": [
+                {
+                  "op": "param",
+                  "type": "String",
+                  "name": "account_id"
+                }
+              ]
+            }
+          ],
+          "sort_prefix": [
+            {
+              "column": "month",
+              "values": [
+                {
+                  "op": "toStartOfMonth",
+                  "type": "Date",
+                  "args": [
+                    {
+                      "op": "param",
+                      "type": "DateTime64(6)",
+                      "name": "at"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "columns": [
+          {
+            "name": "used_units",
+            "expr": {
+              "op": "column",
+              "type": "UInt64",
+              "name": "used_units"
+            }
+          },
+          {
+            "name": "calls",
+            "expr": {
+              "op": "column",
+              "type": "UInt64",
+              "name": "calls"
+            }
+          }
+        ],
+        "order_by": [
+          {
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "account_id"
+            }
+          },
+          {
+            "expr": {
+              "op": "column",
+              "type": "Date",
+              "name": "month"
+            }
+          }
+        ]
+      },
+      {
+        "name": "RecentPageViews",
+        "cardinality": "many",
+        "params": [
+          {
+            "name": "user",
+            "type": "String"
+          },
+          {
+            "name": "since",
+            "type": "DateTime64(6)"
+          },
+          {
+            "name": "n",
+            "type": "UInt32"
+          }
+        ],
+        "source": {
+          "kind": "stream",
+          "name": "page_views"
+        },
+        "keys": {
+          "partition": [
+            {
+              "column": "user_id",
+              "values": [
+                {
+                  "op": "param",
+                  "type": "String",
+                  "name": "user"
+                }
+              ]
+            }
+          ],
+          "range": {
+            "column": "event_time",
+            "lower": {
+              "value": {
+                "op": "param",
+                "type": "DateTime64(6)",
+                "name": "since"
+              },
+              "inclusive": true
+            }
+          }
+        },
+        "filter": {
+          "op": "not",
+          "type": "Bool",
+          "args": [
+            {
+              "op": "isNull",
+              "type": "Bool",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "Nullable(String)",
+                  "name": "referrer"
+                }
+              ]
+            }
+          ]
+        },
+        "columns": [
+          {
+            "name": "event_time",
+            "expr": {
+              "op": "column",
+              "type": "DateTime64(6)",
+              "name": "event_time"
+            }
+          },
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "duration_ms",
+            "expr": {
+              "op": "column",
+              "type": "UInt32",
+              "name": "duration_ms"
+            }
+          }
+        ],
+        "order_by": [
+          {
+            "expr": {
+              "op": "column",
+              "type": "DateTime64(6)",
+              "name": "event_time"
+            },
+            "desc": true
+          },
+          {
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "event_id"
+            }
+          }
+        ],
+        "limit": {
+          "op": "param",
+          "type": "UInt32",
+          "name": "n"
+        }
+      },
+      {
+        "name": "TagTotals",
+        "cardinality": "many",
+        "expose_http": true,
+        "params": [
+          {
+            "name": "tags",
+            "type": "Array(String)"
+          },
+          {
+            "name": "since",
+            "type": "DateTime64(6)"
+          }
+        ],
+        "source": {
+          "kind": "view",
+          "name": "tag_hourly"
+        },
+        "keys": {
+          "partition": [
+            {
+              "column": "tag",
+              "values": [
+                {
+                  "op": "param",
+                  "type": "Array(String)",
+                  "name": "tags"
+                }
+              ]
+            }
+          ],
+          "range": {
+            "column": "hour",
+            "lower": {
+              "value": {
+                "op": "param",
+                "type": "DateTime64(6)",
+                "name": "since"
+              },
+              "inclusive": true
+            }
+          }
+        },
+        "aggregation": {
+          "group_by": [
+            {
+              "name": "tag",
+              "expr": {
+                "op": "column",
+                "type": "String",
+                "name": "tag"
+              }
+            }
+          ],
+          "aggregates": [
+            {
+              "fn": "sum",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "UInt64",
+                  "name": "views"
+                }
+              ],
+              "type": "UInt64"
+            },
+            {
+              "fn": "uniq",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "UInt64",
+                  "name": "users"
+                }
+              ],
+              "type": "UInt64",
+              "merge": true
+            }
+          ]
+        },
+        "columns": [
+          {
+            "name": "tag",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "tag"
+            }
+          },
+          {
+            "name": "total_views",
+            "expr": {
+              "op": "aggregate",
+              "type": "UInt64"
+            }
+          },
+          {
+            "name": "total_users",
+            "expr": {
+              "op": "aggregate",
+              "type": "UInt64",
+              "index": 1
+            }
+          }
+        ],
+        "order_by": [
+          {
+            "expr": {
+              "op": "aggregate",
+              "type": "UInt64"
+            },
+            "desc": true
+          },
+          {
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "tag"
+            }
+          }
+        ],
+        "limit": {
+          "op": "literal",
+          "type": "UInt8",
+          "value": "10"
+        }
+      }
+    ]
+  }
+}
