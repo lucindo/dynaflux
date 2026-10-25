@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Copyright 2026 The Dynaflux Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# shellcheck source=_lib.sh
+source "$(dirname "$0")/_lib.sh"
+
+HOOK_NAME="post-checkout"
+
+# Git post-checkout arguments:
+#   $1 = previous HEAD
+#   $2 = new HEAD
+#   $3 = 1 if this was a branch checkout, 0 if a file checkout
+prev="${1:-}"
+new="${2:-}"
+flag="${3:-0}"
+
+# Only branch checkouts are interesting (file checkouts don't change deps).
+[ "$flag" = "1" ] || exit 0
+
+# Skip no-op checkouts and the initial clone (prev is all zeros).
+if [ -z "$prev" ] || [ -z "$new" ] || [ "$prev" = "$new" ] || [ "$prev" = "$NULL_SHA" ]; then
+    exit 0
+fi
+
+maybe_mod_download "$prev" "$new"

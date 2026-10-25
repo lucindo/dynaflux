@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Copyright 2026 The Dynaflux Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# shellcheck source=_lib.sh
+source "$(dirname "$0")/_lib.sh"
+
+HOOK_NAME="post-merge"
+
+# Git post-merge arguments:
+#   $1 = 1 if the merge was a squash merge, 0 otherwise (unused)
+# Range to inspect: ORIG_HEAD..HEAD (previous tip → new tip).
+maybe_mod_download "ORIG_HEAD" "HEAD"

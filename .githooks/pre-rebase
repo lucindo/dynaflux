@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Copyright 2026 The Dynaflux Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# shellcheck source=_lib.sh
+source "$(dirname "$0")/_lib.sh"
+
+HOOK_NAME="pre-rebase"
+
+# Git pre-rebase arguments:
+#   $1 = upstream (the branch we are rebasing onto)
+#   $2 = branch being rebased (omitted when rebasing the current branch)
+PROTECTED_BRANCH="${PROTECTED_BRANCH:-main}"
+
+branch="${2:-}"
+if [ -z "$branch" ]; then
+    branch="$(git symbolic-ref --quiet --short HEAD || true)"
+fi
+
+if [ "$branch" = "$PROTECTED_BRANCH" ]; then
+    echo
+    echo "Refusing to rebase the protected branch '$PROTECTED_BRANCH'."
+    echo
+    echo "If you really know what you're doing:"
+    echo "  git rebase --no-verify ..."
+    echo
+    exit 1
+fi

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Copyright 2026 The Dynaflux Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# shellcheck source=_lib.sh
+source "$(dirname "$0")/_lib.sh"
+
+HOOK_NAME="pre-push"
+hook_begin
+require_gitleaks
+
+# Git pre-push protocol: one line per ref on stdin
+#   <local_ref> <local_sha> <remote_ref> <remote_sha>
+# Slurp stdin first so the commands below can't consume it.
+# Portable to bash 3.2 on macOS (no `mapfile`).
+REFS=()
+while IFS= read -r line || [ -n "$line" ]; do
+    REFS+=("$line")
+done
+
+# A new branch scans every commit no remote has yet: a secret in ANY unpushed
+# commit counts, and once it reaches a protected branch it cannot be rewritten away.
+run_gitleaks() {
+    local local_sha="$1" remote_sha="$2" range
+    if [[ "$remote_sha" == "$NULL_SHA" ]]; then
+        range="$local_sha --not --remotes"
+    else
+        range="$remote_sha..$local_sha"
+    fi
+    step "gitleaks ($range)" "$GITLEAKS" git --log-opts="$range" --redact --no-banner --log-level warn --verbose
+}
+
+# Guarded because bash 3.2 treats an empty "${REFS[@]}" as unbound under set -u.
+if [ ${#REFS[@]} -gt 0 ]; then
+    for line in "${REFS[@]}"; do
+        # shellcheck disable=SC2086
+        set -- $line
+        local_ref="${1:-}"; local_sha="${2:-}"; remote_ref="${3:-}"; remote_sha="${4:-}"
+        # Skip branch deletions (local_sha is all zeros) and empty lines.
+        [ -z "$local_sha" ] && continue
+        [ "$local_sha" = "$NULL_SHA" ] && continue
+        echo "--- ref: $local_ref -> $remote_ref"
+        run_gitleaks "$local_sha" "$remote_sha"
+    done
+fi
+
+step "verify" make verify
+
+hook_check_changes "$SNAPSHOT" "git push --no-verify"

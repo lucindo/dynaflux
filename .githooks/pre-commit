@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Copyright 2026 The Dynaflux Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# shellcheck source=_lib.sh
+source "$(dirname "$0")/_lib.sh"
+
+HOOK_NAME="pre-commit"
+hook_begin
+require_gitleaks
+
+step "gitleaks (staged)" "$GITLEAKS" git --staged --redact --no-banner --log-level warn --verbose
+
+step "go mod tidy" make gomod
+step "format"      make fmt
+
+hook_check_changes "$SNAPSHOT" "git commit --no-verify"
