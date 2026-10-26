@@ -4,11 +4,12 @@
 package validate
 
 import (
+	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/diag"
+	"github.com/lucindo/dynaflux/internal/goname"
 	"github.com/lucindo/dynaflux/internal/sql"
 )
 
@@ -24,7 +25,10 @@ type goName struct {
 // across the store, and field names within each struct. The diagnostic points at the
 // later definition.
 func (p *project) checkGoNames() {
-	pkg := []goName{{name: "New", thing: "the constructor New"}, {name: "Client", thing: "the Client type"}}
+	var pkg []goName
+	for _, name := range goname.Reserved() {
+		pkg = append(pkg, goName{name: name, thing: name + ", which every generated package declares"})
+	}
 	for _, d := range p.decls {
 		if d.broken() || !d.defines || d.earlier != nil {
 			continue
@@ -32,13 +36,13 @@ func (p *project) checkGoNames() {
 		switch s := d.node.(type) {
 		case *sql.CreateStream:
 			pkg = append(pkg, streamGoNames(d, s)...)
-			reportCollisions(fields(d, "stream", "column", s.Columns,
-				func(c *sql.Column) (string, diag.Pos) { return c.Name.Name, c.Name.Pos }))
+			reportCollisions(eventFields(d, s))
 		case *sql.Query:
 			if isGoName(d.name) {
-				pkg = append(pkg, d.goName(d.name, "query "+d.name),
-					d.goName(d.name+"Params", "the parameter type of query "+d.name),
-					d.goName(d.name+"Row", "the row type of query "+d.name))
+				n := goname.ForQuery(d.name)
+				pkg = append(pkg, d.goName(n.Method, "query "+d.name),
+					d.goName(n.Params, "the parameter type of query "+d.name),
+					d.goName(n.Row, "the row type of query "+d.name))
 			}
 			if q := d.query; q != nil {
 				reportCollisions(fields(d, "query", "parameter", q.params,
@@ -58,20 +62,33 @@ func (d *decl) goName(name, thing string) goName {
 }
 
 func streamGoNames(d *decl, s *sql.CreateStream) []goName {
-	event := goType(s)
-	if event == "" {
-		event = camelCase(singular(d.name))
-	}
-	name := camelCase(d.name)
+	n := goname.ForStream(d.name, goType(s))
 	of := " of stream " + d.name
 	return []goName{
-		d.goName(event, "the event type"+of),
-		d.goName("Append"+event, "the append function"+of),
-		d.goName("Append"+event+"Batch", "the batch append function"+of),
-		d.goName("Read"+name, "the read function"+of),
-		d.goName("Import"+name, "the import function"+of),
-		d.goName(name+"Key", "the key type"+of),
+		d.goName(n.Event, "the event type"+of),
+		d.goName(n.Append, "the append function"+of),
+		d.goName(n.AppendBatch, "the batch append function"+of),
+		d.goName(n.Read, "the read function"+of),
+		d.goName(n.Import, "the import function"+of),
+		d.goName(n.Key, "the key type"+of),
 	}
+}
+
+// eventFields lists the fields of stream d's event type (sql.md §8.3). The implicit
+// columns' come first, since a collision is reported at the later name; a declared column
+// named like an implicit one is DF1302 and gets no field.
+func eventFields(d *decl, s *sql.CreateStream) []goName {
+	var out []goName
+	implicit := map[string]bool{}
+	for _, c := range catalog.ImplicitColumns() {
+		implicit[c.Name] = true
+		out = append(out, goName{
+			name: goname.Field(c.Name), thing: "the field of implicit column " + c.Name + " of stream " + d.name,
+		})
+	}
+	declared := slices.DeleteFunc(slices.Clone(s.Columns), func(c *sql.Column) bool { return implicit[c.Name.Name] })
+	return append(out, fields(d, "stream", "column", declared,
+		func(c *sql.Column) (string, diag.Pos) { return c.Name.Name, c.Name.Pos })...)
 }
 
 // fields lists the fields of a struct that d's statement generates: one per valid name of
@@ -84,7 +101,7 @@ func fields[T any](d *decl, kind, what string, items []T, name func(T) (string, 
 		if catalog.IsName(n) && !seen[n] {
 			seen[n] = true
 			out = append(out, goName{
-				name: camelCase(n), thing: "the field of " + what + " " + n + " of " + kind + " " + d.name, d: d, pos: pos,
+				name: goname.Field(n), thing: "the field of " + what + " " + n + " of " + kind + " " + d.name, d: d, pos: pos,
 			})
 		}
 	}
@@ -110,51 +127,4 @@ func reportCollisions(names []goName) {
 
 func posLine(p diag.Pos) string {
 	return p.File + ":" + strconv.Itoa(p.Line)
-}
-
-// camelCase turns a snake_case name into a Go name with Go's initialisms, as sqlc does:
-// user_id becomes UserID.
-func camelCase(name string) string {
-	var b strings.Builder
-	for part := range strings.SplitSeq(name, "_") {
-		if part == "" {
-			continue
-		}
-		if upper := strings.ToUpper(part); isInitialism(upper) {
-			b.WriteString(upper)
-			continue
-		}
-		b.WriteString(strings.ToUpper(part[:1]) + part[1:])
-	}
-	return b.String()
-}
-
-// isInitialism reports whether s is one of the initialisms Go names keep in capitals:
-// golint's list, plus MS for milliseconds.
-func isInitialism(s string) bool {
-	switch s {
-	case "ACL", "API", "ASCII", "CPU", "CSS", "DNS", "EOF", "GUID", "HTML", "HTTP", "HTTPS", "ID", "IP", "JSON",
-		"LHS", "MS", "QPS", "RAM", "RHS", "RPC", "SLA", "SMTP", "SQL", "SSH", "TCP", "TLS", "TTL", "UDP", "UI",
-		"UID", "UUID", "URI", "URL", "UTF8", "VM", "XML", "XMPP", "XSRF", "XSS":
-		return true
-	}
-	return false
-}
-
-// singular returns a snake_case name with its last word in the singular: page_views
-// becomes page_view, and categories becomes category.
-func singular(name string) string {
-	i := strings.LastIndexByte(name, '_') + 1
-	head, word := name[:i], name[i:]
-	switch {
-	case strings.HasSuffix(word, "ies") && len(word) > len("ies"):
-		word = strings.TrimSuffix(word, "ies") + "y"
-	case strings.HasSuffix(word, "sses"), strings.HasSuffix(word, "shes"), strings.HasSuffix(word, "ches"),
-		strings.HasSuffix(word, "xes"), strings.HasSuffix(word, "zes"):
-		word = strings.TrimSuffix(word, "es")
-	case strings.HasSuffix(word, "ss"), strings.HasSuffix(word, "us"), strings.HasSuffix(word, "is"):
-	case strings.HasSuffix(word, "s"):
-		word = strings.TrimSuffix(word, "s")
-	}
-	return head + word
 }

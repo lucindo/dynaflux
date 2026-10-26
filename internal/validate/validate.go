@@ -20,17 +20,39 @@ import (
 // empty. Load returns the config and the catalog exactly when no diagnostic is an
 // error, and the diagnostics sorted.
 func Load(fsys fs.FS, root string) (*config.Config, *catalog.Catalog, []diag.Diagnostic) {
+	r, ds := Compile(fsys, root)
+	if r == nil {
+		return nil, nil, ds
+	}
+	return r.Config, r.Catalog, ds
+}
+
+// Result is a project that compiled without errors.
+type Result struct {
+	Config  *config.Config
+	Catalog *catalog.Catalog
+	// Lock is dynaflux.lock as dynaflux generate writes it, which numbers the catalog's
+	// views, and LockChanges are the versions whose state differs from the lock read.
+	Lock        *catalog.Lock
+	LockChanges []catalog.LockChange
+}
+
+// Compile is [Load] that also returns the lock that numbers the catalog's views, so
+// dynaflux generate writes the lock that the catalog was compiled with. It returns a
+// result exactly when no diagnostic is an error.
+func Compile(fsys fs.FS, root string) (*Result, []diag.Diagnostic) {
 	cfg, ds := config.Load(fsys)
 	if cfg == nil {
-		return nil, nil, ds
+		return nil, ds
 	}
 	paths, fileDiags := cfg.SQLFiles(fsys, root)
-	ds = append(ds, fileDiags...)
-	if diag.HasErrors(fileDiags) {
+	lock, lockDiags := readLock(fsys)
+	ds = append(append(ds, fileDiags...), lockDiags...)
+	if diag.HasErrors(fileDiags) || diag.HasErrors(lockDiags) {
 		diag.Sort(ds)
-		return nil, nil, ds
+		return nil, ds
 	}
-	p := &project{cfg: cfg, tables: map[string]*decl{}, queries: map[string]*decl{}}
+	p := &project{cfg: cfg, lock: lock, tables: map[string]*decl{}, queries: map[string]*decl{}}
 	for _, path := range paths {
 		p.parse(fsys, path)
 	}
@@ -38,15 +60,21 @@ func Load(fsys fs.FS, root string) (*config.Config, *catalog.Catalog, []diag.Dia
 	ds = append(ds, p.d.list...)
 	diag.Sort(ds)
 	if diag.HasErrors(ds) {
-		return nil, nil, ds
+		return nil, ds
 	}
-	return cfg, cat, ds
+	return &Result{Config: cfg, Catalog: cat, Lock: p.next, LockChanges: p.lockChanges}, ds
 }
 
 // project is the state of one compilation.
 type project struct {
 	cfg *config.Config
-	d   diags
+	// lock is dynaflux.lock as read; next is the lock that numbers views, current and
+	// retained, and lockChanges how it differs from lock.
+	lock        *catalog.Lock
+	next        *catalog.Lock
+	lockChanges []catalog.LockChange
+	views       []catalog.View
+	d           diags
 	// decls are the statements of every file, in path order and then source order.
 	decls []*decl
 	// tables and queries hold the first definition of each name: streams and views share
@@ -89,6 +117,8 @@ func (p *project) compile() *catalog.Catalog {
 			p.compileQuery(d, s)
 		}
 	}
+	p.numberViews()
+	p.checkRetained()
 	p.checkSyncTransactions()
 	p.checkGoNames()
 	p.checkConfigNames()
@@ -100,13 +130,12 @@ func (p *project) catalog() *catalog.Catalog {
 		Store:              p.cfg.Store,
 		Regions:            p.cfg.Regions,
 		PruneWindowSeconds: p.cfg.Runtime.PruneWindowSeconds,
+		Views:              p.views,
 	}
 	for _, d := range p.decls {
 		switch {
 		case d.stream != nil:
 			c.Streams = append(c.Streams, d.stream.stream)
-		case d.view != nil:
-			c.Views = append(c.Views, catalog.View{Name: d.name, Versions: []catalog.ViewVersion{d.view.version}})
 		case d.query != nil:
 			c.Queries = append(c.Queries, d.query.query)
 		}

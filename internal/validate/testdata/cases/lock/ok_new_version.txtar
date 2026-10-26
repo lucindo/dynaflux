@@ -1,0 +1,70 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The lock holds page_daily v1, and the SQL changes the view: the catalog holds v1 retained
+and v2 current, the SQL definition.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views, sum(duration_ms) AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux.lock --
+{
+  "format": 1,
+  "views": {
+    "page_daily": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "1242f0a6792f3ab9edc9e9f6a438396eb1d3ff79c2876c0f18f39bce4ca88ed5",
+        "mode": "async",
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toStartOfDay",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}
+-- want --
+-- want-catalog --
+{"catalog": {"views": [{"name": "page_daily", "versions": [
+  {"number": 1, "state": "retained", "fingerprint": "1242f0a6792f3ab9edc9e9f6a438396eb1d3ff79c2876c0f18f39bce4ca88ed5", "aggregates": [{"name": "views"}]},
+  {"number": 2, "state": "current", "aggregates": [{"name": "total_ms"}, {"name": "views"}]}
+]}]}}

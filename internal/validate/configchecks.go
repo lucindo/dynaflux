@@ -60,8 +60,9 @@ func (p *project) tableNames(kinds ...declKind) []string {
 	return names
 }
 
-// checkResourceNames checks the AWS names derived from each stream and view (DF6110).
-// Views are version 1 until validate reads dynaflux.lock.
+// checkResourceNames checks the AWS names derived from each stream and view (DF6110). A
+// view in the SQL files is checked with the number a new definition would get, which has
+// the most digits, and a view that only dynaflux.lock still holds with its own numbers.
 func (p *project) checkResourceNames() {
 	var c catalog.Catalog
 	for _, d := range p.decls {
@@ -72,8 +73,13 @@ func (p *project) checkResourceNames() {
 		case declStream:
 			c.Streams = append(c.Streams, catalog.Stream{Name: d.name, Archive: p.archive(d.name)})
 		case declView:
-			c.Views = append(c.Views, catalog.View{Name: d.name, Versions: []catalog.ViewVersion{{Number: 1}}})
+			c.Views = append(c.Views, catalog.View{Name: d.name, Versions: []catalog.ViewVersion{{Number: p.nextNumber(d.name)}}})
 		case declQuery:
+		}
+	}
+	for name, vs := range p.lock.Views {
+		if d, ok := p.tables[name]; !ok || d.kind != declView {
+			c.Views = append(c.Views, catalog.View{Name: name, Versions: vs})
 		}
 	}
 	base := len(p.cfg.Prefix) + len(p.cfg.Store)
@@ -81,15 +87,20 @@ func (p *project) checkResourceNames() {
 		if !r.TooLong() {
 			continue
 		}
-		d := p.tables[r.Owner]
+		msg := fmt.Sprintf("the %s name %s has %d characters; the limit is %d", r.Kind, r.Name, len(r.Name), r.Kind.MaxLen())
 		fixed := len(r.Name) - len(r.Owner)
+		d, ok := p.tables[r.Owner]
+		if r.Kind == catalog.ResourceViewTable && (!ok || d.kind != declView) {
+			p.configErrorf(lockPos(), "DF6110", fmt.Sprintf("shorten store or prefix: together they can have at most %d characters",
+				r.Kind.MaxLen()-(len(r.Name)-base)), "%s", msg)
+			continue
+		}
 		hint := fmt.Sprintf("shorten the %s name to at most %d characters", kindNoun(d.kind), r.Kind.MaxLen()-fixed)
 		if strings.HasPrefix(r.Name, p.cfg.Prefix+p.cfg.Store+"-") {
 			hint = fmt.Sprintf("shorten the %s name, store or prefix: together they can have at most %d characters",
 				kindNoun(d.kind), r.Kind.MaxLen()-(fixed-base))
 		}
-		d.st.errorf(d.pos, "DF6110", hint, "the %s name %s has %d characters; the limit is %d",
-			r.Kind, r.Name, len(r.Name), r.Kind.MaxLen())
+		d.st.errorf(d.pos, "DF6110", hint, "%s", msg)
 	}
 }
 

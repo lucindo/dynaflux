@@ -1,13 +1,13 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-A view whose FROM misspells the stream, and a view over a Float64 sum, which gets a
-warning.
+A view whose FROM misspells the stream, and a view whose argMax reads a Nullable column,
+which gets a warning.
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]
 -- dynaflux/page_views.sql --
-CREATE STREAM page_views (user_id String, page String, seconds Float64)
+CREATE STREAM page_views (user_id String, page String, referrer Nullable(String))
 PRIMARY KEY (user_id);
 -- dynaflux/views.sql --
 CREATE MATERIALIZED VIEW page_daily
@@ -16,8 +16,8 @@ AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
 FROM page_view
 GROUP BY page, day;
 
-CREATE MATERIALIZED VIEW page_seconds
+CREATE MATERIALIZED VIEW page_referrer
 ORDER BY (page)
-AS SELECT page, sum(seconds) AS total_seconds
+AS SELECT page, argMax(referrer, event_time) AS last_referrer
 FROM page_views
 GROUP BY page;

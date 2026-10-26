@@ -1,8 +1,8 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-A view's table is analytics-view-<view>-v1 while M1 numbers every view 1, and DynamoDB
-allows 255 characters: a view name of 237 characters fits, one of 238 doesn't.
+Without dynaflux.lock, a view's table is analytics-view-<view>-v1, and DynamoDB allows
+255 characters: a view name of 237 characters fits, one of 238 doesn't.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (user_id String, page String)
 PRIMARY KEY (user_id);

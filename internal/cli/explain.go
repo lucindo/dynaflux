@@ -54,11 +54,11 @@ func (c *cli) explain(w explain.Workload, names []string) int {
 	if len(names) != 1 {
 		return c.usageError("explain", "name one stream, view or query")
 	}
-	cfg, cat, ds, status := c.load()
+	p, ds, status := c.load()
 	if status != exitOK {
 		return c.diagnostics(ds, status)
 	}
-	r, err := explain.Explain(cfg, cat, w, names[0])
+	r, err := explain.Explain(p.cfg, p.cat, w, names[0])
 	if err != nil {
 		c.errorf("dynaflux explain: %v", err)
 		return exitUsage

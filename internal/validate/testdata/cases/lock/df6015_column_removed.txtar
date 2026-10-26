@@ -1,0 +1,61 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The lock retains page_daily, which reads page, and the stream no longer has the column.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String, duration_ms UInt32)
+PRIMARY KEY (user_id);
+-- dynaflux.lock --
+{
+  "format": 1,
+  "views": {
+    "page_daily": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "1242f0a6792f3ab9edc9e9f6a438396eb1d3ff79c2876c0f18f39bce4ca88ed5",
+        "mode": "async",
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toStartOfDay",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}
+-- want --
+dynaflux.lock:1:1: error DF6015
+-- want-text --
+dynaflux.lock:1:1: error DF6015: page_daily@v1, retained in dynaflux.lock, reads column page of stream page_views as String, which the stream no longer has with that type
+  hint: give stream page_views the column page String again, or retire the version: dynaflux retire page_daily@v1

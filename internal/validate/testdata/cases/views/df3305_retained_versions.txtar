@@ -1,0 +1,755 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+An append to wide writes the event, a row and 50 markers for the current wide_sync@v2,
+and a row and 50 markers for the retained wide_sync@v1: 103 items. Without the lock,
+it would be 52.
+-- dynaflux/streams.sql --
+CREATE STREAM wide (
+    k String,
+    c01 String,
+    c02 String,
+    c03 String,
+    c04 String,
+    c05 String,
+    c06 String,
+    c07 String,
+    c08 String,
+    c09 String,
+    c10 String,
+    c11 String,
+    c12 String,
+    c13 String,
+    c14 String,
+    c15 String,
+    c16 String,
+    c17 String,
+    c18 String,
+    c19 String,
+    c20 String,
+    c21 String,
+    c22 String,
+    c23 String,
+    c24 String,
+    c25 String,
+    c26 String,
+    c27 String,
+    c28 String,
+    c29 String,
+    c30 String,
+    c31 String,
+    c32 String,
+    c33 String,
+    c34 String,
+    c35 String,
+    c36 String,
+    c37 String,
+    c38 String,
+    c39 String,
+    c40 String,
+    c41 String,
+    c42 String,
+    c43 String,
+    c44 String,
+    c45 String,
+    c46 String,
+    c47 String,
+    c48 String,
+    c49 String,
+    c50 String
+)
+PRIMARY KEY (k);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW wide_sync
+MODE SYNC
+ORDER BY (k)
+AS SELECT
+    k,
+    count() AS n,
+    uniqExact(c01) AS u01,
+    uniqExact(c02) AS u02,
+    uniqExact(c03) AS u03,
+    uniqExact(c04) AS u04,
+    uniqExact(c05) AS u05,
+    uniqExact(c06) AS u06,
+    uniqExact(c07) AS u07,
+    uniqExact(c08) AS u08,
+    uniqExact(c09) AS u09,
+    uniqExact(c10) AS u10,
+    uniqExact(c11) AS u11,
+    uniqExact(c12) AS u12,
+    uniqExact(c13) AS u13,
+    uniqExact(c14) AS u14,
+    uniqExact(c15) AS u15,
+    uniqExact(c16) AS u16,
+    uniqExact(c17) AS u17,
+    uniqExact(c18) AS u18,
+    uniqExact(c19) AS u19,
+    uniqExact(c20) AS u20,
+    uniqExact(c21) AS u21,
+    uniqExact(c22) AS u22,
+    uniqExact(c23) AS u23,
+    uniqExact(c24) AS u24,
+    uniqExact(c25) AS u25,
+    uniqExact(c26) AS u26,
+    uniqExact(c27) AS u27,
+    uniqExact(c28) AS u28,
+    uniqExact(c29) AS u29,
+    uniqExact(c30) AS u30,
+    uniqExact(c31) AS u31,
+    uniqExact(c32) AS u32,
+    uniqExact(c33) AS u33,
+    uniqExact(c34) AS u34,
+    uniqExact(c35) AS u35,
+    uniqExact(c36) AS u36,
+    uniqExact(c37) AS u37,
+    uniqExact(c38) AS u38,
+    uniqExact(c39) AS u39,
+    uniqExact(c40) AS u40,
+    uniqExact(c41) AS u41,
+    uniqExact(c42) AS u42,
+    uniqExact(c43) AS u43,
+    uniqExact(c44) AS u44,
+    uniqExact(c45) AS u45,
+    uniqExact(c46) AS u46,
+    uniqExact(c47) AS u47,
+    uniqExact(c48) AS u48,
+    uniqExact(c49) AS u49,
+    uniqExact(c50) AS u50
+FROM wide
+GROUP BY k;
+-- dynaflux.lock --
+{
+  "format": 1,
+  "views": {
+    "wide_sync": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "47a008e2cf39860fe4e23af774117925983baee201b384cbf0fe252ff0129d42",
+        "mode": "sync",
+        "stream": "wide",
+        "keys": [
+          {
+            "name": "k",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "k"
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c01"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u01"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c02"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u02"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c03"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u03"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c04"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u04"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c05"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u05"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c06"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u06"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c07"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u07"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c08"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u08"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c09"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u09"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c10"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u10"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c11"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u11"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c12"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u12"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c13"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u13"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c14"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u14"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c15"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u15"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c16"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u16"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c17"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u17"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c18"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u18"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c19"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u19"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c20"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u20"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c21"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u21"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c22"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u22"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c23"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u23"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c24"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u24"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c25"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u25"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c26"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u26"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c27"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u27"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c28"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u28"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c29"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u29"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c30"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u30"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c31"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u31"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c32"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u32"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c33"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u33"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c34"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u34"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c35"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u35"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c36"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u36"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c37"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u37"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c38"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u38"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c39"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u39"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c40"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u40"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c41"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u41"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c42"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u42"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c43"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u43"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c44"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u44"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c45"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u45"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c46"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u46"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c47"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u47"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c48"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u48"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c49"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u49"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "c50"
+              }
+            ],
+            "type": "UInt64",
+            "name": "u50"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}
+-- want --
+dynaflux/streams.sql:1:15: error DF3305
+-- want-text --
+dynaflux/streams.sql:1:15: error DF3305: wide: an append to wide writes 103 items in one transaction; DynamoDB allows 100
+  hint: make some views ASYNC, use fewer uniqExact aggregates in SYNC views, or retire old versions

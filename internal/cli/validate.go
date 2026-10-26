@@ -47,40 +47,51 @@ func (c *cli) validate(args []string) int {
 	if len(args) > 0 {
 		return c.usageError("validate", "unexpected arguments: "+strings.Join(args, " "))
 	}
-	_, _, ds, status := c.load()
+	_, ds, status := c.load()
 	return c.diagnostics(ds, status)
+}
+
+// project is a project that compiled.
+type project struct {
+	dir string // the project root
+	cfg *config.Config
+	cat *catalog.Catalog
+	// lock is dynaflux.lock as generate writes it, and lockChanges how it differs from the
+	// lock read.
+	lock        *catalog.Lock
+	lockChanges []catalog.LockChange
 }
 
 // load finds the project that governs the working directory and compiles it. It returns
 // the diagnostics and the exit status they call for. When there is no project to compile,
 // it reports that itself.
-func (c *cli) load() (*config.Config, *catalog.Catalog, []diag.Diagnostic, int) {
+func (c *cli) load() (*project, []diag.Diagnostic, int) {
 	path, err := config.Find(c.workdir)
 	if errors.Is(err, config.ErrNotFound) {
 		c.errorf("error DF6001: %v\n  hint: run the command inside your project, or create %s at its root",
 			err, config.FileName)
-		return nil, nil, nil, exitUsage
+		return nil, nil, exitUsage
 	}
 	if err != nil {
 		c.errorf("dynaflux: %v", err)
-		return nil, nil, nil, exitUsage
+		return nil, nil, exitUsage
 	}
 	dir := filepath.Dir(path)
 	// The os.Root keeps every read inside the project, links included.
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		c.errorf("dynaflux: %v", err)
-		return nil, nil, nil, exitUsage
+		return nil, nil, exitUsage
 	}
 	defer root.Close()
-	cfg, cat, ds := validate.Load(root.FS(), dir)
+	r, ds := validate.Compile(root.FS(), dir)
 	switch {
 	case slices.ContainsFunc(ds, func(d diag.Diagnostic) bool { return d.Code == codeUnreadable }):
-		return nil, nil, ds, exitUsage
+		return nil, ds, exitUsage
 	case diag.HasErrors(ds):
-		return nil, nil, ds, exitErrors
+		return nil, ds, exitErrors
 	default:
-		return cfg, cat, ds, exitOK
+		return &project{dir: dir, cfg: r.Config, cat: r.Catalog, lock: r.Lock, lockChanges: r.LockChanges}, ds, exitOK
 	}
 }
 

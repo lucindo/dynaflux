@@ -1,0 +1,53 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The SQL files no longer define the view whose version 9 the lock retains, and a prefix
+makes its table name prod-analytics-view-<view>-v9 too long for DynamoDB. The
+diagnostic points at the lock.
+-- dynaflux.yaml --
+store: analytics
+prefix: prod-
+regions: [us-east-1, us-west-2]
+-- dynaflux/a.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id);
+-- dynaflux.lock --
+{
+  "format": 1,
+  "views": {
+    "page_daily_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+      {
+        "number": 9,
+        "state": "current",
+        "fingerprint": "12d3e4ab21c38d3b1bc93a4896116ec96fa494bf3ea5fb4c9281a67b8fe7f8a6",
+        "mode": "async",
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}
+-- want --
+dynaflux.lock:1:1: error DF6110
+-- want-text --
+dynaflux.lock:1:1: error DF6110: the view table name prod-analytics-view-page_daily_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-v9 has 260 characters; the limit is 255
+  hint: shorten store or prefix: together they can have at most 9 characters

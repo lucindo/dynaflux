@@ -10,3 +10,8 @@ import "runtime/debug"
 func ModuleVersion(bi *debug.BuildInfo) string {
 	return moduleVersion(bi)
 }
+
+// HeaderVersion exposes headerVersion, for the same reason.
+func HeaderVersion(bi *debug.BuildInfo) string {
+	return headerVersion(bi)
+}

@@ -1,0 +1,13 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+dynaflux.lock is a directory, which can't be read.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id);
+-- dynaflux.lock/x --
+-- want --
+dynaflux.lock:1:1: error DF6002
+-- want-text --
+dynaflux.lock:1:1: error DF6002: can't read dynaflux.lock: read dynaflux.lock: invalid argument
+  hint: check the path and its permissions

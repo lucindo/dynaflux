@@ -1,0 +1,222 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A clean git merge left versions 1 and 2 current. The SQL defines version 2, so
+version 1 is retained, and nothing is dropped.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views, sum(duration_ms) AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux.lock --
+{
+  "format": 1,
+  "views": {
+    "page_daily": [
+      {
+        "number": 2,
+        "state": "current",
+        "fingerprint": "103c0e4208af6a651079b0de1b90f05f8be5ea65920f057405d86bd20f3fce77",
+        "mode": "async",
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toStartOfDay",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "sum",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "duration_ms"
+              }
+            ],
+            "type": "UInt64",
+            "name": "total_ms"
+          },
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      },
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "1242f0a6792f3ab9edc9e9f6a438396eb1d3ff79c2876c0f18f39bce4ca88ed5",
+        "mode": "async",
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toStartOfDay",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}
+-- want/dynaflux.lock --
+{
+  "format": 1,
+  "views": {
+    "page_daily": [
+      {
+        "number": 2,
+        "state": "current",
+        "fingerprint": "103c0e4208af6a651079b0de1b90f05f8be5ea65920f057405d86bd20f3fce77",
+        "mode": "async",
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toStartOfDay",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "sum",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "duration_ms"
+              }
+            ],
+            "type": "UInt64",
+            "name": "total_ms"
+          },
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      },
+      {
+        "number": 1,
+        "state": "retained",
+        "fingerprint": "1242f0a6792f3ab9edc9e9f6a438396eb1d3ff79c2876c0f18f39bce4ca88ed5",
+        "mode": "async",
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toStartOfDay",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}

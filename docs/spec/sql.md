@@ -12,8 +12,8 @@ page doesn't allow is an error, never a silent fallback.
 
 - Dialect version: 1 (Dynaflux v1).
 - Reference ClickHouse version: 26.7.
-- Related: [config.md](config.md) (`dynaflux.yaml`) and `docs/spec/encoding.md` (key and
-  value encoding, written in M2).
+- Related: [config.md](config.md) (`dynaflux.yaml`) and [encoding.md](encoding.md) (how
+  keys, values and aggregate states are stored).
 
 ## Contents
 
@@ -190,13 +190,15 @@ Rules:
 - Text inside `/* */` is never an annotation.
 
 Generated Go names must be unique in the store (DF1207). The check covers every generated
-name: `New`, `Client`, each event type and its fields, `Append<Event>`,
+name: `New`, `Client`, `Catalog`, each event type and its fields, `Append<Event>`,
 `Append<Event>Batch`, `Read<Stream>`, `Import<Stream>`, `<Stream>Key`, and each query with
 its `<Name>Params` and `<Name>Row` and their fields. An event type is the stream name in
 singular CamelCase, and a field is the column name in CamelCase with Go initialisms
 (`user_id` becomes `UserID`), as in sqlc. Code generation (M2) fixes the exact rules, and
 `validate` uses the same ones. So streams `page_view` and `page_views` collide, and
-`-- go:type` resolves it.
+`-- go:type` resolves it. Every event type also has the fields `EventID`, `EventTime`,
+`IngestTime` and `OriginRegion` for the implicit columns ([§8.3](#83-implicit-columns)), so
+a column such as `event_time_` or `event__id` collides with one of them.
 
 ### 3.3 Keywords
 
@@ -382,8 +384,8 @@ Type rules:
 Payload columns are stored as native DynamoDB types (string, number, boolean and list), so
 they stay readable in the console and in exports. DynamoDB numbers hold 38 significant
 digits, magnitudes from 1e-130 to just under 1e126, and no NaN or infinity, which is where
-the `Decimal` and `Float64` limits come from. Key encoding is specified in
-`docs/spec/encoding.md`.
+the `Decimal` and `Float64` limits come from. [encoding.md](encoding.md) specifies how keys
+and values are stored.
 
 ### 4.2 Nullable, Array and LowCardinality
 
@@ -411,7 +413,8 @@ transaction ([§9.7](#97-mode)).
 |------|-------------|-----|
 | `String` | Valid UTF-8. | DynamoDB strings are UTF-8. |
 | `Float64` | Finite, and 0 or of a magnitude from 1e-130 to 9.9999999999999999999999999999999999999e125: NaN, ±Inf, `1e300` and `1e-200` are rejected. −0.0 is stored, and computed, as 0.0. | DynamoDB numbers and JSON can't carry NaN or infinity, and DynamoDB numbers have that range. |
-| `Decimal(P, S)` | At most P digits. | A stored value always fits its declared type. ClickHouse checks only the storage width. |
+| `Decimal(P, S)` | At most P digits, and no nonzero digit past the S-th after the point. A value with more is rejected, never rounded: into `Decimal(10, 2)`, `1.234` fails, and `1.230` and `1.2` are stored as 1.23 and 1.20. | A stored value always fits its declared type and is exactly the value given. ClickHouse checks only the storage width. |
+| `Date` | A `Date` given as an instant, such as a Go `time.Time`, is the UTC date of that instant: midnight in Tokyo on 2024-05-31 is 2024-05-30. | Every time in Dynaflux is UTC, so this is the day `toDate` gives and the day bucket a view uses. |
 | `Date`, `DateTime64(p)` | Within the ranges in [§4.1](#41-scalar-types), also in `import` mode. | The bucket functions return `DateTime`, which ClickHouse silently wraps outside 1970–2106. The bound keeps every bucket exact. |
 | `DateTime64(p)` | Finer precision is truncated to p fractional digits. | Callers may pass more precision, such as Go's nanoseconds. ClickHouse truncates too. |
 | `Array(T)` | An appended array has at most 1,000 elements. | Bounds the rows one event adds to a view through `ARRAY JOIN` ([§9.5](#95-array-join)). |
@@ -733,6 +736,7 @@ Expressions are pure and deterministic. These failures are *evaluation errors*:
 | A non-finite `Float64` | `a / b` with `b = 0`; `1e308 * 10` |
 | A `Float64` that a view would store outside DynamoDB's range ([§4.3](#43-value-restrictions)), other than a `sum` or `avg` total ([§7.2](#72-function-reference)) | `max(x * 1e200)` |
 | `Decimal` overflow or division by zero | [§5.6](#56-arithmetic) |
+| In a view, a `String` value longer than 4 KB that reaches `min`, `max`, `argMax`, `argMin` or `any` | `argMax(url, event_time)` with a 5,000-byte `url` ([§7.2](#72-function-reference)) |
 | A view key longer than DynamoDB allows | [§4.3](#43-value-restrictions) |
 | An integer or `Decimal` total outside its result type, when read | [§7.2](#72-function-reference) |
 
@@ -845,17 +849,17 @@ hint `uniqExact(x)` or `uniq(x)` (DF5207).
 - A view stores `sum` and `avg` totals with no range limit, not even DynamoDB's 38 digits:
   a limit on the running total would make the result depend on the order of events. Only
   the final total is checked, when read.
-- A `Float64` sum depends on the order of additions, so regions, and live projection versus
-  backfill, can differ in the last bits. Views get a warning per such aggregate (DF3502).
-  Use `Decimal` for money.
+- A `Float64` sum is exact: Dynaflux keeps the exact sum of the values and rounds it to the
+  nearest `Float64` once, when read. So every region, and live projection and backfill,
+  return the same value (Dev 6). `Float64` can't hold most decimal fractions, such as 0.1,
+  exactly, so use `Decimal` for money.
 
 **`min(x)`, `max(x)`** return the smallest or largest non-`NULL` value. Strings compare
 byte by byte. `UUID` isn't accepted (DF5311).
 
-**`avg(x)`** is the sum divided by the count, in `Float64`. For integer and `Decimal` input,
-the exact sum is rounded to the nearest `Float64` first. For `Float64` input, the sum is
-the order-dependent `Float64` sum, and gets the same warning as `sum` (DF3502). `avg`
-returns `NULL` when no rows contribute, and its type is always `Nullable(Float64)` (Dev 4).
+**`avg(x)`** is the sum divided by the count, in `Float64`. The exact sum, as `sum` computes
+it, is rounded to the nearest `Float64` first. `avg` returns `NULL` when no rows contribute,
+and its type is always `Nullable(Float64)` (Dev 4).
 
 **`argMax(arg, val)`, `argMin(arg, val)`**
 
@@ -874,6 +878,13 @@ returns `NULL` when no rows contribute, and its type is always `Nullable(Float64
 **`any(x)`** returns the non-`NULL` `x` with the smallest
 `(event_time, event_id, array_index)`: the earliest event's value (Dev 8). ClickHouse
 returns whichever value it saw first.
+
+In a view, every `String` value that reaches `min`, `max`, `argMax`, `argMin` or `any`, as
+`x`, `arg` or `val`, must be at most 4 KB (4,096 bytes); a longer one is an evaluation
+error ([§5.8](#58-evaluation-errors)). Values on rows that the `-If` condition or the `NULL`
+rule skips aren't checked. The cap applies to every value, not only the one the state
+keeps, so whether a view breaks doesn't depend on the order of events. It bounds the size
+of a view row ([encoding.md §7.8](encoding.md#78-size-bound)).
 
 **`uniq(x)`**
 
@@ -899,16 +910,18 @@ returns whichever value it saw first.
   buckets. The returned value is within relative error `rel_acc` of a value at that rank.
   `quantile` uses `rel_acc` = 0.01.
 - `level` is a number literal with 0 ≤ `level` ≤ 1. `rel_acc` is a float literal with
-  0 < `rel_acc` < 1, as ClickHouse requires (DF5205).
+  0.002 ≤ `rel_acc` < 1 (DF5205). ClickHouse accepts any `rel_acc` above 0, but at 0.001
+  the largest sketch already reaches DynamoDB's 400 KB item limit
+  ([encoding.md §7.5](encoding.md#75-sketches)).
 - `level` may be left out, as in ClickHouse, and then is 0.5: `quantile(x)`,
   `quantileDD(0.01)(x)`, and likewise `quantileMerge(c)` and `quantileDDMerge(0.01)(c)`.
 - `x` is an integer or `Float64`. `Decimal` isn't accepted (DF5203), as with ClickHouse's
   `quantileDD`.
 - There is no interpolation between values.
-- The number of buckets is capped by the storage format. When a sketch reaches the cap, its
-  lowest buckets merge: high quantiles keep their accuracy, the lowest ones lose it.
+- The number of buckets is capped by the storage format. When a sketch reaches the cap, the
+  buckets of the values closest to zero merge: values more than 2^64 times smaller in
+  magnitude than the largest value of their sign share one bucket.
 - Values differ from ClickHouse, whose `quantile` samples randomly (Dev 3).
-- These two may ship after v1.0. M2 decides.
 
 ### 7.3 The -If combinator
 
@@ -988,9 +1001,10 @@ How a view applies each event depends on its aggregates:
 
 Every stored state depends only on the multiset of events applied: not on their order, not
 on how they are spread over rows, `SPLIT` items or regions, and not on the CPU
-architecture. This holds for the sparse form of `uniq`, which stands for exactly the same
-2^12 registers, and for `quantile` buckets merged at the cap. Sketches compute bucket
-indexes and estimates without math library functions whose results vary by architecture.
+architecture. This holds for exact `Float64` sums, for the sparse form of `uniq`, which
+stands for exactly the same 2^12 registers, and for `quantile` buckets merged at the cap.
+Sketches compute bucket indexes and estimates without math library functions whose results
+vary by architecture.
 
 - The *projector*, a Lambda function in each region that keeps views current, reads each
   stream's DynamoDB change stream. The change stream is split into *delivery units* (its
@@ -1087,7 +1101,7 @@ declared.
 
 | Column | Type | Value |
 |--------|------|-------|
-| `event_id` | `String` | 26 characters of Crockford base32. Without `DEDUP BY`: a ULID made by the writer. With `DEDUP BY`: a 128-bit hash of the encoded `PRIMARY KEY` values, `event_time` and dedup values ([§8.5](#85-dedup-by)). |
+| `event_id` | `String` | 26 characters of Crockford base32. Without `DEDUP BY`: a ULID made by the writer. A writer's ULIDs are monotonic: within one millisecond, each adds 1 to the previous one's random part, so one writer's appends keep their order. With `DEDUP BY`: a 128-bit hash of the encoded `PRIMARY KEY` values, `event_time` and dedup values ([§8.5](#85-dedup-by)). |
 | `event_time` | `DateTime64(6)` | When the fact happened: set by the caller, or the writer's clock when the caller leaves it unset. |
 | `ingest_time` | `DateTime64(6)` | When Dynaflux accepted the event, from the writer's clock. |
 | `origin_region` | `String` | The AWS region that accepted the event, such as `us-east-1`. |
@@ -1102,7 +1116,7 @@ differently from reality.
   stream query binds them all ([§10.5](#105-key-binding-over-a-stream)).
 - Key columns must be declared columns, not implicit ones (DF2103), listed once (DF2106),
   non-`Nullable` (DF2104) and of a key type (DF2105, [§4.4](#44-type-groups)).
-- The stream's DynamoDB item has:
+- The stream's DynamoDB item has ([encoding.md §6](encoding.md#6-stream-items)):
   - partition key: the encoded `PRIMARY KEY` values, plus a shard suffix with `SHARDS`
   - sort key: `event_time` in microseconds, then `event_id`
 - `SHARDS n` spreads each partition key value over n DynamoDB partitions, for keys too hot
@@ -1119,8 +1133,15 @@ differently from reality.
   `PRIMARY KEY` (DF2103, DF2104, DF2105, DF2106).
 - The caller must supply `event_time`. An append without it fails with a run-time error.
 - Two appends are duplicates when their `PRIMARY KEY` values, `event_time` and dedup values
-  are equal. The second one is rejected with a duplicate error and changes nothing. A retry
-  must therefore resend the same `event_time`.
+  are equal. The second one is rejected with a duplicate error, which still returns the
+  stored event's token, and changes nothing. A retry must therefore resend the same
+  `event_time`.
+- A retry inside one append call succeeds: when the AWS SDK resends a write whose response
+  was lost, the append finds the event it stored itself and reports success, on every
+  stream. Only an event stored by another append call is a duplicate, even when that call
+  was the caller's earlier attempt.
+- Within one batch append, events that are duplicates of each other are found before
+  anything is written, and each one after the first is rejected with a duplicate error.
 - `event_id` becomes a 128-bit hash of the encoded values that identify a duplicate: the
   `PRIMARY KEY` values, `event_time` in microseconds and the dedup values. It is written as
   26 characters of Crockford base32 (the width of a ULID). So two distinct stored events
@@ -1238,7 +1259,6 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
   ([§1.1](#11-the-strict-subset-rule) defines its rows exactly).
 - Each region keeps its own copy in regional tables, fed by that region's stream. Regions
   converge: once every event has replicated, every region holds the same rows, except for:
-  - `Float64` sums and averages, up to rounding (DF3502)
   - views that read `ingest_time` or `origin_region` of a `DEDUP BY` stream (DF3504)
   - a dedup key appended in two regions with different payloads ([§8.5](#85-dedup-by))
   - a version backfilled from a table scan instead of an archive, whose starting point is
@@ -1283,8 +1303,8 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
 - A `UUID` key must be in `PRIMARY KEY` (DF3106): the sort key orders values, and
   ClickHouse orders UUIDs differently from every other system.
 - Sort-key values are ordered by their type's natural order: numbers by value, strings byte
-  by byte, times chronologically, `false` before `true`. `docs/spec/encoding.md` defines the
-  bytes.
+  by byte, times chronologically, `false` before `true`. [encoding.md](encoding.md#3-keys)
+  defines the bytes.
 
 ### 9.5 ARRAY JOIN
 
@@ -1315,8 +1335,8 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
   - Expired rows are removed before `WHERE`, aggregation, `ORDER BY` and `LIMIT`.
   - A row is expired when the reader's UTC clock is at or past its expiry.
   - The expiry stored for DynamoDB is rounded up, with a margin that
-    `docs/spec/encoding.md` sets, so DynamoDB never deletes a row that a reader with a
-    slightly slow clock still counts as live.
+    [encoding.md](encoding.md#54-_ttl) sets, so DynamoDB never deletes a row that a reader
+    with a slightly slow clock still counts as live.
 - An event that arrives for a row that has already expired, by the clock of the process
   applying it, is skipped. It doesn't bring the row back.
 - The TTL depends only on the key, so a row and its `uniqExact` markers expire together.
@@ -1341,7 +1361,6 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
     that isn't retired, and one marker per `uniqExact` or `uniqExactIf` aggregate in those
     versions. DynamoDB allows at most 100 items (DF3305). The versions are the current
     definitions plus the retained versions in `dynaflux.lock` ([§9.9](#99-view-versions)).
-    M1 doesn't read the lock, so it counts only the current definitions.
   - a `SYNC` view whose `GROUP BY` doesn't include every `PRIMARY KEY` column of the stream
     gets a warning (DF3501): many partition keys share its rows, which makes them hot.
 - How `SYNC` appends behave:
@@ -1387,15 +1406,31 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
   - an explicit `PRIMARY KEY` equal to the whole `ORDER BY`
   - additive stream changes ([§8.9](#89-changing-a-stream))
 - `dynaflux.lock`, a generated file committed next to `dynaflux.yaml`, numbers the versions
-  ([ADR 0002](../decisions/0002-view-version-lock-file.md)):
+  ([ADR 0002](../decisions/0002-view-version-lock-file.md),
+  [ADR 0007](../decisions/0007-lock-file-format.md)):
   - A fingerprint the lock doesn't hold gets one more than the view's highest number.
     Numbers are never reused.
   - A fingerprint of a retained version, an older version that is still deployed, makes
     that version current again, with no new number and no backfill.
   - A fingerprint of a retired version gets a new number.
-- `dynaflux generate` reads and writes the lock (M2). In M1, `validate` and `explain` don't
-  read it, and every view is version 1. A lock that can't be parsed is DF6013
-  ([config.md](config.md#resource-names)).
+  - When a git merge leaves two `current` versions of one view, both become `retained`
+    first, and the definition in the SQL files then picks the current one by the rules
+    above. Nothing is dropped.
+- The lock is JSON indented by two spaces, with a `format` field (1). Views are sorted by
+  name, and each view's versions run newest first, so branches that change different views
+  merge cleanly. Each entry is the version's catalog definition, with its `number`,
+  `state`, `fingerprint` and `mode`.
+- `validate`, `explain` and `generate` read the lock, so they agree on version numbers;
+  only `generate` writes it. Without a lock file, every view is version 1.
+- Reading is strict. A lock that isn't valid JSON in this format, has an unknown field or
+  `format`, repeats a key within one object, has a key that isn't in lower case, repeats a
+  number within a view, holds an entry whose definition doesn't match its fingerprint, or
+  holds a `retired` entry is DF6013 ([config.md](config.md#codes)). It stops `validate`
+  and `generate`: Dynaflux never falls back to version 1. Until `dynaflux retire` arrives
+  (M5), no lock holds a `retired` entry.
+- A retained version keeps running, so its stream must still exist and have every column
+  it reads, with the same type, and no column named like its `ARRAY JOIN` alias; and no
+  stream may take its view's name (DF6015 in [config.md](config.md#codes)).
 - `MODE` can change in place.
 
 ## 10. Named queries
@@ -1565,7 +1600,7 @@ computes the same result in any event order, or so the value fits DynamoDB.
 | Dev 3 | `quantile` and `quantileDD` use a deterministic log-bucket sketch; `quantile` has relative accuracy 0.01. No interpolation. Integer and `Float64` input only. | `quantile` samples randomly, so results vary between runs, interpolates, and keeps `Decimal` and date types. `quantileDD` uses different buckets. | Every region must reach the same state in any event order. |
 | Dev 4 | `avg`, `quantile` and `quantileDD`, in their plain, `-If` and `-Merge` forms, return `NULL` when no rows (or no non-empty states) contribute, and their type is `Nullable(Float64)`. | `nan`, type `Float64`. | NaN can't be stored in DynamoDB or sent as JSON. |
 | Dev 5 | `Float64` is finite. An expression that produces NaN or infinity, such as `x / 0`, is an evaluation error, and so is a value a view would store outside DynamoDB's range. −0.0 becomes 0.0. | Returns `inf` or `nan`, and stores any double. Keeps −0.0 apart from 0.0 in `GROUP BY` and `uniqExact`. | DynamoDB numbers are finite and limited in range; folding −0.0 makes `min`, `max` and `uniq` independent of order. |
-| Dev 6 | Integer `sum` and `avg` accumulate exactly. A total outside the result type is a run-time error when read. | Wraps silently, even in `avg`. | A wrapped total is wrong; an exact total is right in every region, and its error is deterministic. |
+| Dev 6 | `sum` and `avg` accumulate exactly. An integer total outside the result type is a run-time error when read. A `Float64` total is rounded once, when read. | Integer sums wrap silently, even in `avg`. `Float64` sums round after each addition, so their last bits depend on the order of the rows. | A wrapped total is wrong. An exact total is the same in every region and in any event order, and its error is deterministic. |
 | Dev 7 | `Decimal` precision is at most 38. Results beyond 38 digits fail. Declared P is enforced on append. A float literal compared with a `Decimal` stands for its exact decimal text. | Precision up to 76; 128-bit `*` and `sum` wrap silently; only the storage width is checked. Comparisons with float literals go through `Float64`, so `d = 0.3` is also true for `d = 0.30000000000000001`. In `IN` lists, and in chains of three or more `=` joined by `OR`, which ClickHouse rewrites to `IN`, the float is first truncated to the `Decimal`'s scale, so `price IN (0.29, 1.1)` is false when `price` is 0.29. | DynamoDB numbers hold 38 digits, and money needs exact comparisons. |
 | Dev 8 | `argMax` and `argMin` break ties by `(event_time, event_id, array_index)`. `any` returns the earliest event's value. In queries over view rows, their ties are broken by the row key ([§7.4](#74-read-time-aggregation-and--merge)). | The value seen first, which depends on arrival order. | Regions see events in different orders. ClickHouse could return the same value, so a ported query still agrees with it. |
 | Dev 9 | A view column is both a finalized value and a state: plain aggregates read the value, `-Merge` merges the state. View rows are always fully merged. | A target column holds either finalized values or `-State` states, and rows with the same key stay apart until a background merge. | Dynaflux manages the table and merges on write. |
@@ -1586,6 +1621,8 @@ deviations, because Dynaflux never gives them another meaning:
 - `concat` over non-strings and Unicode case mapping ([§6](#6-scalar-functions))
 - `uniq` and `uniqExact` with several arguments, and aggregates over arrays
   ([§7](#7-aggregate-functions))
+- `String` values over 4 KB in a view's `min`, `max`, `argMax`, `argMin` and `any`, and
+  `quantileDD` with a `rel_acc` below 0.002 ([§7.2](#72-function-reference))
 
 ## 12. Worked examples
 
@@ -1893,8 +1930,8 @@ Codes:
   [config.md](config.md#codes)
 
 From `DF1xxx` to `DF5xxx`, the codes `DFn5xx` are warnings and all others are errors. Codes
-are stable: a code keeps its meaning and is never reused. Every code has at least one golden
-test.
+are stable: a code keeps its meaning and is never reused. A code that no check reports any
+more stays in its table as `retired`. Every other code has at least one golden test.
 
 ### A.2 Codes
 
@@ -1990,7 +2027,7 @@ The article before a placeholder fits the word that replaces it: `an avg column`
 | DF3305 | error | an append to <stream> writes <n> items in one transaction; DynamoDB allows 100 | make some views ASYNC, use fewer uniqExact aggregates in SYNC views, or retire old versions |
 | DF3306 | error | SPLIT must be between 2 and 16 | |
 | DF3501 | warning | MODE SYNC on a view whose rows many partition keys of <stream> share; concurrent appends will conflict | add the stream's PRIMARY KEY columns to GROUP BY, or use MODE ASYNC |
-| DF3502 | warning | <aggregate> over Float64 converges only up to rounding; regions may differ in the last bits | use Decimal(P, S) for exact totals |
+| DF3502 | retired | Was: <aggregate> over Float64 converges only up to rounding. Retired in M2, when `sum` and `avg` over `Float64` became exact ([§7.2](#72-function-reference)). | |
 | DF3503 | warning | <aggregate> skips rows where <arg> is NULL, so NULL never replaces a value | use a sentinel: <fn>(coalesce(<arg>, <default>), <val>). A UUID <arg> gets no hint. |
 | DF3504 | warning | view reads <column> from DEDUP stream <stream>; a duplicate accepted in two regions has a different <column> in each | group by event_time instead of ingest_time; avoid origin_region |
 

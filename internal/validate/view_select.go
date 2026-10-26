@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/goname"
 	"github.com/lucindo/dynaflux/internal/sql"
 )
 
@@ -42,8 +43,8 @@ func (v *viewCompiler) arrayItem(aj *sql.ArrayJoin, item *sql.ArrayItem) *catalo
 	alias := item.Alias
 	if alias == nil {
 		element := "element"
-		if ref, ok := item.X.(*sql.ColumnRef); ok && singular(ref.Name) != ref.Name {
-			element = singular(ref.Name)
+		if ref, ok := item.X.(*sql.ColumnRef); ok && goname.Singular(ref.Name) != ref.Name {
+			element = goname.Singular(ref.Name)
 		}
 		v.st.errorf(aj.Pos, "DF3201", "ARRAY JOIN "+v.st.text(item.X)+" AS "+element, "ARRAY JOIN needs an alias")
 		return nil
@@ -192,9 +193,8 @@ func (v *viewCompiler) aggregateItem(out *output) (catalog.Aggregate, bool) {
 	return catalog.Aggregate{}, false
 }
 
-// aggregate checks an aggregate column (sql.md §7). It warns about a Float64 total, which
-// regions round differently (DF3502), and about argMax or argMin of a Nullable argument,
-// which never records a NULL (DF3503).
+// aggregate checks an aggregate column (sql.md §7). It warns about argMax or argMin of a
+// Nullable argument, which never records a NULL (DF3503).
 func (v *viewCompiler) aggregate(c *checker, x *sql.Call, fn aggregateFunc) (catalog.Aggregate, bool) {
 	if fn.state || fn.merge {
 		v.st.errorf(x.Pos, "DF3105", "write the plain aggregate; views store aggregate states themselves",
@@ -204,11 +204,6 @@ func (v *viewCompiler) aggregate(c *checker, x *sql.Call, fn aggregateFunc) (cat
 	agg, ok := c.aggregateCall(x, fn)
 	if !ok {
 		return agg, false
-	}
-	total := agg.Fn == catalog.AggSum || agg.Fn == catalog.AggAvg
-	if total && isFloat(scalarOf(agg.Args[0].Type)) {
-		v.st.warnf(x.Pos, "DF3502", "use Decimal(P, S) for exact totals",
-			"%s over Float64 converges only up to rounding; regions may differ in the last bits", x.Name.Name)
 	}
 	latest := agg.Fn == catalog.AggArgMax || agg.Fn == catalog.AggArgMin
 	if latest && agg.Args[0].Type.Nullable {

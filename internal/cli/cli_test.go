@@ -22,13 +22,14 @@ Usage:
   dynaflux <command> [arguments]
 
 Commands:
-  validate  check dynaflux.yaml and the SQL definitions
-  explain   show the layout and cost of a stream, view or query
-  version   show the versions of the CLI, the runtime library and generated code
-  help      show help for a command
+  validate        check dynaflux.yaml and the SQL definitions
+  explain         show the layout and cost of a stream, view or query
+  generate (gen)  write the Go client package and update dynaflux.lock
+  version         show the versions of the CLI, the runtime library and generated code
+  help            show help for a command
 
 Planned:
-  init, generate (gen)                                         milestone M2
+  init                                                         milestone M2
   diff, dev, status, backfill, retire, import, inspect, query  milestone M5
 
 Run 'dynaflux help <command>' for more about a command.
@@ -36,8 +37,8 @@ Run 'dynaflux help <command>' for more about a command.
 	// The diagnostics of testdata/errors.txtar, with the texts of sql.md appendix A.
 	errorsDiagnostics = `dynaflux/views.sql:4:6: error DF3001: page_daily: page_view is not a stream
   hint: did you mean page_views?
-dynaflux/views.sql:9:17: warning DF3502: page_seconds: sum over Float64 converges only up to rounding; regions may differ in the last bits
-  hint: use Decimal(P, S) for exact totals
+dynaflux/views.sql:9:17: warning DF3503: page_referrer: argMax skips rows where referrer is NULL, so NULL never replaces a value
+  hint: use a sentinel: argMax(coalesce(referrer, ''), event_time)
 `
 )
 
@@ -52,8 +53,8 @@ func run(dir string, args ...string) result {
 	return result{status, stdout.String(), stderr.String()}
 }
 
-// writeProject writes the files of testdata/<name>.txtar into a new temporary directory
-// and returns the directory.
+// writeProject writes the files of testdata/<name>.txtar, except its want/ sections, into
+// a new temporary directory and returns the directory.
 func writeProject(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name+".txtar"))
@@ -62,6 +63,9 @@ func writeProject(t *testing.T, name string) string {
 	}
 	dir := t.TempDir()
 	for _, f := range txtar.Parse(data).Files {
+		if strings.HasPrefix(f.Name, wantPrefix) {
+			continue
+		}
 		path := filepath.Join(dir, filepath.FromSlash(f.Name))
 		if mkErr := os.MkdirAll(filepath.Dir(path), 0o755); mkErr != nil {
 			t.Fatal(mkErr)
@@ -113,8 +117,15 @@ error, and 2 for usage and I/O problems.
 			"help on an unknown command", []string{"help", "explian"},
 			result{2, "", "dynaflux: unknown command \"explian\"; did you mean explain?\nRun 'dynaflux help' for usage.\n"},
 		},
-		{"planned command", []string{"generate"}, result{2, "", "dynaflux generate: not available yet (milestone M2)\n"}},
-		{"planned alias", []string{"gen"}, result{2, "", "dynaflux gen: not available yet (milestone M2)\n"}},
+		{"planned command", []string{"init"}, result{2, "", "dynaflux init: not available yet (milestone M2)\n"}},
+		{
+			"alias with an argument", []string{"gen", "x"},
+			result{2, "", "dynaflux generate: unexpected arguments: x\nRun 'dynaflux help generate' for usage.\n"},
+		},
+		{
+			"unknown command close to an alias", []string{"gne"},
+			result{2, "", "dynaflux: unknown command \"gne\"; did you mean gen?\nRun 'dynaflux help' for usage.\n"},
+		},
 		{"planned operations command", []string{"backfill", "page_daily"}, result{2, "", "dynaflux backfill: not available yet (milestone M5)\n"}},
 		{
 			"unknown flag", []string{"validate", "--strict"},
@@ -238,7 +249,7 @@ func TestExplain(t *testing.T) {
 			"horizon as a Go duration", "warning", []string{"page_views", "--horizon", "36h"},
 			result{0, "stream page_views\n  assumptions  --rate 1000  --event-kb 1  --horizon 36h0m0s\n", ""},
 		},
-		{"project with errors", "errors", []string{"page_seconds"}, result{1, "", errorsDiagnostics}},
+		{"project with errors", "errors", []string{"page_referrer"}, result{1, "", errorsDiagnostics}},
 		{
 			"unknown name", "pages", []string{"page_view"},
 			result{2, "", "dynaflux explain: no stream, view or query named page_view; did you mean page_views?\n"},

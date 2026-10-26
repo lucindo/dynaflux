@@ -1,0 +1,24 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+quantileDD takes a rel_acc from 0.002 up to but not including 1 (sql.md §7.2): 0.001 and 1
+are rejected, and 0.002 is accepted.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_latency
+ORDER BY (page)
+AS SELECT
+    page,
+    quantileDD(0.001)(duration_ms)  AS fine_ms,
+    quantileDD(1, 0.9)(duration_ms) AS whole_ms,
+    quantileDD(0.002)(duration_ms)  AS floor_ms
+FROM page_views
+GROUP BY page;
+-- want --
+dynaflux/views.sql:5:5: error DF5205
+dynaflux/views.sql:6:5: error DF5205
+-- want-text --
+dynaflux/views.sql:5:5: error DF5205: page_latency: invalid parameters for quantileDD: rel_acc 0.001 must be at least 0.002 and less than 1
+dynaflux/views.sql:6:5: error DF5205: page_latency: invalid parameters for quantileDD: rel_acc 1 must be at least 0.002 and less than 1

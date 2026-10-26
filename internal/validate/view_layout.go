@@ -234,27 +234,42 @@ func (v *viewCompiler) groupsByPartition(primaryKey []string) bool {
 }
 
 // checkSyncTransactions checks that an append fits one DynamoDB transaction (DF3305): the
-// event, a row of each SYNC view of its stream, and a marker per uniqExact aggregate of
-// those views. M1 doesn't read dynaflux.lock, so it counts only the current definitions.
+// event, a row of each SYNC view version of its stream, current or retained, and a marker
+// per uniqExact aggregate of those versions.
 func (p *project) checkSyncTransactions() {
-	items := map[*streamInfo]int{}
+	items := map[string]int{} // by stream
 	for _, d := range p.decls {
-		v := d.view
-		if v == nil || v.version.Mode != catalog.ModeSync || v.stream == nil {
-			continue
+		if v := d.view; v != nil && v.stream != nil {
+			items[v.version.Stream] += transactItems(&v.version)
 		}
-		items[v.stream]++
-		for _, a := range v.version.Aggregates {
-			if a.Fn == catalog.AggUniqExact {
-				items[v.stream]++
+	}
+	for _, v := range p.views {
+		for i := range v.Versions {
+			if vv := &v.Versions[i]; vv.State == catalog.StateRetained {
+				items[vv.Stream] += transactItems(vv)
 			}
 		}
 	}
 	for _, d := range p.decls {
-		if n := 1 + items[d.stream]; d.stream != nil && n > maxTransactItems {
+		if n := 1 + items[d.name]; d.stream != nil && n > maxTransactItems {
 			d.st.errorf(d.pos, "DF3305",
 				"make some views ASYNC, use fewer uniqExact aggregates in SYNC views, or retire old versions",
 				"an append to %s writes %d items in one transaction; DynamoDB allows %d", d.name, n, maxTransactItems)
 		}
 	}
+}
+
+// transactItems returns the items an append writes for a view version in its transaction:
+// none for an ASYNC version, and otherwise its row and a marker per uniqExact aggregate.
+func transactItems(vv *catalog.ViewVersion) int {
+	if vv.Mode != catalog.ModeSync {
+		return 0
+	}
+	n := 1
+	for _, a := range vv.Aggregates {
+		if a.Fn == catalog.AggUniqExact {
+			n++
+		}
+	}
+	return n
 }

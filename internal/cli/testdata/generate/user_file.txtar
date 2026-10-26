@@ -1,0 +1,21 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+go.out holds client.go without the generated-code line: generate refuses to
+overwrite it, and writes nothing.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+-- internal/flux/client.go --
+// Package flux is mine.
+package flux

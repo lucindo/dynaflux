@@ -1,0 +1,36 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The generated package declares the variable Catalog, which the event type of stream
+catalogs collides with. Every event type has the fields EventID, EventTime, IngestTime and
+OriginRegion for the implicit columns, and the columns event__id, event_time_,
+ingest_time_ and origin__region map to them (sql.md §3.2).
+-- dynaflux/streams.sql --
+CREATE STREAM catalogs (name String)
+PRIMARY KEY (name);
+
+CREATE STREAM visits (
+    user_id        String,
+    event__id      String,
+    event_time_    DateTime64(3),
+    ingest_time_   DateTime64(6),
+    origin__region String
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/streams.sql:1:15: error DF1207
+dynaflux/streams.sql:6:5: error DF1207
+dynaflux/streams.sql:7:5: error DF1207
+dynaflux/streams.sql:8:5: error DF1207
+dynaflux/streams.sql:9:5: error DF1207
+-- want-text --
+dynaflux/streams.sql:1:15: error DF1207: catalogs: generated Go name Catalog for the event type of stream catalogs collides with Catalog, which every generated package declares
+  hint: rename one of them, or set -- go:type on the stream
+dynaflux/streams.sql:6:5: error DF1207: visits: generated Go name EventID for the field of column event__id of stream visits collides with the field of implicit column event_id of stream visits
+  hint: rename one of them, or set -- go:type on the stream
+dynaflux/streams.sql:7:5: error DF1207: visits: generated Go name EventTime for the field of column event_time_ of stream visits collides with the field of implicit column event_time of stream visits
+  hint: rename one of them, or set -- go:type on the stream
+dynaflux/streams.sql:8:5: error DF1207: visits: generated Go name IngestTime for the field of column ingest_time_ of stream visits collides with the field of implicit column ingest_time of stream visits
+  hint: rename one of them, or set -- go:type on the stream
+dynaflux/streams.sql:9:5: error DF1207: visits: generated Go name OriginRegion for the field of column origin__region of stream visits collides with the field of implicit column origin_region of stream visits
+  hint: rename one of them, or set -- go:type on the stream

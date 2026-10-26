@@ -13,7 +13,7 @@ import (
 // viewInfo is a compiled view.
 type viewInfo struct {
 	decl *decl
-	// version is version 1: M1 doesn't read dynaflux.lock.
+	// version is the definition; numberViews gives it its number and state.
 	version catalog.ViewVersion
 	// stream is the stream in FROM; nil when FROM names no compiled stream.
 	stream *streamInfo
@@ -59,7 +59,7 @@ func (p *project) compileView(d *decl, s *sql.CreateView) {
 		}
 	}
 	vv := &v.info.version
-	vv.Number, vv.State, vv.StorageFormat = 1, catalog.StateCurrent, catalog.StorageFormatVersion
+	vv.StorageFormat = catalog.StorageFormatVersion
 	vv.Stream = s.Select.From.Name
 	v.nameOutputs()
 	vv.ArrayJoin = v.arrayJoins()

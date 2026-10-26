@@ -1,0 +1,40 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+sum and avg over Float64 get no warning: their totals are exact (sql.md §7.2). sum keeps
+Float64, and avg is Nullable(Float64).
+-- dynaflux/ratings.sql --
+CREATE STREAM ratings (user_id String, item String, score Float64)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW item_scores
+ORDER BY (item)
+AS SELECT
+    item,
+    sum(score) AS total_score,
+    avg(score) AS mean_score,
+    max(score) AS best_score,
+    count()    AS votes
+FROM ratings
+GROUP BY item;
+-- want --
+-- want-catalog --
+{
+  "catalog": {
+    "views": [
+      {
+        "name": "item_scores",
+        "versions": [
+          {
+            "aggregates": [
+              {"name": "best_score", "fn": "max", "type": "Float64"},
+              {"name": "mean_score", "fn": "avg", "type": "Nullable(Float64)"},
+              {"name": "total_score", "fn": "sum", "type": "Float64"},
+              {"name": "votes", "fn": "count", "type": "UInt64"}
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -26,6 +26,7 @@ const (
 // command is a subcommand of dynaflux.
 type command struct {
 	name    string
+	alias   string // another name that runs the command, or ""
 	args    string // what follows the name in the usage line
 	summary string // its line in the command list
 	doc     string // what dynaflux help <name> prints after the usage line
@@ -35,7 +36,7 @@ type command struct {
 }
 
 func commands() []command {
-	return []command{validateCommand(), explainCommand(), versionCommand(), helpCommand()}
+	return []command{validateCommand(), explainCommand(), generateCommand(), versionCommand(), helpCommand()}
 }
 
 // planned maps the commands of later milestones to their milestone, so that the CLI's
@@ -43,13 +44,13 @@ func commands() []command {
 func planned() map[string]string {
 	const m2, m5 = "M2", "M5"
 	return map[string]string{
-		"init": m2, "generate": m2, "gen": m2,
+		"init": m2,
 		"diff": m5, "dev": m5, "status": m5, "backfill": m5, "retire": m5, "import": m5, "inspect": m5, "query": m5,
 	}
 }
 
 const plannedHelp = `Planned:
-  init, generate (gen)                                         milestone M2
+  init                                                         milestone M2
   diff, dev, status, backfill, retire, import, inspect, query  milestone M5
 `
 
@@ -105,7 +106,7 @@ func (c *cli) run(args []string) int {
 // find returns the command called name, or reports why there is none.
 func (c *cli) find(name string) (command, bool) {
 	cmds := commands()
-	if i := slices.IndexFunc(cmds, func(cmd command) bool { return cmd.name == name }); i >= 0 {
+	if i := slices.IndexFunc(cmds, func(cmd command) bool { return name == cmd.name || name == cmd.alias }); i >= 0 {
 		return cmds[i], true
 	}
 	if m, ok := planned()[name]; ok {
@@ -115,6 +116,9 @@ func (c *cli) find(name string) (command, bool) {
 	names := slices.Collect(maps.Keys(planned()))
 	for _, cmd := range cmds {
 		names = append(names, cmd.name)
+		if cmd.alias != "" {
+			names = append(names, cmd.alias)
+		}
 	}
 	msg := fmt.Sprintf("dynaflux: unknown command %q", name)
 	if s, ok := diag.Suggest(name, names); ok {
@@ -165,7 +169,11 @@ Usage:
 Commands:
 `)
 	for _, cmd := range commands() {
-		fmt.Fprintf(b, "  %-9s %s\n", cmd.name, cmd.summary)
+		name := cmd.name
+		if cmd.alias != "" {
+			name += " (" + cmd.alias + ")"
+		}
+		fmt.Fprintf(b, "  %-15s %s\n", name, cmd.summary)
 	}
 	b.WriteString("\n" + plannedHelp + "\nRun 'dynaflux help <command>' for more about a command.\n")
 }

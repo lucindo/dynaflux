@@ -13,7 +13,8 @@ Every command that loads a project (`dynaflux validate`, `dynaflux explain`, and
 `dynaflux generate`) applies all the rules below, including those for keys that only later
 milestones use.
 
-The SQL dialect is specified in [sql.md](sql.md).
+The SQL dialect is specified in [sql.md](sql.md), and how Dynaflux stores data in
+[encoding.md](encoding.md).
 
 ## Minimal example
 
@@ -211,7 +212,8 @@ backfill functions all run the same binary.
 
 Each view row keeps a high-water mark per delivery unit
 ([sql.md](sql.md#75-state-classes)). `prune_window_seconds` sets how long the projector
-keeps a unit's mark after the unit's progress has passed it. Dropping a mark sooner would
+keeps a unit's mark after the unit's progress has passed it
+([encoding.md §7.6](encoding.md#76-high-water-marks)). Dropping a mark sooner would
 let an invocation that is still running apply some events twice, so the window must
 outlast every running invocation: its timeout, plus 60 seconds for writes that land late
 and for clock differences between hosts.
@@ -364,18 +366,17 @@ pattern is `{prefix}{store}-{kind}-{name}`, all lowercase. Because the names are
 deterministic, the CLI finds every resource from the project's files alone.
 
 `validate` computes each name below for the current SQL and config, and checks it against
-the AWS rules (`DF6110`, `DF6111`). View version numbers come from `dynaflux.lock` (see
-[ADR 0002](../decisions/0002-view-version-lock-file.md)), which `dynaflux generate` reads
-and writes from M2. In M1, `validate` doesn't read the lock, and checks every view as
-version 1. Once the lock is read:
+the AWS rules (`DF6110`, `DF6111`). View version numbers come from `dynaflux.lock`
+([sql.md §9.9](sql.md#99-view-versions)), which `validate` reads from M2 and only
+`dynaflux generate` writes:
 
-- The table name of every version that the lock doesn't mark retired is checked.
+- The table name of every version in the catalog, current and retained, is checked.
 - For each view in the SQL files, the number the view would get if its definition is new is
   checked too: one more than the highest number in the lock for that view, or 1 when the
   lock doesn't list the view. That number has the most digits, so it gives the longest name.
 - Without a lock file, every view is version 1.
-- A lock that can't be parsed, for example one with merge-conflict markers, is `DF6013`.
-  Dynaflux never falls back to version 1 for it.
+- A lock that `validate` can't use, for example one with merge-conflict markers, is
+  `DF6013`. Dynaflux never falls back to version 1 for it.
 
 The examples use `prefix: prod-`, `store: analytics`, the stream `page_views` and version 2
 of the view `page_daily`. In the **Budget** column, `P` is the length of `prefix` plus the
@@ -445,7 +446,9 @@ dynaflux.yaml:15:14: error DF6010: runtime.memory_mb is 64; it must be between 1
     nothing (`DF6407`, `DF6503`), they point at the key.
   - For a missing key, they point at the mapping that should hold it, or at the entry's key
     when the entry is null. An empty file points at 1:1.
-  - `DF6013` points at the parse error in `dynaflux.lock`.
+  - `DF6013` points at the parse error in `dynaflux.lock`, and at line 1, column 1 for its
+    other problems. `DF6015` points at line 1, column 1 of `dynaflux.lock`, and so does
+    `DF6110` for a view that only the lock still holds.
 - Rules about a derived name point at the stream or view name in its SQL file when the
   resource belongs to one that the SQL defines, and at `store` otherwise.
 - `DF6403` points at `defaults.log_retention`. `DF6504` points at
@@ -461,11 +464,12 @@ dynaflux.yaml:15:14: error DF6010: runtime.memory_mb is 64; it must be between 1
 2. Check every key, and the names built from `prefix` and `store` alone: `DF6111`, and
    `DF6110` for the meta table, the store-wide functions, the state machine and the Glue
    database. It reports every diagnostic of this step, then stops if any is an error.
-3. Expand the `sql` patterns (`DF6204`, `DF6205`). It stops on an error. In M1,
-   `validate` doesn't read `dynaflux.lock`.
+3. Expand the `sql` patterns (`DF6204`, `DF6205`), and read `dynaflux.lock` when it
+   exists (`DF6002`, `DF6013`). It stops on an error.
 4. Read and check the SQL files ([sql.md](sql.md)), then run the checks that need both:
-   `DF6110` for names that include a stream or view, `DF6403`, `DF6407`, `DF6503` and
-   `DF6504`. These use every name the SQL defines, even in a statement with errors.
+   `DF6110` for names that include a stream or view, `DF6403`, `DF6407`, `DF6503`,
+   `DF6504`, and `DF6015`, which also needs the lock. These use every name the SQL
+   defines, even in a statement with errors.
 
 | Exit status | Meaning |
 |-------------|---------|
@@ -492,8 +496,9 @@ Severity column.
 | DF6010 | error | An integer is out of range. | The range and where it comes from, such as the Lambda limit. |
 | DF6011 | error | A list that needs at least one entry is empty. | Add at least one entry, or, for a key with a default, remove the key. |
 | DF6012 | error | A list has the same entry twice. | Remove the repeat. |
-| DF6013 | error | `dynaflux.lock` can't be parsed: it isn't valid JSON in the lock format, for example because it has merge-conflict markers. The message carries the parser's error. Reported from M2; M1 doesn't read the lock. | If it has merge conflicts, keep the lock from the branch that merged first, then run `dynaflux generate`. Don't delete the file: that renumbers every view. |
+| DF6013 | error | `dynaflux.lock` can't be used: it isn't valid JSON in the lock format (for example, it has merge-conflict markers), it has an unknown field or `format`, a key that appears twice in one object (as "accept both" in a merge tool can leave) or isn't in lower case, a view repeats a version number, an entry's definition doesn't match its fingerprint (a hand edit), or an entry is `retired`, which only `dynaflux retire` (M5) writes. The message gives the reason. Reported from M2. | If it has merge conflicts, keep the lock from the branch that merged first, then run `dynaflux generate`. Undo hand edits. Don't delete the file: that renumbers every view. |
 | DF6014 | error | The file uses an anchor (`&a`), an alias (`*a`), a merge key (`<<`) or an explicit tag (`!!str`, `!x`). | Write each value out in full. Quote a string instead of tagging it. |
+| DF6015 | error | A view version that `dynaflux.lock` retains can't be maintained: the stream it reads is gone, the stream no longer has a column it reads with the type it reads, the stream now has a column named like the version's `ARRAY JOIN` alias (the column would win), or a stream now has the view's name. The message names the version and the reason. | Restore the stream or the column, or rename the stream or the new column; or retire the version with `dynaflux retire` (M5). |
 | DF6101 | error | `store` isn't a valid store name. | Use lowercase letters, digits and `-`; start with a letter; don't end with `-`. For example `analytics`. |
 | DF6102 | error | `prefix` isn't a valid prefix. | Use lowercase letters, digits and `-`; start with a letter; end with `-`. For example `prod-`. |
 | DF6103 | error | A region isn't an AWS region code. | Use a code such as `us-east-1`. |

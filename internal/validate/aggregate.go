@@ -15,6 +15,9 @@ const (
 	placeAggregate = "another aggregate"
 	// defaultLevel is the level of quantile and quantileDD when SQL leaves it out.
 	defaultLevel = 0.5
+	// minRelAcc is the smallest rel_acc of quantileDD: at 0.001 the largest sketch reaches
+	// DynamoDB's 400 KB item limit (encoding.md §7.5).
+	minRelAcc = 0.002
 )
 
 // aggregateCall checks an aggregate call (sql.md §7.1 to §7.3): its parameters, its
@@ -129,8 +132,9 @@ func (c *checker) aggregateParams(x *sql.Call, fn catalog.AggFunc) ([]float64, b
 		return nil, c.paramsError(x, "it takes rel_acc and an optional level")
 	case fn == catalog.AggQuantileDD:
 		relAcc, relOK := c.paramValue(x, x.Params[0], "rel_acc")
-		if relOK && (relAcc <= 0 || relAcc >= 1) {
-			relOK = c.paramsError(x, "rel_acc "+c.st.text(x.Params[0])+" is not between 0 and 1, exclusive")
+		if relOK && (relAcc < minRelAcc || relAcc >= 1) {
+			relOK = c.paramsError(x, "rel_acc "+c.st.text(x.Params[0])+
+				" must be at least "+formatFloat(minRelAcc)+" and less than 1")
 		}
 		level, levelOK := c.level(x, x.Params[1:])
 		return []float64{relAcc, level}, relOK && levelOK

@@ -1,0 +1,62 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The lock retains tag_counts@v1, whose ARRAY JOIN element is tag, and the stream now has a
+column tag. A stream column wins over an alias, so v1 would read the column instead.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String, tags Array(String) DEFAULT [], tag Nullable(String))
+PRIMARY KEY (user_id);
+CREATE MATERIALIZED VIEW tag_counts
+ORDER BY (t)
+AS SELECT t, count() AS n
+FROM page_views
+ARRAY JOIN tags AS t
+GROUP BY t;
+-- dynaflux.lock --
+{
+  "format": 1,
+  "views": {
+    "tag_counts": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "7f1830f1a3c87b2d5f92e04c15cba1cc5aaeba980c9d277ea8e63e937c8b3bdc",
+        "mode": "async",
+        "stream": "page_views",
+        "array_join": {
+          "array": {
+            "op": "column",
+            "type": "Array(String)",
+            "name": "tags"
+          },
+          "alias": "tag"
+        },
+        "keys": [
+          {
+            "name": "tag",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "tag"
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "n"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}
+-- want --
+dynaflux.lock:1:1: error DF6015
+-- want-text --
+dynaflux.lock:1:1: error DF6015: tag_counts@v1, retained in dynaflux.lock, names its ARRAY JOIN element tag, which is now a column of stream page_views
+  hint: rename column tag of stream page_views, or retire the version: dynaflux retire tag_counts@v1

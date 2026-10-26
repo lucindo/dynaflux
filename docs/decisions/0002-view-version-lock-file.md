@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 - Status: Accepted
 - Date: 2026-10-25
+- Amended by [ADR 0007](0007-lock-file-format.md): lock format details
 
 ## Context
 

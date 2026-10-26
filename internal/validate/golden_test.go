@@ -31,10 +31,12 @@ const (
 	casesDir      = "testdata/cases"
 	minimalConfig = "store: analytics\nregions: [us-east-1, us-west-2]\n"
 	projectRoot   = "/project"
+	// retired is the severity column of a code that no check reports any more.
+	retired = "retired"
 )
 
 var (
-	codeRow = regexp.MustCompile(`(?m)^\| (DF\d{4}) \| (error|warning) \|`)
+	codeRow = regexp.MustCompile(`(?m)^\| (DF\d{4}) \| (error|warning|retired) \|`)
 	wantRow = regexp.MustCompile(`^\S+:\d+:\d+: (error|warning) (DF\d{4})$`)
 )
 
@@ -42,8 +44,6 @@ var (
 func deferredCodes() map[string]string {
 	return map[string]string{
 		"DF6001": "Load gets the project root; finding dynaflux.yaml in a parent directory is the CLI's job",
-		"DF6002": "internal/config's tests cover it; the read errors a project can hit need a real file system",
-		"DF6013": "validate reads dynaflux.lock from M2 on",
 		"DF6205": "internal/config's tests cover it; a txtar archive can't hold a symbolic link",
 	}
 }
@@ -92,7 +92,8 @@ func TestGolden(t *testing.T) {
 }
 
 // TestEveryCodeHasCase checks the want sections against the code tables of the specs: each
-// line names a code with its severity, and every code has a case or a reason in deferredCodes.
+// line names a code that isn't retired, with its severity, and every code that isn't retired
+// has a case or a reason in deferredCodes.
 func TestEveryCodeHasCase(t *testing.T) {
 	t.Parallel()
 	spec := specCodes(t)
@@ -109,6 +110,8 @@ func TestEveryCodeHasCase(t *testing.T) {
 				t.Errorf("%s: want line %q isn't path:line:col: severity CODE", c.name, line)
 			case spec[m[2]] == "":
 				t.Errorf("%s: %s isn't in the specs", c.name, m[2])
+			case spec[m[2]] == retired:
+				t.Errorf("%s: %s is retired", c.name, m[2])
 			case spec[m[2]] != m[1]:
 				t.Errorf("%s: %s has severity %s in the specs, not %s", c.name, m[2], spec[m[2]], m[1])
 			default:
@@ -118,14 +121,14 @@ func TestEveryCodeHasCase(t *testing.T) {
 	}
 	deferred := deferredCodes()
 	for _, code := range slices.Sorted(maps.Keys(spec)) {
-		if !covered[code] && deferred[code] == "" {
+		if !covered[code] && deferred[code] == "" && spec[code] != retired {
 			t.Errorf("%s has no case", code)
 		}
 	}
 	for _, code := range slices.Sorted(maps.Keys(deferred)) {
 		switch {
-		case spec[code] == "":
-			t.Errorf("deferred code %s isn't in the specs", code)
+		case spec[code] == "", spec[code] == retired:
+			t.Errorf("deferred code %s isn't a current code in the specs", code)
 		case covered[code]:
 			t.Errorf("deferred code %s has a case; remove it from deferredCodes", code)
 		}
@@ -351,7 +354,8 @@ func isZero(v any) bool {
 	return false
 }
 
-// specCodes returns the codes in the code tables of the specs, with their severities.
+// specCodes returns the codes in the code tables of the specs with their severity column:
+// error, warning or retired.
 func specCodes(t *testing.T) map[string]string {
 	t.Helper()
 	codes := map[string]string{}
