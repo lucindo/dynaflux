@@ -35,8 +35,7 @@ const (
 	shardLifeSeconds  = 4 * 3600 // a change-stream shard is replaced after at most 4 hours
 	minPollSeconds    = 0.25     // Lambda polls each shard 4 times a second
 	maxBatchSize      = 10000    // the event source mapping's largest BatchSize
-	hwmEntryKB        = 0.029    // costs.py's figure for a ~29-byte mark; rows are sized in KB of 1,024 bytes, so a mark counts 29.7 B
-	hllKB             = 3        // dense HyperLogLog: 2^12 registers of 6 bits
+	hllKB             = 2.5      // dense HyperLogLog: 2^12 registers of 5 bits, 2,561 bytes
 	conflictFactor    = 1.1      // conditional writes that lose a race and retry
 	txnFactor         = 2        // a transactional write costs twice the units
 	invocationSeconds = 0.03     // projector duration: this, plus perEventSeconds per event
@@ -77,6 +76,8 @@ type Store struct {
 	// HWMWindow is how long a view row keeps a delivery unit's high-water mark after that
 	// unit's last write to it: the prune window, runtime.prune_window_seconds.
 	HWMWindow time.Duration
+	// HWMEntryKB is the size of one high-water mark in a row, in KB of 1,024 bytes.
+	HWMEntryKB float64
 	// MemoryMB and Arch configure the projector function.
 	MemoryMB int
 	Arch     Arch
@@ -198,6 +199,7 @@ type flow struct {
 	units       float64 // delivery units
 	local       float64 // the share of appends a region accepts, assuming an even spread
 	hwmWindow   float64 // seconds
+	hwmEntryKB  float64
 	shards      float64 // SHARDS
 }
 
@@ -225,7 +227,7 @@ func Estimate(store Store, s Stream) (StreamCost, error) {
 
 	f := flow{
 		events: events, batch: c.Batch, invocations: c.Invocations, perUnit: perUnit, units: units,
-		local: 1 / regions, hwmWindow: store.HWMWindow.Seconds(), shards: float64(s.Shards),
+		local: 1 / regions, hwmWindow: store.HWMWindow.Seconds(), hwmEntryKB: store.HWMEntryKB, shards: float64(s.Shards),
 	}
 	c.Views = make([]ViewCost, len(s.Views))
 	for i, v := range s.Views {
@@ -316,7 +318,7 @@ func (f flow) view(v View) ViewCost {
 		// An entity's events come through one delivery unit, or one per SHARDS shard.
 		c.HWMEntries = max(1, min(f.shards, f.units)/split)
 	}
-	c.RowKB = v.BaseKB + float64(v.Uniqs)*hllKB + hwmEntryKB*c.HWMEntries
+	c.RowKB = v.BaseKB + float64(v.Uniqs)*hllKB + f.hwmEntryKB*c.HWMEntries
 	c.WriteUnits = int(math.Ceil(c.RowKB))
 	c.ReadUnits = int(math.Ceil(c.RowKB / readUnitKB))
 	write, read := float64(c.WriteUnits), float64(c.ReadUnits)
@@ -357,6 +359,8 @@ func check(store Store, s Stream) error {
 		return errors.New("no regions")
 	case store.HWMWindow <= 0:
 		return errors.New("the high-water-mark window must be positive")
+	case !finite(store.HWMEntryKB) || store.HWMEntryKB <= 0:
+		return fmt.Errorf("the high-water mark size must be a positive, finite number of KB, not %v", store.HWMEntryKB)
 	case store.BatchSize < 1 || store.BatchSize > maxBatchSize:
 		return fmt.Errorf("the batch size must be from 1 to %d, not %d", maxBatchSize, store.BatchSize)
 	case store.MemoryMB < 1:

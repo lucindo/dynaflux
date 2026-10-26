@@ -90,8 +90,9 @@ func (c *Client) AppendNote(ctx context.Context, ev Note, opts ...dynaflux.Appen
 }
 
 // AppendNoteBatch appends evs to stream notes, each event as its own write.
-// The Token covers every event it stored. When an event fails, the error is a
-// *dynaflux.BatchError whose Errs line up with evs, nil for each stored event.
+// The Token covers every event stored, by this call or before it. When an event
+// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
+// each event this call stored.
 func (c *Client) AppendNoteBatch(ctx context.Context, evs []Note, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvents(ctx, c.store, Catalog, "notes", evs, (*Note).fields, opts...)
 }

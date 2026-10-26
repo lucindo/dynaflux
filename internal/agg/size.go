@@ -30,12 +30,9 @@ const (
 	// eventIDLen is the length of every event_id: a ULID or a DEDUP BY hash in base32.
 	eventIDLen = 26
 	// floatDigits is the most significant digits in the shortest text of a float64.
-	floatDigits = 17
-	uuidLen     = len("01234567-89ab-cdef-0123-456789abcdef")
-	dateLen     = len("2006-01-02")
-	// timeLimit is 2106-02-07 06:28:15 UTC in microseconds, the first instant past every
-	// temporal type.
-	timeLimit       = math.MaxUint32 * microsPerSecond
+	floatDigits     = 17
+	uuidLen         = len("01234567-89ab-cdef-0123-456789abcdef")
+	dateLen         = len("2006-01-02")
 	microsPerSecond = 1_000_000
 	microsPerMilli  = 1_000
 )
@@ -90,6 +87,11 @@ func maxDyadicLen() int {
 	return e + 1 + (maxSumBits-minSumExp+byteBits-1)/byteBits
 }
 
+// MaxValueSize returns the largest attribute value of a value of t that may reach a view's
+// state, as [store.ItemSize] counts it (encoding.md §5.1): a String counts at
+// [MaxStringBytes].
+func MaxValueSize(t catalog.Type) int { return size(worstValue(t)) }
+
 // worstValue returns the largest attribute value of a value of t that may reach a view's
 // state (encoding.md §5.1).
 func worstValue(t catalog.Type) store.Value {
@@ -107,11 +109,11 @@ func worstValue(t catalog.Type) store.Value {
 	case k == catalog.KindDate:
 		return text(dateLen)
 	case k == catalog.KindDateTime:
-		return nines(digits((timeLimit - 1) / microsPerSecond))
+		return nines(digits((catalog.TimeLimitMicros - 1) / microsPerSecond))
 	case k == catalog.KindDateTime64 && t.Precision == catalog.DateTime64Millis:
-		return nines(digits((timeLimit - 1) / microsPerMilli))
+		return nines(digits((catalog.TimeLimitMicros - 1) / microsPerMilli))
 	case k == catalog.KindDateTime64:
-		return nines(digits(timeLimit - 1))
+		return nines(digits(catalog.TimeLimitMicros - 1))
 	}
 	return nines(len(strconv.FormatUint(maxMagnitude(t.Kind), decimalBase)))
 }

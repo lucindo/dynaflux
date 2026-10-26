@@ -59,10 +59,10 @@ func (n *node) float(r float64) (Value, error) {
 
 // toFloat returns the Float64 nearest to a number that isn't a Decimal.
 func toFloat(v Value) float64 {
-	if v.kind == kindInt {
+	if v.kind == KindInt {
 		return float64(v.i)
 	}
-	if v.kind == kindUint {
+	if v.kind == KindUint {
 		return float64(v.n)
 	}
 	return v.AsFloat()
@@ -109,14 +109,14 @@ func evalNegate(n *node, v Value) (Value, error) {
 
 // twos returns an integer's two's complement bits.
 func twos(v Value) uint64 {
-	if v.kind == kindInt {
+	if v.kind == KindInt {
 		return uint64(v.i) //nolint:gosec // reinterpreting the bits is the point
 	}
 	return v.n
 }
 
 func magnitude(v Value) (uint64, bool) {
-	if v.kind == kindInt && v.i < 0 {
+	if v.kind == KindInt && v.i < 0 {
 		return -twos(v), true
 	}
 	return twos(v), false
@@ -183,10 +183,10 @@ type decimal struct {
 
 // asDecimal returns a Decimal or integer v of type t; an integer has scale 0.
 func asDecimal(v Value, t catalog.Type) decimal {
-	if v.kind == kindDecimal {
+	if v.kind == KindDecimal {
 		return decimal{v.d, t.Scale}
 	}
-	if v.kind == kindInt {
+	if v.kind == KindInt {
 		return decimal{big.NewInt(v.i), 0}
 	}
 	return decimal{new(big.Int).SetUint64(v.n), 0}
@@ -195,12 +195,12 @@ func asDecimal(v Value, t catalog.Type) decimal {
 // at returns a new unscaled value of d at scale, which is at least d's: no Decimal op
 // lowers a scale (sql.md §4.5, §5.6).
 func (d decimal) at(scale int) *big.Int {
-	return new(big.Int).Mul(d.unscaled, pow10(scale-d.scale))
+	return new(big.Int).Mul(d.unscaled, Pow10(scale-d.scale))
 }
 
-// pow10 returns 10^n for n up to 2 × 38, the most decimalDiv needs. The result is shared:
-// callers must not modify it.
-func pow10(n int) *big.Int { return pow10s[n] }
+// Pow10 returns 10^n for n from 0 to 2 × 38, the most decimalDiv needs. The result is
+// shared: callers must not modify it.
+func Pow10(n int) *big.Int { return pow10s[n] }
 
 //nolint:gochecknoglobals // a read-only table that saves an Exp on every Decimal op
 var pow10s = func() []*big.Int {
@@ -275,7 +275,7 @@ func decimalRange(precision int) (*big.Int, *big.Int) {
 	case precision <= class18:
 		return big.NewInt(math.MinInt64), big.NewInt(math.MaxInt64)
 	}
-	hi := new(big.Int).Sub(pow10(catalog.MaxDecimalPrecision), big.NewInt(1))
+	hi := new(big.Int).Sub(Pow10(catalog.MaxDecimalPrecision), big.NewInt(1))
 	return new(big.Int).Neg(hi), hi
 }
 

@@ -9,6 +9,9 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/lucindo/dynaflux/internal/meta"
+	"github.com/lucindo/dynaflux/internal/projector"
 )
 
 // check runs the properties checked at quiescence: P0 on every change stream, P1 and P3
@@ -40,13 +43,45 @@ func (r *run) expect(rg *region) *Oracle {
 	for _, s := range rg.order {
 		for _, u := range s.units {
 			for _, rec := range u.recs {
-				if rec.Op == Insert {
-					r.sys.Expect(o, u.id, cloneRecord(rec))
+				if rec.Op != projector.Insert {
+					continue
+				}
+				if err := r.sys.Expect(o, u.id, cloneRecord(rec)); err != nil {
+					r.violatef("P1: %s: oracle: %v", rg.name, err)
 				}
 			}
 		}
 	}
 	return o
+}
+
+// checkBreakers checks P3 after a Handle of b returned without error, so after it
+// evaluated every record: a live view that a record fails is broken by then. At
+// quiescence, a redelivery that opened the breaker later would hide one the Handle lost.
+// A view that isn't live yet leaves the record to its backfill.
+func (r *run) checkBreakers(rg *region, b projector.Batch) {
+	o := newOracle()
+	for _, rec := range b.Records {
+		if rec.Op != projector.Insert {
+			continue
+		}
+		if err := r.sys.Expect(o, b.Unit, cloneRecord(rec)); err != nil {
+			r.violatef("P3: %s: oracle: %v", rg.name, err)
+		}
+	}
+	if len(o.poison) == 0 {
+		return
+	}
+	states, err := meta.New(rg.mem, r.meta).ViewStates(context.Background())
+	if err != nil {
+		r.violatef("P3: %s: read the view states: %v", rg.name, err)
+		return
+	}
+	for _, view := range slices.Sorted(maps.Keys(o.poison)) {
+		if states[view].State == meta.Live {
+			r.violatef("P3: %s: a Handle of %s returned, but view %s, which a record fails, isn't broken", rg.name, b.Unit, view)
+		}
+	}
 }
 
 // checkStream checks P0: every applied append appears exactly once in the region's

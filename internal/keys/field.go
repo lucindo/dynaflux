@@ -49,8 +49,6 @@ const (
 	microsPerMilli  = 1_000
 	microsPerSecond = 1_000_000
 	microsPerDay    = 86_400 * microsPerSecond
-	// timeLimit is 2106-02-07 06:28:15 UTC, the first instant past the range.
-	timeLimit = math.MaxUint32 * microsPerSecond
 )
 
 // streamSKLen is the length of every stream sort key: event_time, '#', event_id.
@@ -119,6 +117,12 @@ func SplitKey(lsk string, i int) string {
 	return lsk + string(sep) + suffix(splitLetter, i)
 }
 
+// SplitPrefix returns the sort fields of the SPLIT logical row that an item with sort key
+// sk belongs to: the lsk that [SplitKey] took.
+func SplitPrefix(sk string) string {
+	return strings.TrimSuffix(sk[:max(len(sk)-1-suffixDigits, 0)], string(sep))
+}
+
 func suffix(letter byte, i int) string {
 	return string(fmt.Appendf([]byte{letter}, "%0*d", suffixDigits, i))
 }
@@ -129,8 +133,7 @@ func StreamSK(eventTime int64, eventID string) (string, error) {
 	if _, ok := decodeBase32(eventID, eventHashLen); !ok {
 		return "", fmt.Errorf("event_id %q is not 26 characters of base32", eventID)
 	}
-	t := catalog.Type{Kind: catalog.KindDateTime64, Precision: catalog.DateTime64Micros}
-	b, err := appendTime(make([]byte, 0, streamSKLen), t, eventTime)
+	b, err := appendTime(make([]byte, 0, streamSKLen), catalog.EventTimeType(), eventTime)
 	if err != nil {
 		return "", fmt.Errorf("event_time: %w", err)
 	}
@@ -149,7 +152,7 @@ func ParseStreamSK(sk string) (int64, string, error) {
 		return 0, "", fmt.Errorf("stream sort key %q: event_time is not RFC 3339 with 6 fractional digits", sk)
 	}
 	us := tm.UnixMicro()
-	if us < 0 || us >= timeLimit {
+	if us < 0 || us >= catalog.TimeLimitMicros {
 		return 0, "", fmt.Errorf("stream sort key %q: event_time is outside 1970 to 2106", sk)
 	}
 	id := sk[timeLen+1:]
@@ -307,7 +310,7 @@ func appendTime(dst []byte, t catalog.Type, us int64) ([]byte, error) {
 
 // checkTime checks that us is in the range of sql.md §4.1 and a whole unit of the type.
 func checkTime(t catalog.Type, us int64) error {
-	if us < 0 || us >= timeLimit {
+	if us < 0 || us >= catalog.TimeLimitMicros {
 		return fmt.Errorf("%s value %d (microseconds) is outside 1970 to 2106", t, us)
 	}
 	if us%timeUnit(t) != 0 {

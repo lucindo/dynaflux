@@ -34,6 +34,32 @@ func TestOnlyNullIsNull(t *testing.T) {
 	}
 }
 
+func TestKindNamesTheConstructor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		v    expr.Value
+		want expr.Kind
+	}{
+		{"zero Value", expr.Value{}, expr.KindNull},
+		{"Null", expr.Null(), expr.KindNull},
+		{"Bool", expr.Bool(false), expr.KindBool},
+		{"Int", expr.Int(0), expr.KindInt},
+		{"Uint", expr.Uint(0), expr.KindUint},
+		{"Float", expr.Float(0), expr.KindFloat},
+		{"Decimal", expr.Decimal(new(big.Int)), expr.KindDecimal},
+		{"String", expr.String(""), expr.KindString},
+		{"UUID", expr.UUID([16]byte{}), expr.KindUUID},
+		{"Micros", expr.Micros(0), expr.KindMicros},
+		{"Array", expr.Array(nil), expr.KindArray},
+	}
+	for _, c := range cases {
+		if got := c.v.Kind(); got != c.want {
+			t.Errorf("%s: Kind = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
 func TestAccessorsReturnConstructorInput(t *testing.T) {
 	t.Parallel()
 	id := [16]byte{0x61, 0xf0, 0xc4, 0x04, 0x5c, 0xb3, 0x11, 0xe7, 0x90, 0x7b, 0xa6, 0x00, 0x6a, 0xd3, 0xdb, 0xa0}

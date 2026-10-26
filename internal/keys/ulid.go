@@ -9,13 +9,15 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
+	"github.com/lucindo/dynaflux/internal/catalog"
 )
 
 const (
 	ulidTimeBytes   = 6  // 48-bit Unix milliseconds
 	ulidRandomBytes = 10 // 80 random bits
 	timeBitsInWord  = 16 // the bits of a uint64 below a ULID's 48-bit time
-	ulidTimeLimit   = timeLimit / microsPerMilli
+	ulidTimeLimit   = catalog.TimeLimitMicros / microsPerMilli
 )
 
 // ULIDs makes the event_ids of one writer's appends to streams without DEDUP BY: ULIDs,

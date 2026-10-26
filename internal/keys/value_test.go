@@ -304,13 +304,35 @@ func TestPadSeq(t *testing.T) {
 // _ttl is the expiry rounded up to a whole second, plus 3600 (encoding.md §5.4).
 func TestTTL(t *testing.T) {
 	t.Parallel()
-	for us, want := range map[int64]string{
-		1_717_163_100_250_000: "1717166701",
-		1_717_163_100_000_000: "1717166700",
-		1_717_163_100_000_001: "1717166701",
+	tests := []struct {
+		us, expiry int64
+		ttl        string
+	}{
+		{1_717_163_100_250_000, 1_717_163_101_000_000, "1717166701"},
+		{1_717_163_100_000_000, 1_717_163_100_000_000, "1717166700"},
+		{1_717_163_100_000_001, 1_717_163_101_000_000, "1717166701"},
+	}
+	for _, tt := range tests {
+		got := keys.TTL(tt.us)
+		if !reflect.DeepEqual(got, nval(tt.ttl)) {
+			t.Errorf("TTL(%d) = %+v, want N %s", tt.us, got, tt.ttl)
+		}
+		if expiry, err := keys.TTLExpiry(got); err != nil || expiry != tt.expiry {
+			t.Errorf("TTLExpiry(%s) = %d, %v; want %d", tt.ttl, expiry, err, tt.expiry)
+		}
+	}
+}
+
+func TestTTLExpiryRejectsWhatTTLDoesNotWrite(t *testing.T) {
+	t.Parallel()
+	for _, a := range []store.Value{
+		{Type: store.S, Str: "1717166700"},
+		nval("1717166700.5"),
+		nval("3599"),
+		nval("9223372036854775807"),
 	} {
-		if got := keys.TTL(us); !reflect.DeepEqual(got, nval(want)) {
-			t.Errorf("TTL(%d) = %+v, want N %s", us, got, want)
+		if got, err := keys.TTLExpiry(a); err == nil {
+			t.Errorf("TTLExpiry(%+v) = %d, want an error", a, got)
 		}
 	}
 }

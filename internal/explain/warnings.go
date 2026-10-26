@@ -166,7 +166,7 @@ func (est *estimate) splitRowKB(i, n int) float64 {
 	if !m.Shared {
 		marks = max(1, marks)
 	}
-	return m.BaseKB + float64(m.Uniqs)*hllKB + hwmEntryKB*marks
+	return m.BaseKB + float64(m.Uniqs)*hllKB + est.store.HWMEntryKB*marks
 }
 
 // splitDollars returns the monthly cost of views[i] in a region under SPLIT n. A row's

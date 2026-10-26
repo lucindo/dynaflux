@@ -1,0 +1,38 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A row item must fit DynamoDB's 400 KB beside the 32 KB reserved for high-water marks, at
+its largest (encoding.md §7.8). A quantileDD at rel_acc 0.002 can reach 200,721 bytes, so
+two of them don't fit; one with a quantile and String values at their 4 KB cap does.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_latency
+ORDER BY (page)
+AS SELECT
+    page,
+    quantileDD(0.002, 0.5)(duration_ms)  AS p50_ms,
+    quantileDD(0.002, 0.99)(duration_ms) AS p99_ms
+FROM page_views
+GROUP BY page;
+
+CREATE MATERIALIZED VIEW page_latency_fits
+ORDER BY (page)
+AS SELECT
+    page,
+    quantileDD(0.002, 0.99)(duration_ms) AS p99_ms,
+    quantile(0.5)(duration_ms)           AS p50_ms,
+    argMax(user_id, page)                AS last_user,
+    max(user_id)                         AS max_user
+FROM page_views
+GROUP BY page;
+-- want --
+dynaflux/views.sql:1:26: error DF3307
+-- want-text --
+dynaflux/views.sql:1:26: error DF3307: page_latency: a row can reach 396.1 KB before its high-water marks; DynamoDB's 400 KB item limit leaves 368 KB after the 32 KB reserved for them
+  hint: move some aggregates to another view, or use quantileDD with a larger rel_acc

@@ -39,14 +39,16 @@ type Stream struct {
 	StorageFormat int      `json:"storage_format"`
 }
 
+// EventTimeType returns the type of event_time and ingest_time: DateTime64(6).
+func EventTimeType() Type { return Type{Kind: KindDateTime64, Precision: DateTime64Micros} }
+
 // ImplicitColumns returns the columns every stream has besides its declared ones.
 func ImplicitColumns() []Column {
 	str := Type{Kind: KindString}
-	micros := Type{Kind: KindDateTime64, Precision: DateTime64Micros}
 	return []Column{
 		{Name: ColumnEventID, Type: str},
-		{Name: ColumnEventTime, Type: micros},
-		{Name: ColumnIngestTime, Type: micros},
+		{Name: ColumnEventTime, Type: EventTimeType()},
+		{Name: ColumnIngestTime, Type: EventTimeType()},
 		{Name: ColumnOriginRegion, Type: str},
 	}
 }

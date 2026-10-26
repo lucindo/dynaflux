@@ -120,6 +120,7 @@ func (p *project) compile() *catalog.Catalog {
 	p.numberViews()
 	p.checkRetained()
 	p.checkSyncTransactions()
+	p.checkItemSizes()
 	p.checkGoNames()
 	p.checkConfigNames()
 	return p.catalog()

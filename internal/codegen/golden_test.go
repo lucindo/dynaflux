@@ -9,6 +9,7 @@ import (
 	"flag"
 	"go/ast"
 	"go/constant"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 
@@ -41,7 +43,7 @@ const (
 //   - "-- want/<file> --" holds each generated file. go test -update rewrites them; review
 //     the diff.
 //
-// The generated package must also type-check against stubs of the API it calls, so the
+// The generated package must also type-check against the packages it imports, so the
 // templates can't drift from the signatures of fluxgen unnoticed; its catalogJSON must be
 // the marshaled catalog; and every exported name it declares must be one that DF1207
 // checks for collisions.
@@ -51,6 +53,7 @@ func TestGolden(t *testing.T) {
 	if err != nil || len(paths) == 0 {
 		t.Fatalf("no cases in testdata: %v", err)
 	}
+	imp := &sourceImporter{imp: importer.ForCompiler(token.NewFileSet(), "source", nil)}
 	for _, path := range paths {
 		t.Run(strings.TrimSuffix(filepath.Base(path), ".txtar"), func(t *testing.T) {
 			t.Parallel()
@@ -61,7 +64,7 @@ func TestGolden(t *testing.T) {
 			ar := txtar.Parse(data)
 			cat, files := generate(t, ar)
 			fset, parsed := parse(t, files)
-			typeCheck(t, cat, fset, parsed)
+			typeCheck(t, imp, cat, fset, parsed)
 			checkDeclaredNames(t, cat, fset, parsed)
 			if *update {
 				writeWant(t, path, ar, files)
@@ -138,12 +141,12 @@ func parse(t *testing.T, files map[string][]byte) (*token.FileSet, []*ast.File) 
 	return fset, parsed
 }
 
-// typeCheck checks the generated package with go/types against stubs of the packages it
-// imports, and checks that its constant catalogJSON holds the bytes of catalog.Marshal.
-func typeCheck(t *testing.T, cat *catalog.Catalog, fset *token.FileSet, parsed []*ast.File) {
+// typeCheck checks the generated package with go/types, and checks that its constant
+// catalogJSON holds the bytes of catalog.Marshal.
+func typeCheck(t *testing.T, imp types.Importer, cat *catalog.Catalog, fset *token.FileSet, parsed []*ast.File) {
 	t.Helper()
 	var errs []error
-	conf := types.Config{Importer: &stubImporter{fset: fset, pkgs: map[string]*types.Package{}}, Error: func(err error) {
+	conf := types.Config{Importer: imp, Error: func(err error) {
 		errs = append(errs, err)
 	}}
 	pkg, err := conf.Check("example.com/app/internal/flux", fset, parsed, nil)
@@ -212,96 +215,14 @@ func declaredNames(f *ast.File) []*ast.Ident {
 	return ids
 }
 
-// stubImporter type-checks the stubs of the packages that generated code imports.
-type stubImporter struct {
-	fset *token.FileSet
-	pkgs map[string]*types.Package
+// sourceImporter type-checks imported packages from source, one import at a time.
+type sourceImporter struct {
+	mu  sync.Mutex
+	imp types.Importer
 }
 
-func (s *stubImporter) Import(path string) (*types.Package, error) {
-	if p, ok := s.pkgs[path]; ok {
-		return p, nil
-	}
-	src, ok := stub(path)
-	if !ok {
-		return nil, errors.New("generated code imports " + path + ", which has no stub")
-	}
-	f, err := parser.ParseFile(s.fset, path+".go", src, 0)
-	if err != nil {
-		return nil, err
-	}
-	conf := types.Config{Importer: s}
-	p, err := conf.Check(path, s.fset, []*ast.File{f}, nil)
-	if err != nil {
-		return nil, err
-	}
-	s.pkgs[path] = p
-	return p, nil
-}
-
-// stub returns the stub of package path: for dynaflux and fluxgen, the API that generated
-// code calls, with empty bodies.
-func stub(path string) (string, bool) {
-	switch path {
-	case "context":
-		return "package context\n\ntype Context interface{ Done() <-chan struct{} }\n", true
-	case "iter":
-		return "package iter\n\ntype Seq2[K, V any] func(yield func(K, V) bool)\n", true
-	case "time":
-		return "package time\n\ntype Time struct{ wall uint64 }\n", true
-	case "github.com/lucindo/dynaflux":
-		return `package dynaflux
-
-const GeneratedCodeVersion1 = 1
-
-type (
-	Store        struct{}
-	Catalog      struct{}
-	Token        struct{}
-	AppendOption func()
-	ReadOption   func()
-	QueryOption  func()
-	Decimal      struct{}
-	UUID         [16]byte
-)
-`, true
-	case "github.com/lucindo/dynaflux/fluxgen":
-		return `package fluxgen
-
-import (
-	"context"
-	"iter"
-
-	"github.com/lucindo/dynaflux"
-)
-
-func LoadCatalog(data string) *dynaflux.Catalog { return nil }
-
-func AppendEvent(ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, ev []any, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
-	return dynaflux.Token{}, nil
-}
-
-func AppendEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, evs []E, fields func(*E) []any, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
-	return dynaflux.Token{}, nil
-}
-
-func ImportEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, evs []E, fields func(*E) []any, opts ...dynaflux.AppendOption) error {
-	return nil
-}
-
-func ReadEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, key []any, fields func(*E) []any, opts ...dynaflux.ReadOption) iter.Seq2[E, error] {
-	return nil
-}
-
-func QueryRows[R any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, query string, params []any, fields func(*R) []any, opts ...dynaflux.QueryOption) ([]R, error) {
-	return nil, nil
-}
-
-func QueryRow[R any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, query string, params []any, fields func(*R) []any, opts ...dynaflux.QueryOption) (R, error) {
-	var r R
-	return r, nil
-}
-`, true
-	}
-	return "", false
+func (s *sourceImporter) Import(path string) (*types.Package, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.imp.Import(path)
 }

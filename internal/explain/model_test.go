@@ -83,6 +83,7 @@ func model(t *testing.T, in inputs) (explain.Store, explain.Stream) {
 		BatchingWindow: time.Duration(in.WindowS * float64(time.Second)),
 		BatchSize:      100,
 		HWMWindow:      hwmWindow,
+		HWMEntryKB:     0.029, // costs.py's ~29-byte mark, in KB of 1,024 bytes
 		MemoryMB:       1024,
 		Arch:           explain.ArchARM64,
 		Meta:           capacity,
@@ -279,10 +280,10 @@ func TestEstimateRows(t *testing.T) {
 			hwmEntries: 2, rowsPerBatch: 50, writeUnits: 1,
 		},
 		{
-			name:       "a uniq state adds 3 KB",
+			name:       "a uniq state adds 2.5 KB",
 			change:     func(s *explain.Stream) { s.Views[1].Uniqs = 1 },
 			view:       1,
-			hwmEntries: 1, rowsPerBatch: 50, writeUnits: 4,
+			hwmEntries: 1, rowsPerBatch: 50, writeUnits: 3,
 		},
 		{
 			name:       "ARRAY JOIN fan-out multiplies rows and marker reads",

@@ -149,6 +149,11 @@ func TestMarshalRejectsInvalidCatalog(t *testing.T) {
 			"stream page_views: column user_id appears twice"},
 		{"column named like an implicit one", func(c *catalog.Catalog) { c.Streams[1].Columns[0].Name = "event_time" },
 			"stream page_views: column event_time appears twice"},
+		{"no primary key", func(c *catalog.Catalog) { c.Streams[0].PrimaryKey = nil }, "stream api_calls: no primary key"},
+		{"primary key of an undeclared column", func(c *catalog.Catalog) { c.Streams[0].PrimaryKey = []string{"event_id"} },
+			"stream api_calls: primary key event_id is not a declared column"},
+		{"dedup by an undeclared column", func(c *catalog.Catalog) { c.Streams[0].DedupBy = []string{"request"} },
+			"stream api_calls: dedup by request is not a declared column"},
 		{"no shards", func(c *catalog.Catalog) { c.Streams[0].Shards = 0 }, "shards 0 is not between 1 and 64"},
 		{"too many shards", func(c *catalog.Catalog) { c.Streams[0].Shards = 65 }, "shards 65 is not between 1 and 64"},
 		{"Nullable column with a default", func(c *catalog.Catalog) {

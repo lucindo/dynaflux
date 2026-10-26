@@ -78,7 +78,7 @@ func backfillText(vv *catalog.ViewVersion) string {
 // rowSection writes the attributes of a row of views[i] and their sizes.
 func (e *explainer) rowSection(est *estimate, i int) {
 	vp, v := &est.views[i], est.cost.Views[i]
-	e.section(fmt.Sprintf("row, estimated (key and state encodings aren't final yet; String values are taken as %d bytes)", unknownLenBytes))
+	e.section(fmt.Sprintf("row, estimated (String values are taken as %d bytes)", unknownLenBytes))
 	t := table{left: attributeLabels}
 	for _, a := range vp.layout {
 		what, size := a.what, bytesText(float64(a.bytes))
@@ -87,7 +87,7 @@ func (e *explainer) rowSection(est *estimate, i int) {
 		case hllState:
 			size = num(hllKB) + " KB at most"
 		case quantileState:
-			size = "not estimated"
+			size = "~" + size + ", " + bytesText(float64(a.maxBytes)) + " at most"
 		}
 		if a.name == catalog.AttrHighWaterMarks {
 			what = fmt.Sprintf("~%s high-water %s of ~%s B", num(v.HWMEntries), plural(v.HWMEntries, "mark", "marks"), whole(hwmEntryBytes))
@@ -142,12 +142,9 @@ func (e *explainer) viewCost(est *estimate, i int) {
 func (e *explainer) viewNotes(vv *catalog.ViewVersion) {
 	var notes []string
 	for _, a := range vv.Aggregates {
-		switch {
-		case (a.Fn == catalog.AggSum || a.Fn == catalog.AggAvg) && a.Args[0].Type.Kind == catalog.KindFloat64:
-			notes = append(notes, a.Name+": a Float64 "+string(a.Fn)+" converges up to floating-point rounding: its last digits can differ "+
-				"between regions, and between live projection and a backfill. Use Decimal for exact totals.")
-		case a.Fn == catalog.AggQuantile || a.Fn == catalog.AggQuantileDD:
-			notes = append(notes, a.Name+": the row size leaves out its sketch, whose size isn't fixed yet.")
+		if a.Fn == catalog.AggQuantile || a.Fn == catalog.AggQuantileDD {
+			notes = append(notes, a.Name+": the row size takes a sketch of values that span a million-fold range; "+
+				"a wider spread makes it larger.")
 		}
 	}
 	if len(notes) > 0 {

@@ -12,7 +12,8 @@ import (
 
 // Scenarios returns the named scenarios: clean has no faults; faults has transient,
 // ambiguous and retried writes, crashes, latency spikes, slow invocations, a replaying
-// mapping, and duplicate, stale and empty deliveries.
+// mapping, and duplicate, stale and empty deliveries; poison is faults with 2% of events
+// failing a view's evaluation.
 func Scenarios() []Scenario {
 	clean := Scenario{
 		Name:    "clean",
@@ -51,14 +52,21 @@ func Scenarios() []Scenario {
 	faults.ESM.Replay = true
 	faults.ESM.Dup, faults.ESM.Stale, faults.ESM.Empty, faults.ESM.Slow = 0.1, 0.1, 0.05, 0.1
 	faults.Seeds.Smoke, faults.Seeds.Full = 6, 300
-	return []Scenario{clean, faults}
+
+	poison := faults
+	poison.Name = "poison"
+	poison.Poison = 0.02
+	// A core that failed a poison record's batch would block its unit for the whole budget.
+	poison.Budget = time.Hour
+	poison.Seeds.Smoke, poison.Seeds.Full = 4, 300
+	return []Scenario{clean, faults, poison}
 }
 
 func (sc Scenario) check() error {
 	f, e := sc.Faults, sc.ESM
 	switch {
-	case sc.Regions < 1 || sc.Writers < 1 || sc.Events < 0:
-		return errors.New("needs a region, a writer and no negative event count")
+	case sc.Regions < 1 || sc.Writers < 1 || sc.Events < 0 || sc.Poison < 0 || sc.Poison > 1:
+		return errors.New("needs a region, a writer, no negative event count and a poison share from 0 to 1")
 	case sc.Topology.Partitions < 1 || sc.Topology.UnitRecords < 1 || sc.Topology.MaxDepth < 0:
 		return errors.New("needs a partition, a positive unit size and no negative depth")
 	case e.Timeout <= 0 || e.MaxBatch < 1 || e.PF < 1 || e.Window < 0:

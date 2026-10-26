@@ -7,6 +7,8 @@ import (
 	"context"
 	"math/rand/v2"
 	"time"
+
+	"github.com/lucindo/dynaflux/internal/projector"
 )
 
 // archive models Firehose delivering into Iceberg: an acknowledged put arrives after a
@@ -19,12 +21,12 @@ type archive struct {
 
 type archived struct {
 	stream, unit string
-	rec          Record
+	rec          projector.Record
 	put, due     time.Time
 	errorPrefix  bool
 }
 
-func (a *archive) put(rng *rand.Rand, stream, unit string, recs []Record) {
+func (a *archive) put(rng *rand.Rand, stream, unit string, recs []projector.Record) {
 	now := time.Now()
 	for _, rec := range recs {
 		e := archived{
@@ -72,7 +74,7 @@ func (a *archive) completeThrough(t, now time.Time) bool {
 // and ambiguous faults.
 type archiver struct{ rg *region }
 
-func (a archiver) Archive(ctx context.Context, stream, unit string, recs []Record) error {
+func (a archiver) Archive(ctx context.Context, stream, unit string, recs []projector.Record) error {
 	op := "archive " + stream + " " + unit
 	if len(recs) > 0 {
 		op += " " + recs[0].Seq

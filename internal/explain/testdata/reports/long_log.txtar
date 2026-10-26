@@ -59,8 +59,8 @@ warning page_views: batches average 1 event over 347,134 shards, so view writes 
   hint: shorten LOG RETENTION, which means fewer shards, or raise runtime.batching_window_seconds
 warning page_views: ~347,134 shards per region: after an outage, the projector catches up with one invocation per shard, over Lambda's default quota of 1,000 concurrent executions, which all of the account's functions in a region share
   hint: shorten LOG RETENTION, or raise the account's Lambda concurrency quota
-warning user_totals: rows reach 1.94 KB with ~64 high-water marks, one for each change-stream shard that SHARDS 64 spreads an entity's events over; every write costs 2 write units
-  hint: SPLIT 3 keeps each item at 1 write unit, saving ~$1,807 a month per region; queries then read 3 items per row; or use fewer SHARDS on page_views
+warning user_totals: rows reach 1.62 KB with ~64 high-water marks, one for each change-stream shard that SHARDS 64 spreads an entity's events over; every write costs 2 write units
+  hint: SPLIT 2 keeps each item at 1 write unit, saving ~$1,807 a month per region; queries then read 2 items per row; or use fewer SHARDS on page_views
 -- explain user_totals --
 view user_totals, from stream page_views
   assumptions  --rate 1000  --event-kb 1
@@ -73,18 +73,19 @@ layout, in us-east-1
   rows         a row per entity: GROUP BY (user_id) holds user_id, the PRIMARY KEY of page_views
   backfill     fenced handoff: count and sum are additive
 
-row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
+row, estimated (String values are taken as 32 bytes)
   pk        user_id                                                  34 B
   sk        a constant                                                3 B
+  user_id   key column                                               39 B
   views     count()                                                  13 B
   total_ms  sum(duration_ms)                                         20 B
   _v        row version                                              10 B
-  _hwm      ~64 high-water marks of ~30 B                         1.86 KB
-  total     2 write units, 1 read unit; the item limit is 400 KB  1.94 KB
+  _hwm      ~64 high-water marks of ~24 B                         1.51 KB
+  total     2 write units, 1 read unit; the item limit is 400 KB  1.62 KB
 
 per event, per region
   rows         2.20 write units and 1.10 read units: a batch of 1 event updates 1 row, and 10% of writes conflict and retry
   monthly      DynamoDB requests $3,975 per region, $3,975 for 1 region
 
-warning user_totals: rows reach 1.94 KB with ~64 high-water marks, one for each change-stream shard that SHARDS 64 spreads an entity's events over; every write costs 2 write units
-  hint: SPLIT 3 keeps each item at 1 write unit, saving ~$1,807 a month per region; queries then read 3 items per row; or use fewer SHARDS on page_views
+warning user_totals: rows reach 1.62 KB with ~64 high-water marks, one for each change-stream shard that SHARDS 64 spreads an entity's events over; every write costs 2 write units
+  hint: SPLIT 2 keeps each item at 1 write unit, saving ~$1,807 a month per region; queries then read 2 items per row; or use fewer SHARDS on page_views

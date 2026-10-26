@@ -143,6 +143,26 @@ func snapshot(t *testing.T, dir string) map[string][]byte {
 	return files
 }
 
+// TestGenerateExampleIsCurrent checks that the code and lock committed in examples/analytics
+// are what generate writes: regenerate them after changing the templates.
+func TestGenerateExampleIsCurrent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS(filepath.Join("..", "..", "examples", "analytics"))); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshot(t, dir)
+	// The example has warnings, so only stdout, which lists changed view versions, is empty.
+	if got := run(dir, "generate"); got.status != 0 || got.stdout != "" {
+		t.Fatalf("generate: %+v", got)
+	}
+	for p, data := range snapshot(t, dir) {
+		if !slices.Equal(data, before[p]) {
+			t.Errorf("generate changed examples/analytics/%s", p)
+		}
+	}
+}
+
 func TestGenerateLeavesUnchangedFilesAlone(t *testing.T) {
 	t.Parallel()
 	dir := writeProject(t, "generate/new")

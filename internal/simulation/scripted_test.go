@@ -17,6 +17,9 @@ import (
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/engine"
+	"github.com/lucindo/dynaflux/internal/expr"
+	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/simulation"
 	"github.com/lucindo/dynaflux/internal/store"
 )
@@ -40,7 +43,7 @@ func oneEvent(f simulation.Faults) simulation.Scenario {
 // sent at the deadline doesn't, and the invocation dies there.
 func TestKillBoundary(t *testing.T) {
 	t.Parallel()
-	sys := &scripted{script: func(ctx context.Context, b store.Backend, n int64) error {
+	sys := newScripted(t, func(ctx context.Context, b store.Backend, n int64) error {
 		if n > 1 {
 			return nil
 		}
@@ -52,7 +55,7 @@ func TestKillBoundary(t *testing.T) {
 		time.Sleep(time.Microsecond)
 		// Without cancellation, only the harness's kill can stop this write.
 		return put(context.WithoutCancel(ctx), b, "at")
-	}}
+	})
 	out := simulation.Run(t, oneEvent(simulation.Faults{}), sys, 1)
 	if len(out.Violations) > 0 {
 		t.Fatalf("violations: %v", out.Violations)
@@ -71,14 +74,14 @@ func TestKillBoundary(t *testing.T) {
 func TestLateWriteLandsAfterItsInvocationDied(t *testing.T) {
 	t.Parallel()
 	var foundByRetry atomic.Bool
-	sys := &scripted{script: func(ctx context.Context, b store.Backend, n int64) error {
+	sys := newScripted(t, func(ctx context.Context, b store.Backend, n int64) error {
 		if n == 1 {
 			return put(ctx, b, "late")
 		}
 		it, err := b.Get(ctx, viewTable, store.Key{PK: "late", SK: "!"}, true)
 		foundByRetry.Store(it != nil)
 		return err
-	}}
+	})
 	out := simulation.Run(t, oneEvent(simulation.Faults{Late: 1, LateMax: time.Hour}), sys, 1)
 	if len(out.Violations) > 0 {
 		t.Fatalf("violations: %v", out.Violations)
@@ -95,7 +98,7 @@ func TestLateWriteLandsAfterItsInvocationDied(t *testing.T) {
 // strikes a goroutine Handle waits for, so the batch is retried on a new container.
 func TestCrashOnAGoroutineHandleStarted(t *testing.T) {
 	t.Parallel()
-	sys := &scripted{script: func(ctx context.Context, b store.Backend, n int64) error {
+	sys := newScripted(t, func(ctx context.Context, b store.Backend, n int64) error {
 		if n > 1 {
 			return nil
 		}
@@ -104,7 +107,7 @@ func TestCrashOnAGoroutineHandleStarted(t *testing.T) {
 		wg.Go(func() { err = put(ctx, b, "before") })
 		wg.Wait()
 		return err
-	}}
+	})
 	out := simulation.Run(t, oneEvent(simulation.Faults{Crash: 1}), sys, 1)
 	if len(out.Violations) > 0 {
 		t.Fatalf("violations: %v", out.Violations)
@@ -120,14 +123,14 @@ func TestCrashOnAGoroutineHandleStarted(t *testing.T) {
 // request would be released in the runtime's order, not the seed's, so the run fails.
 func TestIdenticalRequestsInFlight(t *testing.T) {
 	t.Parallel()
-	sys := &scripted{script: func(ctx context.Context, b store.Backend, _ int64) error {
+	sys := newScripted(t, func(ctx context.Context, b store.Backend, _ int64) error {
 		var wg sync.WaitGroup
 		for range 2 {
 			wg.Go(func() { b.Get(ctx, viewTable, store.Key{PK: "before", SK: "!"}, true) })
 		}
 		wg.Wait()
 		return nil
-	}}
+	})
 	expectViolation(t, simulation.Run(t, oneEvent(simulation.Faults{}), sys, 1), "D3:")
 }
 
@@ -135,7 +138,7 @@ func TestIdenticalRequestsInFlight(t *testing.T) {
 // the run's last actor exited is still caught.
 func TestRequestLongAfterHandleReturned(t *testing.T) {
 	t.Parallel()
-	sys := &scripted{script: func(ctx context.Context, b store.Backend, n int64) error {
+	sys := newScripted(t, func(ctx context.Context, b store.Backend, n int64) error {
 		if n == 1 {
 			go func() {
 				time.Sleep(time.Minute)
@@ -143,7 +146,7 @@ func TestRequestLongAfterHandleReturned(t *testing.T) {
 			}()
 		}
 		return nil
-	}}
+	})
 	out := simulation.Run(t, oneEvent(simulation.Faults{}), sys, 1)
 	if !hasViolation(out, "P7:") || len(sys.stored) != 0 {
 		t.Errorf("violations %q, stored %v; want P7 and nothing stored", out.Violations, sys.stored)
@@ -167,7 +170,7 @@ func TestQueryPages(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			r := &pagedReader{slow: tc.slow}
-			out := simulation.Run(t, oneEvent(simulation.Faults{}), &scripted{script: r.script}, 1)
+			out := simulation.Run(t, oneEvent(simulation.Faults{}), newScripted(t, r.script), 1)
 			if len(out.Violations) > 0 {
 				t.Fatalf("violations: %v", out.Violations)
 			}
@@ -211,12 +214,13 @@ func (r *pagedReader) script(ctx context.Context, b store.Backend, n int64) erro
 }
 
 // TestStoreHistoryChecks: P5 catches a marker's owner, a unit's progress or its fence
-// going back, and only in the items that hold them.
+// going back, or a row version that doesn't rise by one, and only in the items that hold
+// them.
 func TestStoreHistoryChecks(t *testing.T) {
 	t.Parallel()
 	unit := func(attrs store.Item) write {
 		attrs[catalog.AttrPK], attrs[catalog.AttrSK] = str("unit#events#U1"), str("!")
-		return write{metaTable, attrs}
+		return write{metaTable(), attrs}
 	}
 	fences := func(fence string) store.Value {
 		return store.Value{Type: store.M, Map: map[string]store.Value{"page@v1": str(fence)}}
@@ -233,12 +237,14 @@ func TestStoreHistoryChecks(t *testing.T) {
 		{"progress back", []write{unit(store.Item{"progress": str("0002")}), unit(store.Item{"progress": str("0001")})}, "P5:"},
 		{"fence changed", []write{unit(store.Item{"fences": fences("0005")}), unit(store.Item{"fences": fences("0006")})}, "P5:"},
 		{"progress up, a fence added", []write{unit(store.Item{"progress": str("0001")}), unit(store.Item{"progress": str("0002"), "fences": fences("0005")})}, ""},
+		{"row version up by two", []write{row(catalog.AttrRowVersion, num(1)), row(catalog.AttrRowVersion, num(3))}, "P5:"},
+		{"row version up by one", []write{row(catalog.AttrRowVersion, num(1)), row(catalog.AttrRowVersion, num(2))}, ""},
 		{"a view column named progress", []write{row("progress", num(9)), row("progress", num(10))}, ""},
 		{"a view column named fences", []write{row("fences", fences("0005")), row("fences", fences("0006"))}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			out := simulation.Run(t, oneEvent(simulation.Faults{}), &scripted{script: writes(tc.writes...)}, 1)
+			out := simulation.Run(t, oneEvent(simulation.Faults{}), newScripted(t, writes(tc.writes...)), 1)
 			expectViolation(t, out, tc.want)
 		})
 	}
@@ -277,7 +283,7 @@ func TestHighWaterMarkBound(t *testing.T) {
 				catalog.AttrSK:             str("!"),
 				catalog.AttrHighWaterMarks: {Type: store.M, Map: marks},
 			}}
-			sys := &scripted{quiet: true, script: writes(hwm)}
+			sys := newScripted(t, writes(hwm))
 			expectViolation(t, simulation.Run(t, tc.sc, sys, 1), tc.want)
 		})
 	}
@@ -315,36 +321,46 @@ func hasViolation(out simulation.Outcome, property string) bool {
 	return slices.ContainsFunc(out.Violations, func(v string) bool { return strings.HasPrefix(v, property) })
 }
 
+// streamsSQL is the store of the systems without views: two streams, the second of which
+// gets no events from scripted systems.
+const streamsSQL = `
+CREATE STREAM events (n UInt32) PRIMARY KEY (n);
+CREATE STREAM quiet (n UInt32) PRIMARY KEY (n);
+`
+
+const (
+	streamName  = "events"
+	quietStream = "quiet"
+	viewTable   = "views"
+)
+
 // scripted is a system whose cores run script, numbering invocations from 1 across
 // containers. Read records which of the names in viewTable exist.
 type scripted struct {
+	cat         *engine.Catalog
 	script      func(ctx context.Context, b store.Backend, n int64) error
-	quiet       bool // a second stream, without events
 	invocations atomic.Int64
 	stored      []string
 }
 
-func (s *scripted) Config() simulation.Config {
-	cfg := simulation.Config{
-		Streams: []simulation.Stream{{Name: streamName, Table: streamTable}},
-		Meta:    metaTable,
-		Window:  time.Hour,
-	}
-	if s.quiet {
-		cfg.Streams = append(cfg.Streams, simulation.Stream{Name: quietStream, Table: quietTable})
-	}
-	return cfg
+func newScripted(t *testing.T, script func(ctx context.Context, b store.Backend, n int64) error) *scripted {
+	t.Helper()
+	return &scripted{cat: compile(t, streamsSQL), script: script}
 }
 
-func (*scripted) Event(*rand.Rand, int) (string, store.Item) {
-	return streamName, store.Item{catalog.AttrPK: str("e"), catalog.AttrSK: str("!")}
+func (s *scripted) Config() simulation.Config {
+	return simulation.Config{Catalog: s.cat, Naming: catalog.Naming{Store: storeName}}
+}
+
+func (*scripted) Event(*rand.Rand, int, bool) (string, []expr.Value) {
+	return streamName, []expr.Value{expr.Uint(0), expr.Null()}
 }
 
 func (s *scripted) NewCore(b store.Backend, _ simulation.Archiver) simulation.Core {
 	return scriptedCore{s, b}
 }
 
-func (*scripted) Expect(*simulation.Oracle, string, simulation.Record) {}
+func (*scripted) Expect(*simulation.Oracle, string, projector.Record) error { return nil }
 
 func (s *scripted) Read(ctx context.Context, b store.Backend) (simulation.State, error) {
 	for _, name := range []string{"before", "at", "late"} {
@@ -364,8 +380,8 @@ type scriptedCore struct {
 	b   store.Backend
 }
 
-func (c scriptedCore) Handle(ctx context.Context, _ simulation.Batch) (simulation.Result, error) {
-	return simulation.Result{}, c.sys.script(ctx, c.b, c.sys.invocations.Add(1))
+func (c scriptedCore) Handle(ctx context.Context, _ projector.Batch) (projector.Result, error) {
+	return projector.Result{}, c.sys.script(ctx, c.b, c.sys.invocations.Add(1))
 }
 
 func put(ctx context.Context, b store.Backend, name string) error {

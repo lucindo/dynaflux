@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/simulation"
 )
 
@@ -20,9 +21,9 @@ func TestArchiveDeliversLateOutOfOrderAndTwice(t *testing.T) {
 		cfg := simulation.Archive{MinDelay: time.Minute, MaxDelay: 15 * time.Minute, Dup: 0.5, Error: 0.2}
 		a := simulation.NewArchiveModel(cfg, 1)
 		put := time.Now()
-		var recs []simulation.Record
+		var recs []projector.Record
 		for i := range n {
-			recs = append(recs, simulation.Record{Op: simulation.Insert, Seq: strconv.Itoa(i)})
+			recs = append(recs, projector.Record{Op: projector.Insert, Seq: strconv.Itoa(i)})
 		}
 		a.Put("u", recs)
 
@@ -59,7 +60,7 @@ func TestLyingArchiveIsCompleteAtOnce(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		a := simulation.NewArchiveModel(simulation.Archive{MinDelay: time.Minute, MaxDelay: time.Hour, Lie: true}, 1)
-		a.Put("u", []simulation.Record{{Op: simulation.Insert, Seq: "1"}})
+		a.Put("u", []projector.Record{{Op: projector.Insert, Seq: "1"}})
 		if !a.CompleteThrough(time.Now(), time.Now()) {
 			t.Error("a lying watermark waited for delivery")
 		}

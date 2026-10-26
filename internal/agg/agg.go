@@ -29,7 +29,7 @@ const MaxStringBytes = 4096
 type Spec struct {
 	// Agg is the aggregate. Its Fn and Params define the state. Of its Type only Nullable
 	// is read: the value of an empty state is then NULL. Args and Cond are for the caller
-	// to evaluate.
+	// to evaluate, with [EvalArgs].
 	Agg catalog.Aggregate
 	// ArgTypes are the types of the arguments the state aggregates. For a -Merge, they are
 	// the arguments of the view column's aggregate.
@@ -51,6 +51,28 @@ type Input struct {
 	EventTime  int64
 	EventID    string
 	ArrayIndex int
+}
+
+// EvalArgs evaluates an aggregate's -If condition cond (nil without -If) on f, then, only
+// when it holds, every argument in args (sql.md §5.8). It returns false when the condition
+// doesn't hold or an argument is NULL: then the row doesn't reach the state.
+func EvalArgs(cond *expr.Program, args []*expr.Program, f *expr.Frame) ([]expr.Value, bool, error) {
+	if cond != nil {
+		c, err := cond.Eval(f)
+		if err != nil || !c.IsTrue() {
+			return nil, false, err
+		}
+	}
+	vals := make([]expr.Value, len(args))
+	null := false
+	for i, p := range args {
+		var err error
+		if vals[i], err = p.Eval(f); err != nil {
+			return nil, false, err
+		}
+		null = null || vals[i].IsNull()
+	}
+	return vals, !null, nil
 }
 
 // State is an aggregate state. It is not safe for concurrent use.

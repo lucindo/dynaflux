@@ -38,10 +38,10 @@ layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
 per event, per region                                     write units  read units
   event put, local or replicated                                 1.00
   TTL delete, replicated from the region that expires it         0.67
-  page_daily, shared rows, 1,000 active                        802.94      201.28
+  page_daily, shared rows, 1,000 active                        648.95      162.79
   progress item, one per batch                                   0.87
-  total                                                        805.47      201.28
-  per second, all events                                      805,475     201,285
+  total                                                        651.49      162.79
+  per second, all events                                      651,486     162,788
 
 monthly                        per region  3 regions
   DynamoDB requests                $4,164    $12,493
@@ -60,7 +60,7 @@ warning page_views: batches average 1.15 events over 3,469 shards, so view write
   hint: shorten LOG RETENTION, which means fewer shards, or raise runtime.batching_window_seconds
 warning page_views: ~3,469 shards per region: after an outage, the projector catches up with one invocation per shard, over Lambda's default quota of 1,000 concurrent executions, which all of the account's functions in a region share
   hint: shorten LOG RETENTION, or raise the account's Lambda concurrency quota
-error page_daily: rows reach 729 KB, over DynamoDB's 400 KB item limit: every write to them would fail
+error page_daily: rows reach 590 KB, over DynamoDB's 400 KB item limit: every write to them would fail
   hint: shorten LOG RETENTION on page_views (fewer shards), or runtime.prune_window_seconds; SPLIT 2 keeps each item under the limit
 -- explain page_daily --
 view page_daily, from stream page_views
@@ -74,19 +74,21 @@ layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
   rows         shared: GROUP BY (page, day) leaves out user_id, the PRIMARY KEY of page_views, so any shard can write any row; ~1,000 active
   backfill     fenced handoff: count and sum are additive
 
-row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
+row, estimated (String values are taken as 32 bytes)
   pk        page                                                         34 B
   sk        day                                                           6 B
+  page      key column                                                   36 B
+  day       key column                                                    9 B
   views     count()                                                      13 B
   total_ms  sum(duration_ms)                                             20 B
   _v        row version                                                  10 B
-  _hwm      ~25,150 high-water marks of ~30 B                          729 KB
-  total     730 write units, 183 read units; the item limit is 400 KB  729 KB
+  _hwm      ~25,150 high-water marks of ~24 B                          589 KB
+  total     590 write units, 148 read units; the item limit is 400 KB  590 KB
 
 per event, per region
-  rows         802.94 write units and 201.28 read units: a batch of 1.15 events updates 1.15 rows, and 10% of writes conflict and retry
-  per row      ~803 write and 201 read units per second on average; a partition takes 1,000 and 3,000
+  rows         648.95 write units and 162.79 read units: a batch of 1.15 events updates 1.15 rows, and 10% of writes conflict and retry
+  per row      ~649 write and 163 read units per second on average; a partition takes 1,000 and 3,000
   monthly      none: writes to rows over 400 KB fail
 
-error page_daily: rows reach 729 KB, over DynamoDB's 400 KB item limit: every write to them would fail
+error page_daily: rows reach 590 KB, over DynamoDB's 400 KB item limit: every write to them would fail
   hint: shorten LOG RETENTION on page_views (fewer shards), or runtime.prune_window_seconds; SPLIT 2 keeps each item under the limit

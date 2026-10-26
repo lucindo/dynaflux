@@ -750,8 +750,14 @@ Expressions are pure and deterministic. These failures are *evaluation errors*:
     its arguments, only on rows where the condition is true. So `WHERE b != 0` and
     `sumIf(a / b, b != 0)` never fail. ClickHouse evaluates aggregate arguments on every
     row, so it can fail where Dynaflux doesn't.
-  - `if` and `multiIf` evaluate only the branch they return. `AND` and `OR` evaluate left to
-    right and stop as soon as the result is known. So `if(b = 0, NULL, a / b)` never fails.
+  - Every operand of an operator or function is evaluated, left to right, and an evaluation
+    error wins over a `NULL` operand: with `b = 0`, both `x + intDiv(a, b)` and
+    `intDiv(a, b) + x` fail, even when `x` is `NULL`. `coalesce` evaluates every argument
+    too, so `coalesce(x, intDiv(a, b))` fails even when `x` isn't `NULL`. This matches
+    ClickHouse, which evaluates whole columns.
+  - Only these skip operands: `if` and `multiIf` evaluate only the branch they return, and
+    `AND` and `OR` evaluate left to right and stop as soon as the result is known. So
+    `if(b = 0, NULL, a / b)` never fails.
 
 ### 5.9 Where each construct may appear
 
@@ -783,7 +789,7 @@ General rules:
 | `intDiv(a, b)` | integers | [§5.6](#56-arithmetic) | Truncates toward zero. Fails when `b = 0`, and when `a` is the minimum value of its type and `b` is −1. |
 | `if(c, then, else)` | `c` a condition | common type of `then` and `else` ([§4.5](#45-common-type)) | A `NULL` condition selects `else`. Evaluates only the selected branch. |
 | `multiIf(c1, v1, …, cn, vn, else)` | n ≥ 1, so an odd count of at least 3 | common type of the values | Returns the value after the first true condition, otherwise `else`. `NULL` conditions count as false. |
-| `coalesce(x1, …, xn)` | n ≥ 2; every argument but the last must be `Nullable` (DF5212) | common type, `Nullable` unless `xn` isn't | The first non-`NULL` argument. `coalesce(referrer, '')` is a `String`. |
+| `coalesce(x1, …, xn)` | n ≥ 2; every argument but the last must be `Nullable` (DF5212) | common type, `Nullable` unless `xn` isn't | The first non-`NULL` argument. `coalesce(referrer, '')` is a `String`. Evaluates every argument ([§5.8](#58-evaluation-errors)). |
 | `lower(s)`, `upper(s)` | `String` | `String` | ASCII letters only; other bytes are unchanged: `lower('ÀB')` is `'Àb'`. The Unicode-aware `lowerUTF8` and `upperUTF8` aren't in v1, because ClickHouse and Go use different case tables. |
 | `concat(s1, …, sn)` | n ≥ 2, all `String` | `String` | Any `NULL` argument gives `NULL`. Numbers and dates aren't accepted: ClickHouse formats them as text in ways Go can't reproduce byte for byte. |
 | `length(x)` | `String` or `Array(T)` | `UInt64` | Bytes for a string (`length('é')` is 2), elements for an array. |
@@ -884,7 +890,9 @@ In a view, every `String` value that reaches `min`, `max`, `argMax`, `argMin` or
 error ([§5.8](#58-evaluation-errors)). Values on rows that the `-If` condition or the `NULL`
 rule skips aren't checked. The cap applies to every value, not only the one the state
 keeps, so whether a view breaks doesn't depend on the order of events. It bounds the size
-of a view row ([encoding.md §7.8](encoding.md#78-size-bound)).
+of a view row ([encoding.md §7.8](encoding.md#78-size-bound)): a view whose largest row
+doesn't fit DynamoDB's 400 KB item limit, minus a 32 KB reserve for bookkeeping, is an error
+(DF3307).
 
 **`uniq(x)`**
 
@@ -908,7 +916,9 @@ of a view row ([encoding.md §7.8](encoding.md#78-size-bound)).
 
 - Estimate the value at rank `level` with a deterministic, mergeable sketch of log-scale
   buckets. The returned value is within relative error `rel_acc` of a value at that rank.
-  `quantile` uses `rel_acc` = 0.01.
+  For a subnormal `Float64` value, below 2^−1022 in magnitude, the bound is
+  `rel_acc` × |value| + 2^−1075 ([encoding.md §7.5](encoding.md#75-sketches)). `quantile`
+  uses `rel_acc` = 0.01.
 - `level` is a number literal with 0 ≤ `level` ≤ 1. `rel_acc` is a float literal with
   0.002 ≤ `rel_acc` < 1 (DF5205). ClickHouse accepts any `rel_acc` above 0, but at 0.001
   the largest sketch already reaches DynamoDB's 400 KB item limit
@@ -1101,7 +1111,7 @@ declared.
 
 | Column | Type | Value |
 |--------|------|-------|
-| `event_id` | `String` | 26 characters of Crockford base32. Without `DEDUP BY`: a ULID made by the writer. A writer's ULIDs are monotonic: within one millisecond, each adds 1 to the previous one's random part, so one writer's appends keep their order. With `DEDUP BY`: a 128-bit hash of the encoded `PRIMARY KEY` values, `event_time` and dedup values ([§8.5](#85-dedup-by)). |
+| `event_id` | `String` | 26 characters of Crockford base32. Without `DEDUP BY`: a ULID made by the writer. A writer's ULIDs are monotonic, so one writer's appends keep their order: when the writer's clock reads the previous ID's millisecond or an earlier one, as after the clock steps back, the new ID is the previous one plus 1. With `DEDUP BY`: a 128-bit hash of the encoded `PRIMARY KEY` values, `event_time` and dedup values ([§8.5](#85-dedup-by)). |
 | `event_time` | `DateTime64(6)` | When the fact happened: set by the caller, or the writer's clock when the caller leaves it unset. |
 | `ingest_time` | `DateTime64(6)` | When Dynaflux accepted the event, from the writer's clock. |
 | `origin_region` | `String` | The AWS region that accepted the event, such as `us-east-1`. |
@@ -1141,7 +1151,8 @@ differently from reality.
   stream. Only an event stored by another append call is a duplicate, even when that call
   was the caller's earlier attempt.
 - Within one batch append, events that are duplicates of each other are found before
-  anything is written, and each one after the first is rejected with a duplicate error.
+  anything is written, and each one after the first is rejected with a duplicate error, or
+  with the first one's error when the first one isn't stored.
 - `event_id` becomes a 128-bit hash of the encoded values that identify a duplicate: the
   `PRIMARY KEY` values, `event_time` in microseconds and the dedup values. It is written as
   26 characters of Crockford base32 (the width of a ULID). So two distinct stored events
@@ -1173,7 +1184,8 @@ differently from reality.
 - After the window, DynamoDB deletes the event. The archive keeps every event, and Athena
   reads older events there.
 - Stream queries skip expired events even before DynamoDB deletes them, so every region
-  returns the same events (Dev 10). The rules of [§9.6](#96-ttl) for expired view rows
+  returns the same events (Dev 10). They go by the expiry stored with each event, rounded
+  up to a whole second ([encoding.md §5.4](encoding.md#54-_ttl)). The rules of [§9.6](#96-ttl) for expired view rows
   apply.
 - Views keep the aggregates of expired events: the projector applies each event when it
   arrives. A new view version can backfill events older than the window only from the
@@ -2026,6 +2038,7 @@ The article before a placeholder fits the word that replaces it: `an avg column`
 | DF3304 | error | MODE SYNC can't be used with SPLIT in v1 | |
 | DF3305 | error | an append to <stream> writes <n> items in one transaction; DynamoDB allows 100 | make some views ASYNC, use fewer uniqExact aggregates in SYNC views, or retire old versions |
 | DF3306 | error | SPLIT must be between 2 and 16 | |
+| DF3307 | error | a row can reach <n> KB before its high-water marks; DynamoDB's 400 KB item limit leaves 368 KB after the 32 KB reserved for them | move some aggregates to another view, or use quantileDD with a larger rel_acc |
 | DF3501 | warning | MODE SYNC on a view whose rows many partition keys of <stream> share; concurrent appends will conflict | add the stream's PRIMARY KEY columns to GROUP BY, or use MODE ASYNC |
 | DF3502 | retired | Was: <aggregate> over Float64 converges only up to rounding. Retired in M2, when `sum` and `avg` over `Float64` became exact ([§7.2](#72-function-reference)). | |
 | DF3503 | warning | <aggregate> skips rows where <arg> is NULL, so NULL never replaces a value | use a sentinel: <fn>(coalesce(<arg>, <default>), <val>). A UUID <arg> gets no hint. |

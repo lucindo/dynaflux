@@ -56,6 +56,16 @@ type Expr struct {
 	Args []Expr `json:"args,omitempty"`
 }
 
+// ColumnNames adds the name of every column that e reads to names.
+func (e *Expr) ColumnNames(names map[string]bool) {
+	if e.Op == OpColumn {
+		names[e.Name] = true
+	}
+	for i := range e.Args {
+		e.Args[i].ColumnNames(names)
+	}
+}
+
 // NamedExpr is an expression and the name of the column it defines.
 type NamedExpr struct {
 	Name string `json:"name"`

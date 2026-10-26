@@ -24,14 +24,13 @@ const (
 	defaultRuntimeOut      = "cmd/dynaflux-runtime"
 	defaultInfraOut        = "infra/dynaflux"
 	defaultTimeoutSeconds  = 60
-	defaultPruneWindow     = maxTimeoutSeconds + lifetimeMargin // safe for every timeout
+	defaultPruneWindow     = maxTimeoutSeconds + catalog.LifetimeMarginSeconds // safe for every timeout
 	defaultMemoryMB        = 1024
 	defaultBatchingSeconds = 1
 	defaultLogRetentionDay = 2
 	defaultTargetPercent   = 70
 
 	maxTimeoutSeconds  = 900   // Lambda maximum
-	lifetimeMargin     = 60    // for writes that land late and clock skew between hosts
 	minMemoryMB        = 128   // Lambda minimum
 	maxMemoryMB        = 10240 // Lambda maximum
 	maxBatchingSeconds = 300   // event source mapping maximum
@@ -201,14 +200,14 @@ func (d *decoder) runtime(r object, rt *Runtime) bool {
 // pruneWindow checks runtime.prune_window_seconds against the timeout. Pruning is exact
 // only while the window outlasts every invocation that may still be running.
 func (d *decoder) pruneWindow(r object, rt *Runtime) {
-	least := rt.TimeoutSeconds + lifetimeMargin
+	least := rt.TimeoutSeconds + catalog.LifetimeMarginSeconds
 	switch {
 	case rt.PruneWindowSeconds < least:
 		d.errorf(r.at("prune_window_seconds"), "DF6305",
 			fmt.Sprintf("set it to at least %d, or remove it to use the default, %d", least, defaultPruneWindow),
 			"runtime.prune_window_seconds is %d, less than runtime.timeout_seconds + %d = %d: the projector could "+
 				"drop a high-water mark that a running invocation still needs, and count some events twice",
-			rt.PruneWindowSeconds, lifetimeMargin, least)
+			rt.PruneWindowSeconds, catalog.LifetimeMarginSeconds, least)
 	case rt.PruneWindowSeconds < defaultPruneWindow:
 		d.warnf(r.at("prune_window_seconds"), "DF6306",
 			fmt.Sprintf("remove it to use the default, %d, which is safe for every timeout", defaultPruneWindow),

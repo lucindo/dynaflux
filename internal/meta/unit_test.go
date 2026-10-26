@@ -4,6 +4,7 @@
 package meta_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -316,6 +317,24 @@ func TestUnitsByKey(t *testing.T) {
 	}
 }
 
+// listing returns a list func for FenceUnits that returns ids and sets *at to the time of
+// the call.
+func listing(at *time.Time, ids ...string) func(context.Context) ([]string, error) {
+	return func(context.Context) ([]string, error) {
+		*at = time.Now()
+		return ids, nil
+	}
+}
+
+// noListing returns a list func that fails the test when called.
+func noListing(t *testing.T) func(context.Context) ([]string, error) {
+	t.Helper()
+	return func(context.Context) ([]string, error) {
+		t.Error("FenceUnits listed the units")
+		return []string{"u1"}, nil
+	}
+}
+
 func TestFenceUnits(t *testing.T) {
 	t.Parallel()
 	for _, bk := range backends() {
@@ -324,18 +343,13 @@ func TestFenceUnits(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				m := meta.New(bk.new(), table)
 				advance(t, m, "old", seq(10))
-				if err := m.SetViewState(t.Context(), version, meta.Activating); err != nil {
-					t.Fatal(err)
-				}
-				time.Sleep(meta.ListingDelay)
-				listedAt := time.Now()
-				units := []string{"old", "new"}
-				if err := m.FenceUnits(t.Context(), stream, version, units, listedAt); err != nil {
+				setStates(t, m, meta.Activating)
+				if err := m.FenceUnits(t.Context(), stream, version, listing(new(time.Time), "old", "new")); err != nil {
 					t.Fatal(err)
 				}
 				advance(t, m, "old", seq(20))
 				// Repeating the call keeps the fences.
-				if err := m.FenceUnits(t.Context(), stream, version, units, listedAt); err != nil {
+				if err := m.FenceUnits(t.Context(), stream, version, listing(new(time.Time), "old", "new")); err != nil {
 					t.Fatal(err)
 				}
 				wantFences(t, m, map[string]string{"old": seq(10), "new": seq(0)})
@@ -354,21 +368,62 @@ func wantFences(t *testing.T, m *meta.Meta, want map[string]string) {
 }
 
 // A listing taken before every projector saw the version activating could miss a unit that
-// such a projector creates without a fence.
-func TestFenceUnitsRefusesEarlyListing(t *testing.T) {
+// such a projector creates without a fence, so the listing waits 90 s from the activation.
+func TestFenceUnitsListsAfterTheDelay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		call, list time.Duration // after the activation
+	}{
+		{"called at the activation", 0, 90 * time.Second},
+		{"called just before the delay", 90*time.Second - time.Microsecond, 90 * time.Second},
+		{"called after the delay", time.Hour, time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				m := meta.New(mem.New(), table)
+				setStates(t, m, meta.Activating)
+				time.Sleep(tt.call)
+				var listedAt time.Time
+				if err := m.FenceUnits(t.Context(), stream, version, listing(&listedAt, "u1")); err != nil {
+					t.Fatal(err)
+				}
+				if want := bubbleStart.Add(tt.list); !listedAt.Equal(want) {
+					t.Errorf("listed at %s, want %s", listedAt, want)
+				}
+				wantFences(t, m, map[string]string{"u1": seq(0)})
+			})
+		})
+	}
+}
+
+func TestFenceUnitsWaitEndsWithContext(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		m := meta.New(mem.New(), table)
-		if err := m.SetViewState(t.Context(), version, meta.Activating); err != nil {
-			t.Fatal(err)
+		setStates(t, m, meta.Activating)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		if err := m.FenceUnits(ctx, stream, version, noListing(t)); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("FenceUnits = %v, want context.DeadlineExceeded", err)
 		}
-		time.Sleep(time.Hour) // the check is on listedAt, not on the clock
-		listedAt := bubbleStart.Add(90*time.Second - time.Microsecond)
-		if err := m.FenceUnits(t.Context(), stream, version, []string{"u1"}, listedAt); !errors.Is(err, meta.ErrListedTooEarly) {
-			t.Fatalf("FenceUnits = %v, want ErrListedTooEarly", err)
+		if now, want := time.Now(), bubbleStart.Add(time.Minute); !now.Equal(want) {
+			t.Errorf("FenceUnits returned at %s, want %s", now, want)
 		}
-		if u := readUnit(t, m, "u1"); u.Fences != nil {
-			t.Errorf("fences %v after a refused listing", u.Fences)
+	})
+}
+
+func TestFenceUnitsListError(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := meta.New(mem.New(), table)
+		setStates(t, m, meta.Activating)
+		errList := errors.New("list failed")
+		err := m.FenceUnits(t.Context(), stream, version, func(context.Context) ([]string, error) { return nil, errList })
+		if !errors.Is(err, errList) {
+			t.Fatalf("FenceUnits = %v, want the list error", err)
 		}
 	})
 }
@@ -381,7 +436,7 @@ func TestFenceUnitsNeedsActivating(t *testing.T) {
 	}{
 		{"pending_backfill", func(*testing.T, *meta.Meta) {}},
 		{"live", func(t *testing.T, m *meta.Meta) { t.Helper(); setStates(t, m, meta.Activating, meta.Live) }},
-		{"broken", func(t *testing.T, m *meta.Meta) { t.Helper(); markBroken(t, m, 1) }},
+		{"broken", func(t *testing.T, m *meta.Meta) { t.Helper(); markBroken(t, m) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -389,9 +444,7 @@ func TestFenceUnitsNeedsActivating(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				m := meta.New(mem.New(), table)
 				tt.setup(t, m)
-				time.Sleep(meta.ListingDelay) // the listing alone would be accepted
-				err := m.FenceUnits(t.Context(), stream, version, []string{"u1"}, time.Now())
-				if !errors.Is(err, meta.ErrNotActivating) {
+				if err := m.FenceUnits(t.Context(), stream, version, noListing(t)); !errors.Is(err, meta.ErrNotActivating) {
 					t.Errorf("FenceUnits = %v, want ErrNotActivating", err)
 				}
 				if u := readUnit(t, m, "u1"); u.Fences != nil {
@@ -400,20 +453,4 @@ func TestFenceUnitsNeedsActivating(t *testing.T) {
 			})
 		})
 	}
-}
-
-// A listing time ahead of the clock would skip the wait for projectors to see activating.
-func TestFenceUnitsRefusesFutureListing(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		m := meta.New(mem.New(), table)
-		setStates(t, m, meta.Activating)
-		listedAt := time.Now().Add(meta.ListingDelay + time.Minute)
-		if err := m.FenceUnits(t.Context(), stream, version, []string{"u1"}, listedAt); err == nil {
-			t.Error("FenceUnits succeeded")
-		}
-		if u := readUnit(t, m, "u1"); u.Fences != nil {
-			t.Errorf("fences %v after a refused listing", u.Fences)
-		}
-	})
 }

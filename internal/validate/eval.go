@@ -44,19 +44,27 @@ func eval(e catalog.Expr) (cval, error) {
 		return cval{null: true}, nil
 	case isOneOf(e.Op, catalog.OpAnd, catalog.OpOr):
 		return evalLogic(e)
-	case isOneOf(e.Op, catalog.OpIf, catalog.OpMultiIf, catalog.OpCoalesce):
+	case isOneOf(e.Op, catalog.OpIf, catalog.OpMultiIf):
 		return evalChoice(e)
 	case e.Op == catalog.OpIsNull:
 		v, err := eval(e.Args[0])
 		return cval{b: v.null}, err
 	}
+	// Every operand is evaluated, so an error wins over a NULL (sql.md §5.8).
 	args := make([]cval, len(e.Args))
+	null := false
 	for i, a := range e.Args {
 		v, err := eval(a)
-		if err != nil || v.null {
-			return v, err
+		if err != nil {
+			return cval{}, err
 		}
-		args[i] = v
+		args[i], null = v, null || v.null
+	}
+	switch {
+	case e.Op == catalog.OpCoalesce:
+		return coalesce(e, args), nil
+	case null:
+		return cval{null: true}, nil
 	}
 	return apply(e, args)
 }

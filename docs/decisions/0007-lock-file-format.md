@@ -30,16 +30,22 @@ found details that ADR 0002 leaves open or states differently:
 - **Entries:** every entry is its catalog `ViewVersion` JSON, including `number`, `state`,
   `fingerprint` and `mode`. In M2 a state is `current` or `retained`; `retired` is a DF6013
   error until M5 adds `retire`, which also decides the shape of a retired entry.
-- **Reading is strict:** unknown fields, an unknown `format`, duplicate numbers, and a
-  definition that doesn't match its fingerprint (a hand edit) are errors. Every lock error is
-  DF6013 and stops `validate` and `generate`; there is never a fallback to v1.
+- **Reading is strict:** any JSON layout is accepted, but these are errors: invalid JSON, an
+  unknown `format`, a key repeated within one object (a merge tool's "accept both" can leave
+  one, and `encoding/json` would keep the last) or not in lower case, unknown fields, an
+  unknown state (`retired` too, until M5), a view without versions or with a repeated
+  number, an entry without a state or a mode, and an entry that isn't a valid view version,
+  such as a hand edit whose definition no longer matches its fingerprint. Every lock error
+  is DF6013 and stops `validate` and `generate`; there is never a fallback to v1.
 - **Two `current` versions are repaired:** numbering first marks every `current` entry
   `retained`, then the SQL picks which version is current. Nothing is dropped, so the repair
   needs no question to the user.
 - From M2, `validate`, `explain` and `generate` all read the lock, so they agree on numbers;
-  only `generate` writes it. `validate` adds two checks that keep the projector from failing
-  on a retained version: its stream is gone, or it reads a column the stream no longer has
-  with that type. The hint is `dynaflux retire view@vN`.
+  only `generate` writes it. `validate` reports a retained version that the projector
+  couldn't keep maintaining (DF6015): its stream is gone; the stream no longer has a column
+  it reads, with the type it reads; the stream now has a column named like its `ARRAY JOIN`
+  alias, which would win over the alias; or a stream now has its view's name. The hint
+  names the fix, such as restoring the column, or `dynaflux retire view@vN`.
 
 ## Open questions
 
@@ -58,4 +64,4 @@ found details that ADR 0002 leaves open or states differently:
   to the same view.
 - [sql.md §9.9](../spec/sql.md#99-view-versions) states the lock rules, and
   [config.md](../spec/config.md#resource-names) checks the resource names of every version
-  in the catalog and defines DF6013.
+  in the catalog and defines DF6013 and DF6015.

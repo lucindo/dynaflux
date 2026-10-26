@@ -26,23 +26,23 @@ func Compare(a Value, at catalog.Type, b Value, bt catalog.Type) int {
 		return 1
 	case b.IsNull():
 		return -1
-	case (a.kind == kindDecimal || b.kind == kindDecimal) && a.kind != kindFloat && b.kind != kindFloat:
+	case (a.kind == KindDecimal || b.kind == KindDecimal) && a.kind != KindFloat && b.kind != KindFloat:
 		return compareDecimal(asDecimal(a, at), asDecimal(b, bt))
-	case a.kind == kindDecimal || b.kind == kindDecimal:
+	case a.kind == KindDecimal || b.kind == KindDecimal:
 		return exact(a, at).Cmp(exact(b, bt))
-	case a.kind == kindFloat && b.kind == kindFloat:
+	case a.kind == KindFloat && b.kind == KindFloat:
 		return cmp.Compare(a.AsFloat(), b.AsFloat())
-	case a.kind == kindFloat:
+	case a.kind == KindFloat:
 		return compareFloat(a.AsFloat(), b)
-	case b.kind == kindFloat:
+	case b.kind == KindFloat:
 		return -compareFloat(b.AsFloat(), a)
-	case a.kind == kindInt && b.kind == kindUint:
+	case a.kind == KindInt && b.kind == KindUint:
 		return compareIntUint(a.i, b.n)
-	case a.kind == kindUint && b.kind == kindInt:
+	case a.kind == KindUint && b.kind == KindInt:
 		return -compareIntUint(b.i, a.n)
-	case a.kind == kindInt || a.kind == kindMicros:
+	case a.kind == KindInt || a.kind == KindMicros:
 		return cmp.Compare(a.i, b.i)
-	case a.kind == kindUint || a.kind == kindBool:
+	case a.kind == KindUint || a.kind == KindBool:
 		return cmp.Compare(a.n, b.n)
 	}
 	return strings.Compare(a.s, b.s)
@@ -60,7 +60,7 @@ func compareIntUint(i int64, u uint64) int {
 func compareFloat(f float64, v Value) int {
 	const two63, two64 = 0x1p63, 0x1p64
 	t := math.Trunc(f)
-	if v.kind == kindUint {
+	if v.kind == KindUint {
 		switch {
 		case f < 0:
 			return -1
@@ -96,10 +96,10 @@ func compareDecimal(x, y decimal) int {
 
 // exact returns a Decimal of type t or a Float64 as an exact rational.
 func exact(v Value, t catalog.Type) *big.Rat {
-	if v.kind == kindFloat {
+	if v.kind == KindFloat {
 		return new(big.Rat).SetFloat64(v.AsFloat())
 	}
-	return new(big.Rat).SetFrac(v.d, pow10(t.Scale))
+	return new(big.Rat).SetFrac(v.d, Pow10(t.Scale))
 }
 
 func evalCompare(test func(c int) bool) evalFunc {

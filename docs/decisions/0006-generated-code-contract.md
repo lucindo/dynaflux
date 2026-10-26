@@ -53,7 +53,8 @@ func QueryRow[R any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog
   `event_id`, `event_time`, `ingest_time`, `origin_region`; a key's `PRIMARY KEY` columns; a
   query's parameters or output columns. Each pointer has exactly the Go type of
   [ADR 0005](0005-public-go-value-types.md); a mismatch is an error naming the field and both
-  types. No reflection, no struct tags.
+  types. No struct tags, and no reflection over struct fields: `fluxgen` checks each
+  pointer's type.
 - Generated methods are one line each and pass the unexported method expression
   `(*PageView).fields`, so user types gain no exported methods.
 - Streams and queries are named by their SQL names.
@@ -85,8 +86,9 @@ if errors.As(err, &be) {
 }
 ```
 
-- The `Token` of a batch covers every event the call stored, so its text grows with the
-  batch: progress is per delivery unit, and M6's `WaitFor` needs each event's key.
+- The `Token` of a batch covers every event stored, by the call or, for a duplicate, before
+  it, so its text grows with the batch: progress is per delivery unit, and M6's `WaitFor`
+  needs each event's key.
 - `Append<Event>` returns the stored event's `Token` together with `ErrDuplicate`, as
   `io.Reader` returns n with an error, so a retry can still wait for its event. A retry that
   the SDK made of the caller's own write succeeds
@@ -115,8 +117,9 @@ before `Append` returns so a test reads its own writes, fails the test at once o
 unreadable catalog, and fails it when a view's breaker opens. Event IDs come from a
 deterministic source and are monotonic, so events appended at one instant keep their append
 order and IDs repeat across runs. Time is `time.Now`, so tests of `ACCEPT` and `TTL` run
-under `testing/synctest`. The package doc and a runnable Example state how it differs from
-production.
+under `testing/synctest`. The package doc states how it differs from production, and the
+tests of `examples/analytics` show it in use: an Example function gets no `testing.TB` and
+can't start a `testing/synctest` bubble.
 
 **Generated comments** say what the code does:
 - A column with a `DEFAULT`: `// country String DEFAULT 'US': only for events stored before
@@ -176,8 +179,8 @@ keeps every N it still supports, as gRPC keeps `SupportPackageIsVersion3` to `9`
 
 - `fluxgen` documents seven functions. Their signatures are part of `GeneratedCodeVersion1`.
 - The whole three-domain example generates about 14 KB of Go plus the catalog literal.
-- A test checks that codegen's Go types and the runtime's decoding agree for every SQL type,
-  plain, `Nullable` and `Array`.
+- Codegen and `fluxgen` take each SQL type's Go type from one table, `internal/gotype`, so
+  the types generated code declares are the ones `fluxgen` decodes into.
 - The public API gains `fluxgen`, options on every generated method, and `Decimal`, `UUID`
   and `ValueError` in the root package. The runtime entry point, planned as
   `runtime.Start`, is designed in M3.

@@ -116,7 +116,7 @@ func TestExplainRejectsSourceRows(t *testing.T) {
 
 // One active row takes every event's write: in scenario B, ~869 invocations a second each
 // write the row once, and every one of the ~3,500 shards leaves a mark in it, which makes it
-// ~100 KB, or 102 write units a write.
+// ~82 KB, or 83 write units a write.
 func TestExplainOneActiveRow(t *testing.T) {
 	t.Parallel()
 	cfg, cat := loadFile(t, "testdata/reports/one_year.txtar")
@@ -128,7 +128,7 @@ func TestExplainOneActiveRow(t *testing.T) {
 	}
 	for _, want := range []string{
 		"--rows page_daily=1\n",
-		"warning page_daily: each row takes ~97,4",
+		"warning page_daily: each row takes ~79,319 write",
 		"read units per second, over the 1,000 and 3,000 that a DynamoDB partition takes",
 	} {
 		if !strings.Contains(r.Text, want) {

@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
@@ -20,7 +21,7 @@ func NewArchiveModel(cfg Archive, seed uint64) *ArchiveModel {
 	return &ArchiveModel{a: &archive{cfg: cfg}, rng: newRand(seed, streamArchive)}
 }
 
-func (m *ArchiveModel) Put(unit string, recs []Record) { m.a.put(m.rng, "s", unit, recs) }
+func (m *ArchiveModel) Put(unit string, recs []projector.Record) { m.a.put(m.rng, "s", unit, recs) }
 
 // Arrived returns the sequence numbers a reader finds at now, and how many of the
 // entries are in the error prefix.
@@ -47,8 +48,18 @@ func CheckChangeStream(applied, records []store.Item) []string {
 	}
 	u := &unit{}
 	for _, it := range records {
-		u.recs = append(u.recs, Record{Op: Insert, New: it})
+		u.recs = append(u.recs, projector.Record{Op: projector.Insert, New: it})
 	}
 	r.checkStream(&region{name: "r0", order: []*stream{{table: "t", units: []*unit{u}}}})
+	return r.violations
+}
+
+func NewOracle() *Oracle { return newOracle() }
+
+// CheckViews checks P1 and P3 on region r0, whose oracle is o, and P2 between r0 and r1.
+func CheckViews(o *Oracle, r0, r1 State) []string {
+	r := &run{}
+	r.checkRegion("r0", o, r0)
+	r.checkConvergence("r0 vs r1", r0, r1)
 	return r.violations
 }

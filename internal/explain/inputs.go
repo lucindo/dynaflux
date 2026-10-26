@@ -47,6 +47,7 @@ func newStreamPlan(cfg *config.Config, cat *catalog.Catalog, w Workload, s *cata
 			BatchingWindow: time.Duration(cfg.Runtime.BatchingWindowSeconds) * time.Second,
 			BatchSize:      DefaultBatchSize,
 			HWMWindow:      time.Duration(cat.PruneWindowSeconds) * time.Second,
+			HWMEntryKB:     float64(hwmEntryBytes) / bytesPerKB,
 			MemoryMB:       cfg.Runtime.MemoryMB,
 			Arch:           Arch(cfg.Runtime.Arch),
 			Meta:           capacity(cfg.Defaults.Capacity),

@@ -38,16 +38,20 @@ Athena, over an archive of events that Dynaflux writes to S3.
 
 ## Status
 
-Dynaflux is in early development, at milestone M1: the language and the compiler. What works:
+Dynaflux is in early development, at milestone M2: the runtime core. What works:
 
 - The SQL dialect and `dynaflux.yaml` are specified in [docs/spec](docs/spec).
 - `dynaflux validate` checks a project and reports each problem with its file, line and a
   hint on how to fix it.
 - `dynaflux explain` shows the table layout and the estimated cost of a stream, view or
   query.
+- `dynaflux generate` writes the typed Go client package of a project and numbers its view
+  versions in `dynaflux.lock`, a file you commit.
+- The generated client appends events and runs queries against an in-memory store from
+  `fluxtest`, with the projector keeping views current, as in
+  [examples/analytics](examples/analytics).
 
-Nothing runs on AWS yet. The runtime (the Go API to append and query, and the projector that
-keeps views current), code generation, the infrastructure templates and the operations
+Nothing runs on AWS yet: the DynamoDB store, the infrastructure templates and the operations
 commands, such as `status` and `backfill`, are not built. Until v1.0, the dialect, the
 configuration and the commands may change.
 
@@ -194,6 +198,16 @@ dynaflux/top_pages.sql:4:1: error DF4101: TopPages: view page_daily is partition
 - [docs/spec/config.md](docs/spec/config.md): the `dynaflux.yaml` reference.
 - [docs/decisions](docs/decisions/README.md): architecture decision records.
 - [docs/README.md](docs/README.md): an index of all the docs.
+
+## Development
+
+`make help` lists the development targets, and `make verify` runs the formatters,
+`go mod tidy`, the linters, the vulnerability check and the tests. `Float64` results must be
+the same on every CPU, so `make cross-arch` runs the cross-architecture tests as amd64:
+natively on an amd64 machine, and through Rosetta on Apple silicon. It isn't part of
+`make verify`. A test fails when `dynaflux generate` would change the code generated in
+[examples/analytics](examples/analytics); after changing the templates, run
+`go run ../../cmd/dynaflux generate` in that directory.
 
 ## License
 

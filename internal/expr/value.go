@@ -9,11 +9,11 @@ import (
 	"math/big"
 )
 
-// Value is one SQL value. It holds a representation only: the catalog type of the
-// expression that made it says which constructor built it, and only that constructor's
-// accessor reads it meaningfully. The zero Value is NULL.
+// Value is one SQL value. It holds a representation only, which [Value.Kind] names: the
+// catalog type of the expression that made it says which constructor built it, and only
+// that constructor's accessor reads it meaningfully. The zero Value is NULL.
 type Value struct {
-	kind kind
+	kind Kind
 	n    uint64   // Bool, Uint, Float bits
 	i    int64    // Int, Micros
 	s    string   // String, UUID bytes
@@ -21,19 +21,21 @@ type Value struct {
 	a    []Value  // Array
 }
 
-type kind uint8
+// Kind is the representation of a [Value]: the constructor that built it.
+type Kind uint8
 
+// Kinds, one per constructor: [Null] makes KindNull, [Bool] makes KindBool, and so on.
 const (
-	kindNull kind = iota
-	kindBool
-	kindInt
-	kindUint
-	kindFloat
-	kindDecimal
-	kindString
-	kindUUID
-	kindMicros
-	kindArray
+	KindNull Kind = iota
+	KindBool
+	KindInt
+	KindUint
+	KindFloat
+	KindDecimal
+	KindString
+	KindUUID
+	KindMicros
+	KindArray
 )
 
 // Null returns NULL.
@@ -41,7 +43,7 @@ func Null() Value { return Value{} }
 
 // Bool returns a Bool.
 func Bool(b bool) Value {
-	v := Value{kind: kindBool}
+	v := Value{kind: KindBool}
 	if b {
 		v.n = 1
 	}
@@ -49,40 +51,46 @@ func Bool(b bool) Value {
 }
 
 // Int returns a value of Int8 to Int64.
-func Int(i int64) Value { return Value{kind: kindInt, i: i} }
+func Int(i int64) Value { return Value{kind: KindInt, i: i} }
 
 // Uint returns a value of UInt8 to UInt64.
-func Uint(u uint64) Value { return Value{kind: kindUint, n: u} }
+func Uint(u uint64) Value { return Value{kind: KindUint, n: u} }
 
 // Float returns a Float64. f must be finite; −0 becomes 0, the only zero Float64 has.
 func Float(f float64) Value {
 	if f == 0 {
-		return Value{kind: kindFloat}
+		return Value{kind: KindFloat}
 	}
-	return Value{kind: kindFloat, n: math.Float64bits(f)}
+	return Value{kind: KindFloat, n: math.Float64bits(f)}
 }
 
 // Decimal returns a Decimal(P, S) from its unscaled value; the type gives S. The Value
 // takes ownership of unscaled.
-func Decimal(unscaled *big.Int) Value { return Value{kind: kindDecimal, d: unscaled} }
+func Decimal(unscaled *big.Int) Value { return Value{kind: KindDecimal, d: unscaled} }
 
 // String returns a String.
-func String(s string) Value { return Value{kind: kindString, s: s} }
+func String(s string) Value { return Value{kind: KindString, s: s} }
 
 // UUID returns a UUID.
-func UUID(b [16]byte) Value { return Value{kind: kindUUID, s: string(b[:])} }
+func UUID(b [16]byte) Value { return Value{kind: KindUUID, s: string(b[:])} }
 
 // Micros returns a Date, DateTime or DateTime64: microseconds since 1970-01-01 UTC.
-func Micros(us int64) Value { return Value{kind: kindMicros, i: us} }
+func Micros(us int64) Value { return Value{kind: KindMicros, i: us} }
 
 // Array returns an Array, never NULL even when vs is empty. The Value takes ownership of vs.
-func Array(vs []Value) Value { return Value{kind: kindArray, a: vs} }
+func Array(vs []Value) Value { return Value{kind: KindArray, a: vs} }
+
+// Kind returns v's representation.
+func (v Value) Kind() Kind { return v.kind }
 
 // IsNull reports whether v is NULL.
-func (v Value) IsNull() bool { return v.kind == kindNull }
+func (v Value) IsNull() bool { return v.kind == KindNull }
 
 // AsBool returns the value of a [Bool].
 func (v Value) AsBool() bool { return v.n != 0 }
+
+// IsTrue reports whether a condition's value v holds: NULL counts as false.
+func (v Value) IsTrue() bool { return !v.IsNull() && v.AsBool() }
 
 // AsInt returns the value of an [Int].
 func (v Value) AsInt() int64 { return v.i }

@@ -140,13 +140,13 @@ func (m *Meta) Advance(ctx context.Context, u Unit, upTo string, at time.Time, c
 	return m.errAttempts(unitItemKey(u.Stream, u.Key))
 }
 
-// FenceUnits fences each listed unit of a stream for version, as [Meta.EnsureFence] does.
-// version must be [Activating], or the call fails with [ErrNotActivating]. listedAt, when the
-// units were listed, must be at least [ListingDelay] after its activation: by then every
-// projector knows the version is activating, so a unit missing from the listing gets its
-// fence from its first batch. A listedAt ahead of the clock is refused. Fences already made
+// FenceUnits fences, for version, each unit of a stream that list returns, as
+// [Meta.EnsureFence] does. version must be [Activating], or the call fails with
+// [ErrNotActivating]. FenceUnits calls list no earlier than [ListingDelay] after the
+// activation, waiting if needed: by then every projector knows the version is activating, so
+// a unit missing from the listing gets its fence from its first batch. Fences already made
 // are kept, so a failed call can be repeated.
-func (m *Meta) FenceUnits(ctx context.Context, stream, version string, unitIDs []string, listedAt time.Time) error {
+func (m *Meta) FenceUnits(ctx context.Context, stream, version string, list func(context.Context) ([]string, error)) error {
 	vs, _, err := m.viewState(ctx, version)
 	if err != nil {
 		return err
@@ -154,13 +154,12 @@ func (m *Meta) FenceUnits(ctx context.Context, stream, version string, unitIDs [
 	if vs.State != Activating {
 		return fmt.Errorf("meta: fence units of %s for %s: the version is %s: %w", stream, version, vs.State, ErrNotActivating)
 	}
-	if now := time.Now(); listedAt.After(now) {
-		return fmt.Errorf("meta: fence units of %s for %s: listed at %s, ahead of the clock (%s)",
-			stream, version, listedAt.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
+	if err = waitUntil(ctx, vs.ActivatedAt.Add(ListingDelay)); err != nil {
+		return fmt.Errorf("meta: fence units of %s for %s: %w", stream, version, err)
 	}
-	if earliest := vs.ActivatedAt.Add(ListingDelay); listedAt.Before(earliest) {
-		return fmt.Errorf("meta: fence units of %s for %s: listed at %s, before %s: %w",
-			stream, version, listedAt.UTC().Format(time.RFC3339Nano), earliest.Format(time.RFC3339Nano), ErrListedTooEarly)
+	unitIDs, err := list(ctx)
+	if err != nil {
+		return fmt.Errorf("meta: fence units of %s for %s: list the units: %w", stream, version, err)
 	}
 	for _, id := range unitIDs {
 		u, uerr := m.Unit(ctx, stream, id)
@@ -169,6 +168,21 @@ func (m *Meta) FenceUnits(ctx context.Context, stream, version string, unitIDs [
 		}
 		if uerr != nil {
 			return uerr
+		}
+	}
+	return nil
+}
+
+// waitUntil returns once the clock reads t, or ctx's error when ctx ends first. It reads the
+// clock again after each wait: a timer measures elapsed time, and the clock can step back.
+func waitUntil(ctx context.Context, t time.Time) error {
+	for d := time.Until(t); d > 0; d = time.Until(t) {
+		timer := time.NewTimer(d)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
 	return nil

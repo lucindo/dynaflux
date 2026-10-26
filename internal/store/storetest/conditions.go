@@ -6,6 +6,7 @@ package storetest
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -137,6 +138,42 @@ func (s suite) checkRetriedWrite(t *testing.T) {
 	err = r.Put(t.Context(), Table, keyed(part, "b", store.Item{"o": str("mine")}), store.IfAbsent())
 	wantConditionFailed(t, err, theirs)
 	wantStored(t, b, theirs)
+}
+
+func (s suite) checkStaleReads(t *testing.T) {
+	t.Parallel()
+	b := StaleReads(s.newBackend(t), s.newBackend(t))
+	it := keyed(part, "a", store.Item{"n": num("1")})
+	mustPut(t, b, it, store.IfAbsent())
+	wantRead(t, b, keyOf(it), true, it)
+	wantRead(t, b, keyOf(it), false, nil)
+}
+
+// wantRead fails unless Get and BatchGet of k, and a Query of its partition, find want, or
+// nothing when want is nil.
+func wantRead(t *testing.T, b store.Backend, k store.Key, consistent bool, want store.Item) {
+	t.Helper()
+	got, err := b.Get(t.Context(), Table, k, consistent)
+	if err != nil || !equalItem(got, want) {
+		t.Errorf("Get, consistent %v = %s, %v; want %s", consistent, show(got), err, show(want))
+	}
+	batch, err := b.BatchGet(t.Context(), Table, []store.Key{k}, consistent)
+	if err != nil || len(batch) != 1 || !equalItem(batch[0], want) {
+		t.Errorf("BatchGet, consistent %v = %d items, %v; want [%s]", consistent, len(batch), err, show(want))
+	}
+	var queried, wantQueried []store.Item
+	for got, err := range b.Query(t.Context(), Table, store.Query{PK: k.PK, Consistent: consistent}) {
+		if err != nil {
+			t.Fatalf("Query, consistent %v: %v", consistent, err)
+		}
+		queried = append(queried, got)
+	}
+	if want != nil {
+		wantQueried = []store.Item{want}
+	}
+	if !slices.EqualFunc(queried, wantQueried, equalItem) {
+		t.Errorf("Query, consistent %v = %d items, want %d", consistent, len(queried), len(wantQueried))
+	}
 }
 
 func (s suite) checkCanceledContext(t *testing.T) {

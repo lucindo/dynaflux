@@ -42,7 +42,7 @@ endef
 DOCKERFILES = $(shell git ls-files --cached --others --exclude-standard -- '*Dockerfile*')
 
 .PHONY: help check-git-hooks warn-git-hooks setup-git-hooks tools tools-update \
-        test bench fmt fix lint vuln osv gomod mod-download verify check-clean \
+        test bench cross-arch fmt fix lint vuln osv gomod mod-download verify check-clean \
         hadolint checkov trivy semgrep
 
 .DEFAULT_GOAL := help
@@ -91,6 +91,11 @@ test: ## Run `go test -race -shuffle=on ./...`.
 
 bench: ## Run all benchmarks with memory stats (not part of verify).
 	go test -run='^$$' -bench=. -benchmem ./...
+
+# Float64 results must not depend on the CPU. Apple silicon runs the amd64 build through
+# Rosetta; an amd64 machine runs it natively.
+cross-arch: ## Run the cross-architecture Float64 tests as amd64 (not part of verify).
+	GOARCH=amd64 go test -run 'CrossArchitecture|NoFusedMultiplyAdd' ./internal/agg ./internal/expr
 
 fmt: tools ## Format Go code with the formatters in .golangci.yml.
 	$(GOLANGCI_LINT) fmt

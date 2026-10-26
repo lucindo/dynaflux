@@ -52,6 +52,15 @@ func checkStream(s *Stream) error {
 	if err := names("column", slices.Concat(s.Columns, ImplicitColumns()), func(c Column) string { return c.Name }, AttrPK, AttrSK); err != nil {
 		return err
 	}
+	if len(s.PrimaryKey) == 0 {
+		return errors.New("no primary key")
+	}
+	if err := declared("primary key", s.PrimaryKey, s.Columns); err != nil {
+		return err
+	}
+	if err := declared("dedup by", s.DedupBy, s.Columns); err != nil {
+		return err
+	}
 	if s.Shards < 1 || s.Shards > MaxShards {
 		return fmt.Errorf("shards %d is not between 1 and %d", s.Shards, MaxShards)
 	}
@@ -67,6 +76,16 @@ func checkStream(s *Stream) error {
 		}
 		if err := col.Default.check(0); err != nil {
 			return fmt.Errorf("column %s: %w", col.Name, err)
+		}
+	}
+	return nil
+}
+
+// declared checks that every name in names is a column of cols.
+func declared(clause string, names []string, cols []Column) error {
+	for _, name := range names {
+		if !slices.ContainsFunc(cols, func(c Column) bool { return c.Name == name }) {
+			return fmt.Errorf("%s %s is not a declared column", clause, name)
 		}
 	}
 	return nil

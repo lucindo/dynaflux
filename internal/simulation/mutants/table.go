@@ -17,23 +17,42 @@ type control struct {
 	Test     string
 }
 
-// The code mutants act on the stand-in core of the harness's tests until the projector
-// replaces it.
 func table() []control {
 	const (
-		standIn = "internal/simulation/actor_test.go"
-		kill    = "!now.Before(inv.deadline)"
+		apply  = "internal/projector/apply.go"
+		eval   = "internal/projector/eval.go"
+		handle = "internal/projector/handle.go"
+		kill   = "!now.Before(inv.deadline)"
+		breaks = "opened, err := c.meta.MarkBroken(ctx, v.id, f)"
+		faults = "faults"
+		poison = "poison"
 	)
 	return []control{
 		{
-			ID:       "C2", // a marker counts only when this attempt wrote it
-			File:     standIn,
-			Old:      "return it[catalog.AttrMarkerOwner].Str == owner, nil",
-			New:      "return false, nil",
-			Scenario: "faults",
+			ID:       "C1", // no high-water marks
+			File:     apply,
+			Old:      "last := cur.hwm.Units[unitKey]",
+			New:      `last := ""`,
+			Scenario: faults,
 			Seeds:    20,
 		},
+		{
+			ID:       "C2", // a marker counts only when this attempt wrote it
+			File:     apply,
+			Old:      "return o.Str, nil",
+			New:      `return "", nil`,
+			Scenario: faults,
+			Seeds:    50,
+		},
 		{ID: "C3", Scenario: "clean", Seeds: 50}, // ParallelizationFactor 2
+		{
+			ID:       "C4", // a value that repeats within one record and row counts each time
+			File:     eval,
+			Old:      "if !c.seen[k] {",
+			New:      "if true {",
+			Scenario: faults,
+			Seeds:    50,
+		},
 		{
 			ID:   "C15d", // a request at the deadline is sent
 			File: "internal/simulation/region.go",
@@ -50,11 +69,54 @@ func table() []control {
 		},
 		{
 			ID:       "C21", // sequence numbers compared unpadded
-			File:     standIn,
-			Old:      "pad(rec.Seq) <= pad(mark)",
-			New:      "rec.Seq <= mark",
-			Scenario: "clean",
+			File:     handle,
+			Old:      "return strings.Compare(a.seq, b.seq)",
+			New:      "return strings.Compare(a.Seq, b.Seq)",
+			Scenario: faults,
 			Seeds:    20,
+		},
+		{
+			ID:   "C24a", // an evaluation error fails the batch
+			File: handle,
+			Old:  "err := rs.add(v, r, vals, bad)",
+			New: `if err := rs.add(v, r, vals, bad); err != nil {
+			return err
+		}
+		var err error`,
+			Scenario: poison,
+			Seeds:    20,
+		},
+		{
+			ID:   "C24b", // an evaluation error opens every view's breaker
+			File: handle,
+			Old: breaks + `
+		if err != nil {
+			return fmt.Errorf("projector: %w", err)
+		}
+		if opened {
+			st.Broken = append(st.Broken, v.id)
+		}
+		broken[v] = true`,
+			New: `for _, v := range active {
+			` + breaks + `
+			if err != nil {
+				return fmt.Errorf("projector: %w", err)
+			}
+			if opened {
+				st.Broken = append(st.Broken, v.id)
+			}
+			broken[v] = true
+		}`,
+			Scenario: poison,
+			Seeds:    20,
+		},
+		{
+			ID:       "C24c", // a failed MarkBroken is swallowed
+			File:     handle,
+			Old:      breaks + "\n\t\tif err != nil {",
+			New:      breaks + "\n\t\tif false {",
+			Scenario: poison,
+			Seeds:    100,
 		},
 	}
 }

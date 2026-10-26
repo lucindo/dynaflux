@@ -56,7 +56,7 @@ func evalConcat(n *node, f *Frame) (Value, error) {
 
 // evalLength counts the bytes of a String or the elements of an Array.
 func evalLength(_ *node, v Value) (Value, error) {
-	if v.kind == kindArray {
+	if v.kind == KindArray {
 		return Uint(uint64(len(v.a))), nil
 	}
 	return Uint(uint64(len(v.s))), nil

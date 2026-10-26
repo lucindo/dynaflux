@@ -32,12 +32,12 @@ func evalLogic(e catalog.Expr) (cval, error) {
 	return cval{null: null, b: !decisive}, nil
 }
 
-// evalChoice evaluates if, multiIf and coalesce, which evaluate only the value they
-// return, and converts it to the result type.
+// evalChoice evaluates if and multiIf, which evaluate only the value they return, and
+// converts it to the result type.
 func evalChoice(e catalog.Expr) (cval, error) {
 	i, err := chosen(e)
-	if err != nil || i < 0 {
-		return cval{null: true}, err
+	if err != nil {
+		return cval{}, err
 	}
 	v, err := eval(e.Args[i])
 	if err != nil || v.null {
@@ -46,17 +46,19 @@ func evalChoice(e catalog.Expr) (cval, error) {
 	return convert(v, e.Args[i].Type, e.Type), nil
 }
 
-// chosen returns the index of the argument that a conditional returns, or -1 for NULL.
-func chosen(e catalog.Expr) (int, error) {
-	if e.Op == catalog.OpCoalesce {
-		for i, a := range e.Args {
-			v, err := eval(a)
-			if err != nil || !v.null {
-				return i, err
-			}
+// coalesce returns the first of the evaluated args that isn't NULL, converted to the
+// result type.
+func coalesce(e catalog.Expr, args []cval) cval {
+	for i, v := range args {
+		if !v.null {
+			return convert(v, e.Args[i].Type, e.Type)
 		}
-		return -1, nil
 	}
+	return cval{null: true}
+}
+
+// chosen returns the index of the argument that a conditional returns.
+func chosen(e catalog.Expr) (int, error) {
 	last := len(e.Args) - 1
 	for i := 0; i < last; i += 2 {
 		cond, err := eval(e.Args[i])

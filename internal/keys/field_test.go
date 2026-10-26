@@ -108,6 +108,21 @@ func TestKeyExamples(t *testing.T) {
 	}
 }
 
+func TestSplitPrefix(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ sk, want string }{
+		{"2024-05-31#p02", "2024-05-31"},
+		{"p15", ""}, // no sort fields
+		{"a#b#p00", "a#b"},
+		{"a##p07", "a#"}, // the last field is an empty String
+	}
+	for _, tt := range tests {
+		if got := keys.SplitPrefix(tt.sk); got != tt.want {
+			t.Errorf("SplitPrefix(%q) = %q, want %q", tt.sk, got, tt.want)
+		}
+	}
+}
+
 func TestFieldRejectsValuesOutsideTheEncoding(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

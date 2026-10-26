@@ -100,8 +100,8 @@ import (
 // WorkspaceActiveMembersParams are the parameters of query WorkspaceActiveMembers.
 type WorkspaceActiveMembersParams struct {
 	WorkspaceID string    // {workspace_id:String}
-	From        time.Time // {from:Date}
-	To          time.Time // {to:Date}
+	From        time.Time // {from:Date}: the UTC date of the time given
+	To          time.Time // {to:Date}: the UTC date of the time given
 }
 
 // WorkspaceActiveMembersRow is a row of query WorkspaceActiveMembers.
@@ -189,8 +189,9 @@ func (c *Client) AppendMemberEvent(ctx context.Context, ev MemberEvent, opts ...
 }
 
 // AppendMemberEventBatch appends evs to stream member_events, each event as its own write.
-// The Token covers every event it stored. When an event fails, the error is a
-// *dynaflux.BatchError whose Errs line up with evs, nil for each stored event.
+// The Token covers every event stored, by this call or before it. When an event
+// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
+// each event this call stored.
 func (c *Client) AppendMemberEventBatch(ctx context.Context, evs []MemberEvent, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvents(ctx, c.store, Catalog, "member_events", evs, (*MemberEvent).fields, opts...)
 }

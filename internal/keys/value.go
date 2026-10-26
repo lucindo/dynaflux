@@ -337,6 +337,20 @@ func TTL(expiryMicros int64) store.Value {
 	return number(strconv.FormatInt(s+ttlMargin, 10))
 }
 
+// TTLExpiry returns the expiry that a _ttl attribute stands for, in microseconds: the one
+// given to [TTL], rounded up to a whole second.
+func TTLExpiry(a store.Value) (int64, error) {
+	v, err := DecodeValue(catalog.Type{Kind: catalog.KindInt64}, a, true)
+	if err != nil {
+		return 0, err
+	}
+	s := v.AsInt() - ttlMargin
+	if s < 0 || s > math.MaxInt64/microsPerSecond {
+		return 0, fmt.Errorf("_ttl %s is not an expiry Dynaflux writes", a.Str)
+	}
+	return s * microsPerSecond, nil
+}
+
 func isDigits(s string) bool {
 	for i := range len(s) {
 		if s[i] < '0' || s[i] > '9' {

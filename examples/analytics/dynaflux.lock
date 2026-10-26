@@ -1,0 +1,382 @@
+{
+  "format": 1,
+  "views": {
+    "member_latest": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "2278b72de8b9719537ab56409408af2dd362421d8313eae958c9a6d92618f500",
+        "mode": "async",
+        "stream": "member_events",
+        "keys": [
+          {
+            "name": "workspace_id",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "workspace_id"
+            }
+          },
+          {
+            "name": "member_id",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "member_id"
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "actions"
+          },
+          {
+            "fn": "argMax",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "action"
+              },
+              {
+                "op": "column",
+                "type": "DateTime64(6)",
+                "name": "event_time"
+              }
+            ],
+            "type": "String",
+            "name": "last_action"
+          },
+          {
+            "fn": "max",
+            "args": [
+              {
+                "op": "column",
+                "type": "DateTime64(6)",
+                "name": "event_time"
+              }
+            ],
+            "type": "DateTime64(6)",
+            "name": "last_seen"
+          }
+        ],
+        "storage_format": 1
+      }
+    ],
+    "page_daily": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "a3e853dc10c9a79c54e83e5cddbe4dc96159e25893a0f531d4739bdc8ec1c1e8",
+        "mode": "async",
+        "stream": "page_views",
+        "where": {
+          "op": "notEquals",
+          "type": "Bool",
+          "args": [
+            {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            },
+            {
+              "op": "literal",
+              "type": "String"
+            }
+          ]
+        },
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toStartOfDay",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "ttl": {
+          "key": "day",
+          "plus": "2 YEAR"
+        },
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "max",
+            "args": [
+              {
+                "op": "column",
+                "type": "DateTime64(6)",
+                "name": "event_time"
+              }
+            ],
+            "type": "DateTime64(6)",
+            "name": "last_view"
+          },
+          {
+            "fn": "sum",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "duration_ms"
+              }
+            ],
+            "type": "UInt64",
+            "name": "total_ms"
+          },
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "user_id"
+              }
+            ],
+            "type": "UInt64",
+            "name": "visitors"
+          }
+        ],
+        "storage_format": 1
+      }
+    ],
+    "quota_usage": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "111b062a069fcd925ff80c9579177d1690f44d43dfa5cf3d6df8b3b68bd20b34",
+        "mode": "sync",
+        "stream": "api_calls",
+        "keys": [
+          {
+            "name": "account_id",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "account_id"
+            }
+          },
+          {
+            "name": "month",
+            "expr": {
+              "op": "toStartOfMonth",
+              "type": "Date",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "ttl": {
+          "key": "month",
+          "plus": "13 MONTH"
+        },
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "calls"
+          },
+          {
+            "fn": "sum",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "units"
+              }
+            ],
+            "type": "UInt64",
+            "name": "used_units"
+          }
+        ],
+        "storage_format": 1
+      }
+    ],
+    "tag_hourly": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "980d30cc18e233b19f48faf74132eb7bcf192d55e1a4bab06e1e99a586b92858",
+        "mode": "async",
+        "stream": "page_views",
+        "array_join": {
+          "array": {
+            "op": "column",
+            "type": "Array(String)",
+            "name": "tags"
+          },
+          "alias": "tag"
+        },
+        "keys": [
+          {
+            "name": "tag",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "tag"
+            }
+          },
+          {
+            "name": "hour",
+            "expr": {
+              "op": "toStartOfHour",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "ttl": {
+          "key": "hour",
+          "plus": "30 DAY"
+        },
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "uniq",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "user_id"
+              }
+            ],
+            "type": "UInt64",
+            "name": "users"
+          },
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      }
+    ],
+    "workspace_daily": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "16f705dcd4a1f146e71714128a9455dd7aee2f38c4b9f94a525ec5dde7cba88c",
+        "mode": "async",
+        "stream": "member_events",
+        "keys": [
+          {
+            "name": "workspace_id",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "workspace_id"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toDate",
+              "type": "Date",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "ttl": {
+          "key": "day",
+          "plus": "400 DAY"
+        },
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "uniq",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "member_id"
+              }
+            ],
+            "type": "UInt64",
+            "name": "active_members"
+          },
+          {
+            "fn": "avg",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "duration_ms"
+              }
+            ],
+            "type": "Nullable(Float64)",
+            "name": "avg_duration_ms"
+          },
+          {
+            "fn": "count",
+            "cond": {
+              "op": "equals",
+              "type": "Bool",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "String",
+                  "name": "action"
+                },
+                {
+                  "op": "literal",
+                  "type": "String",
+                  "value": "login"
+                }
+              ]
+            },
+            "type": "UInt64",
+            "name": "logins"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}

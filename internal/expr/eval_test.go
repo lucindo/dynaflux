@@ -269,7 +269,6 @@ func TestConditionals(t *testing.T) {
 		{"multiIf converts else", call(catalog.OpMultiIf, "UInt16", boolean(false), lit("UInt8", "1"), lit("UInt16", "300")), "300"},
 		{"multiIf skips the values it doesn't return", call(catalog.OpMultiIf, "UInt8", boolean(false), fails(), lit("UInt8", "2")), "2"},
 		{"coalesce takes the first value", call(catalog.OpCoalesce, "Int64", nullInt, someInt, lit("Int64", "5")), "7"},
-		{"coalesce stops at the first value", call(catalog.OpCoalesce, "Int64", someInt, fails()), "7"},
 		{"coalesce converts", call(catalog.OpCoalesce, "UInt16", col("u8", "Nullable(UInt8)"), lit("UInt16", "1")), "200"},
 		{"coalesce of NULLs", call(catalog.OpCoalesce, "Nullable(Int64)", nullInt, nullInt), "NULL"},
 	})
@@ -398,9 +397,9 @@ func TestNullInGivesNullOut(t *testing.T) {
 	))
 }
 
-// TestNullDoesNotSkipOperands checks that only the ops sql.md §5.8 names skip operands: a
-// NULL operand of any other op still lets a later operand fail.
-func TestNullDoesNotSkipOperands(t *testing.T) {
+// TestEveryOperandIsEvaluated checks that only the ops sql.md §5.8 names skip operands: any
+// other op fails when an operand fails, whatever its other operands hold.
+func TestEveryOperandIsEvaluated(t *testing.T) {
 	t.Parallel()
 	failingStr := call(catalog.OpIf, "String", call(catalog.OpEquals, "Bool", fails(), lit("UInt8", "1")), lit("String", "a"), lit("String", "b"))
 	runEval(t, []evalCase{
@@ -408,6 +407,7 @@ func TestNullDoesNotSkipOperands(t *testing.T) {
 		{"failing + NULL", call(catalog.OpPlus, "Nullable(Int64)", fails(), nullOf("Int64")), "error intDiv"},
 		{"NULL = failing", call(catalog.OpEquals, "Nullable(Bool)", nullOf("Int64"), fails()), "error intDiv"},
 		{"concat NULL and failing", call(catalog.OpConcat, "Nullable(String)", nullOf("String"), failingStr), "error intDiv"},
+		{"coalesce past the value it returns", call(catalog.OpCoalesce, "Int64", col("some_int", "Nullable(Int64)"), fails()), "error intDiv"},
 	})
 }
 

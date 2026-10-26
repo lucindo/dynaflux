@@ -97,24 +97,24 @@ per event, per region                                                        wri
   event put, local or replicated; a transaction where accepted (SYNC views)         1.50
   customer_totals, a row per entity, SYNC                                           1.65        1.10
   store_hourly, shared rows, 1,000 active, SPLIT 4                                 11.00        3.30
-  item_daily, shared rows, 1,000 active                                            29.70        7.70
+  item_daily, shared rows, 1,000 active                                            24.20        6.60
   progress item, one per batch                                                      0.87
-  total                                                                            44.72       12.10
-  per second, all events                                                          44,716      12,099
+  total                                                                            39.22       11.00
+  per second, all events                                                          39,216      10,999
 
 monthly                        per region  2 regions
-  DynamoDB requests               $76,064   $152,127
+  DynamoDB requests               $66,669   $133,338
     stream and meta tables         $3,891     $7,781
     customer_totals                $1,715     $3,430
     store_hourly                  $19,150    $38,300
-    item_daily                    $51,308   $102,616
+    item_daily                    $41,913    $83,827
   DynamoDB storage of the log      $8,672    $17,345
   Lambda, the projector            $1,440     $2,880
   Firehose                            $71       $142
   S3 archive, year-1 average          $36        $73
   replication transfer                $26        $53
-  total                           $86,309   $172,619
-  provisioned capacity at a 70% target would cut requests to $32,399 per region (-57%), but costs more than on-demand if it must cover peaks over 2.42 times the average
+  total                           $76,915   $153,830
+  provisioned capacity at a 70% target would cut requests to $28,521 per region (-57%), but costs more than on-demand if it must cover peaks over 2.42 times the average
   not modeled: query reads, view and marker storage, backfills, archive compaction, CloudWatch
 
 warning orders: LOG RETENTION FOREVER keeps every event in DynamoDB: at this rate the log gains ~9.5 partitions a day, so batches shrink and projection costs more every day; this report is for --horizon 365d
@@ -123,9 +123,9 @@ warning orders: batches average 1.15 events over 3,469 shards, so view writes ra
   hint: shorten LOG RETENTION, which means fewer shards, or raise runtime.batching_window_seconds
 warning orders: ~3,469 shards per region: after an outage, the projector catches up with one invocation per shard, over Lambda's default quota of 1,000 concurrent executions, which all of the account's functions in a region share
   hint: shorten LOG RETENTION, or raise the account's Lambda concurrency quota
-warning store_hourly: rows reach 9.55 KB with ~224 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 10 write units
+warning store_hourly: rows reach 9.2 KB with ~224 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 10 write units
   hint: shorten LOG RETENTION on orders (fewer shards), or runtime.prune_window_seconds
-warning item_daily: rows reach 26 KB with ~894 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 27 write units
+warning item_daily: rows reach 21.1 KB with ~894 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 22 write units
   hint: shorten LOG RETENTION on orders (fewer shards), or runtime.prune_window_seconds
 -- explain customer_totals --
 view customer_totals, from stream orders
@@ -139,21 +139,20 @@ layout, in each of 2 regions (us-east-1, eu-west-1)
   rows         a row per entity: GROUP BY (customer_id) holds customer_id, the PRIMARY KEY of orders
   backfill     fenced handoff: sum, avg and count are additive
 
-row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
-  pk         customer_id                                           34 B
-  sk         a constant                                             3 B
-  spent      sum(amount)                                           17 B
-  avg_price  avg(price)                                            29 B
-  orders     count()                                               14 B
-  _v         row version                                           10 B
-  _hwm       ~4 high-water marks of ~30 B                         126 B
-  total      1 write unit, 1 read unit; the item limit is 400 KB  233 B
+row, estimated (String values are taken as 32 bytes)
+  pk           customer_id                                           34 B
+  sk           a constant                                             3 B
+  customer_id  key column                                            43 B
+  spent        sum(amount)                                           17 B
+  avg_price    avg(price)                                            29 B
+  orders       count()                                               14 B
+  _v           row version                                           10 B
+  _hwm         ~4 high-water marks of ~24 B                         103 B
+  total        1 write unit, 1 read unit; the item limit is 400 KB  253 B
 
 per event, per region
   rows         1.65 write units and 1.10 read units: a batch of 1.15 events updates 0.576 rows, as the projector skips the appends that this region accepted, and 10% of writes conflict and retry
   monthly      DynamoDB requests $1,715 per region, $3,430 for 2 regions
-
-note avg_price: a Float64 avg converges up to floating-point rounding: its last digits can differ between regions, and between live projection and a backfill. Use Decimal for exact totals.
 -- explain store_hourly --
 view store_hourly, from stream orders
   assumptions  --rate 1000  --event-kb 1  --rows store_hourly=1000  --pass store_hourly=1  --horizon 365d
@@ -167,25 +166,27 @@ layout, in each of 2 regions (us-east-1, eu-west-1)
   split        SPLIT 4: each row is 4 items, chosen by shard; a query reads all 4
   backfill     fenced handoff: quantile and count are additive
 
-row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
-  pk          store_id                                                          6 B
-  sk          hour and the item number                                          7 B
-  customers   uniq(customer_id)                                        3 KB at most
-  p99         quantile(latency_ms)                                    not estimated
-  big_orders  countIf(…)                                                       18 B
-  _v          row version                                                      10 B
-  _ttl        expiry                                                           10 B
-  _hwm        ~224 high-water marks of ~30 B                                6.49 KB
-  total       10 write units, 3 read units; the item limit is 400 KB        9.55 KB
+row, estimated (String values are taken as 32 bytes)
+  pk          store_id                                                                      6 B
+  sk          hour and the item number                                                      7 B
+  store_id    key column                                                                   14 B
+  hour        key column                                                                   10 B
+  customers   uniq(customer_id)                                                  2.5 KB at most
+  p99         quantile(latency_ms)                                    ~1.37 KB, 39.6 KB at most
+  big_orders  countIf(…)                                                                   18 B
+  _v          row version                                                                  10 B
+  _ttl        expiry                                                                       10 B
+  _hwm        ~224 high-water marks of ~24 B                                            5.25 KB
+  total       10 write units, 3 read units; the item limit is 400 KB                     9.2 KB
 
 per event, per region
   rows         11.00 write units and 3.30 read units: a batch of 1.15 events updates 1.15 rows, and 10% of writes conflict and retry
   per row      ~2.75 write and 0.825 read units per second on average; a partition takes 1,000 and 3,000
   monthly      DynamoDB requests $19,150 per region, $38,300 for 2 regions
 
-note p99: the row size leaves out its sketch, whose size isn't fixed yet.
+note p99: the row size takes a sketch of values that span a million-fold range; a wider spread makes it larger.
 
-warning store_hourly: rows reach 9.55 KB with ~224 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 10 write units
+warning store_hourly: rows reach 9.2 KB with ~224 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 10 write units
   hint: shorten LOG RETENTION on orders (fewer shards), or runtime.prune_window_seconds
 -- explain StoreHours --
 query StoreHours :many, from view store_hourly
@@ -197,7 +198,7 @@ query StoreHours :many, from view store_hourly
   keys         up to 100 key combinations: the Array parameters set them at call time
   calls        up to 100 Queries per call, one per key combination
   items        every row in the range, 4 items per row (SPLIT 4)
-  read cost    9.55 KB per item, and a Query rounds its total up to 4 KB: ~1.19 read units per item eventually consistent, ~2.39 with WaitFor, which reads with strong consistency
+  read cost    9.2 KB per item, and a Query rounds its total up to 4 KB: ~1.15 read units per item eventually consistent, ~2.3 with WaitFor, which reads with strong consistency
   filter       the WHERE terms that bind no key run on the items read: they don't reduce the read or its cost
 -- explain ItemTotals --
 query ItemTotals :many, from view item_daily
@@ -208,7 +209,7 @@ query ItemTotals :many, from view item_daily
   read         Query of item IN ('pen', 'ink', 'pad') AND day >= {since}
   calls        3 Queries per call, one per key combination
   items        every row in the range
-  read cost    26 KB per row, and a Query rounds its total up to 4 KB: ~3.25 read units per row eventually consistent, ~6.5 with WaitFor, which reads with strong consistency
+  read cost    21.1 KB per row, and a Query rounds its total up to 4 KB: ~2.63 read units per row eventually consistent, ~5.27 with WaitFor, which reads with strong consistency
   combine      GROUP BY item: sum(n)
 -- explain CustomerTotal --
 query CustomerTotal :one, from view customer_totals
@@ -218,7 +219,7 @@ query CustomerTotal :one, from view customer_totals
 
   read         GetItem of customer_id = {customer}
   items        1 item per call
-  read cost    0.227 KB per item, each rounded up to 4 KB: ~1 read unit per item, strongly consistent as the view is SYNC
+  read cost    0.247 KB per item, each rounded up to 4 KB: ~1 read unit per item, strongly consistent as the view is SYNC
 -- explain CustomerOrders --
 query CustomerOrders :many, from stream orders
   assumptions  --event-kb 1

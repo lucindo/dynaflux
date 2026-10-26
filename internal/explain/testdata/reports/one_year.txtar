@@ -52,18 +52,18 @@ layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
 per event, per region                                     write units  read units
   event put, local or replicated                                 1.00
   TTL delete, replicated from the region that expires it         0.67
-  page_daily, shared rows, 1,000 active                          4.40        1.10
+  page_daily, shared rows, 1,000 active                          3.30        1.10
   user_latest, a row per entity                                  1.10        1.10
   user_daily, a row per entity                                   1.10        1.10
     uniqExact markers                                            0.30        1.00
   progress item, one per batch                                   0.87
-  total                                                          9.44        4.30
-  per second, all events                                        9,435       4,300
+  total                                                          8.34        4.30
+  per second, all events                                        8,335       4,300
 
 monthly                        per region  3 regions
-  DynamoDB requests               $16,910    $50,729
+  DynamoDB requests               $15,103    $45,309
     stream and meta tables         $4,164    $12,493
-    page_daily                     $7,588    $22,763
+    page_daily                     $5,781    $17,343
     user_latest                    $2,168     $6,504
     user_daily                     $2,989     $8,968
   DynamoDB storage of the log      $8,672    $26,017
@@ -71,16 +71,16 @@ monthly                        per region  3 regions
   Firehose                           $142       $426
   S3 archive, year-1 average          $73       $218
   replication transfer                $35       $105
-  total                           $27,272    $81,815
-  provisioned capacity at a 70% target would cut requests to $6,979 per region (-59%), but costs more than on-demand if it must cover peaks over 2.42 times the average
+  total                           $25,465    $76,395
+  provisioned capacity at a 70% target would cut requests to $6,233 per region (-59%), but costs more than on-demand if it must cover peaks over 2.42 times the average
   not modeled: query reads, view and marker storage, backfills, archive compaction, CloudWatch
 
 warning page_views: batches average 1.15 events over 3,469 shards, so view writes rarely combine: most events cost a row write in every view
   hint: shorten LOG RETENTION, which means fewer shards, or raise runtime.batching_window_seconds
 warning page_views: ~3,469 shards per region: after an outage, the projector catches up with one invocation per shard, over Lambda's default quota of 1,000 concurrent executions, which all of the account's functions in a region share
   hint: shorten LOG RETENTION, or raise the account's Lambda concurrency quota
-warning page_daily: rows reach 3.54 KB with ~119 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 4 write units
-  hint: SPLIT 4 keeps each item at 1 write unit, saving ~$5,420 a month per region; queries then read 4 items per row
+warning page_daily: rows reach 2.92 KB with ~119 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 3 write units
+  hint: SPLIT 4 keeps each item at 1 write unit, saving ~$3,613 a month per region; queries then read 4 items per row
 -- explain page_daily --
 view page_daily, from stream page_views
   assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
@@ -93,19 +93,21 @@ layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
   rows         shared: GROUP BY (page, day) leaves out user_id, the PRIMARY KEY of page_views, so any shard can write any row; ~1,000 active
   backfill     fenced handoff: count and sum are additive
 
-row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
+row, estimated (String values are taken as 32 bytes)
   pk        page                                                     34 B
   sk        day                                                       6 B
+  page      key column                                               36 B
+  day       key column                                                9 B
   views     count()                                                  13 B
   total_ms  sum(duration_ms)                                         20 B
   _v        row version                                              10 B
-  _hwm      ~119 high-water marks of ~30 B                        3.46 KB
-  total     4 write units, 1 read unit; the item limit is 400 KB  3.54 KB
+  _hwm      ~119 high-water marks of ~24 B                        2.79 KB
+  total     3 write units, 1 read unit; the item limit is 400 KB  2.92 KB
 
 per event, per region
-  rows         4.40 write units and 1.10 read units: a batch of 1.15 events updates 1.15 rows, and 10% of writes conflict and retry
-  per row      ~4.4 write and 1.1 read units per second on average; a partition takes 1,000 and 3,000
-  monthly      DynamoDB requests $7,588 per region, $22,763 for 3 regions
+  rows         3.30 write units and 1.10 read units: a batch of 1.15 events updates 1.15 rows, and 10% of writes conflict and retry
+  per row      ~3.3 write and 1.1 read units per second on average; a partition takes 1,000 and 3,000
+  monthly      DynamoDB requests $5,781 per region, $17,343 for 3 regions
 
-warning page_daily: rows reach 3.54 KB with ~119 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 4 write units
-  hint: SPLIT 4 keeps each item at 1 write unit, saving ~$5,420 a month per region; queries then read 4 items per row
+warning page_daily: rows reach 2.92 KB with ~119 high-water marks, one for each shard that wrote the row within the prune window (the stream has 3,469 shards); every write costs 3 write units
+  hint: SPLIT 4 keeps each item at 1 write unit, saving ~$3,613 a month per region; queries then read 4 items per row

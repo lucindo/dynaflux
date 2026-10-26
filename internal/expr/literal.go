@@ -94,10 +94,6 @@ func parseUUID(s string) (Value, bool) {
 	return UUID(b), err == nil
 }
 
-// timeLimit bounds temporal values (sql.md §4.1): times are before 2106-02-07 06:28:15
-// UTC, so dates are through 2106-02-07.
-const timeLimit = math.MaxUint32 * microsPerSecond
-
 // parseTime reads "YYYY-MM-DD" for a Date, "YYYY-MM-DD hh:mm:ss" for a DateTime, and the
 // latter with exactly p fractional digits for a DateTime64(p).
 func parseTime(s string, t catalog.Type) (Value, bool) {
@@ -115,5 +111,5 @@ func parseTime(s string, t catalog.Type) (Value, bool) {
 		return Value{}, false
 	}
 	us := tm.UnixMicro()
-	return Micros(us), us >= 0 && us < timeLimit
+	return Micros(us), us >= 0 && us < catalog.TimeLimitMicros
 }

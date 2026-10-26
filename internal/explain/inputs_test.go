@@ -103,6 +103,7 @@ func TestInputsMatchCostsPy(t *testing.T) {
 			if inErr != nil {
 				t.Fatal(inErr)
 			}
+			store.HWMEntryKB = 0.029 // costs.py's mark; Dynaflux's binary marks are smaller
 			checkBaseSizes(t, stream.Views)
 			got := estimate(t, store, stream)
 			lines := map[string]float64{

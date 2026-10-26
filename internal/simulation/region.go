@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/store"
 	"github.com/lucindo/dynaflux/internal/store/mem"
 )
@@ -109,14 +110,14 @@ type region struct {
 	archiver Archiver
 	archive  *archive
 	streams  map[string]*stream // by table
-	order    []*stream          // as System.Streams lists them
+	order    []*stream          // in catalog order
 	mappings []*mapping
 	links    []*link
 	pool     []Core // idle warm containers
 	unitIDs  map[string]bool
 }
 
-func newRegion(r *run, i int) *region {
+func newRegion(ctx context.Context, r *run, i int) (*region, error) {
 	rg := &region{
 		run:     r,
 		name:    "r" + strconv.Itoa(i),
@@ -132,12 +133,16 @@ func newRegion(r *run, i int) *region {
 		start := time.Now().Add(between(r.topo, 0, replayDelay))
 		rg.mappings = append(rg.mappings, &mapping{rg: rg, name: "m1", start: start})
 	}
-	for _, s := range r.cfg.Streams {
-		st := newStream(rg, s)
-		rg.streams[s.Table] = st
+	cat := r.cfg.Catalog.Catalog()
+	for _, s := range cat.Streams {
+		st := newStream(rg, s.Name, r.cfg.Naming.StreamTable(s.Name))
+		rg.streams[st.table] = st
 		rg.order = append(rg.order, st)
 	}
-	return rg
+	if err := meta.New(rg.mem, r.meta).SetLive(ctx, cat); err != nil {
+		return nil, err
+	}
+	return rg, nil
 }
 
 // open creates every stream's root units, which starts their pollers.
@@ -402,7 +407,7 @@ func (rg *region) checkWrite(table string, cur, next store.Item) {
 	if o, ok := cur[catalog.AttrMarkerOwner]; ok && next[catalog.AttrMarkerOwner].Str != o.Str {
 		r.violatef("P5: %s: marker owner %q changed to %q", where, o.Str, next[catalog.AttrMarkerOwner].Str)
 	}
-	if table == r.cfg.Meta && strings.HasPrefix(keyOf(next).PK, unitPrefix) {
+	if table == r.meta && strings.HasPrefix(keyOf(next).PK, unitPrefix) {
 		if p, ok := cur[attrProgress]; ok && next[attrProgress].Str < p.Str {
 			r.violatef("P5: %s: progress %s went back to %q", where, p.Str, next[attrProgress].Str)
 		}

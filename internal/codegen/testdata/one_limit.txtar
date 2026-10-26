@@ -127,8 +127,9 @@ func (c *Client) AppendPageView(ctx context.Context, ev PageView, opts ...dynafl
 }
 
 // AppendPageViewBatch appends evs to stream page_views, each event as its own write.
-// The Token covers every event it stored. When an event fails, the error is a
-// *dynaflux.BatchError whose Errs line up with evs, nil for each stored event.
+// The Token covers every event stored, by this call or before it. When an event
+// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
+// each event this call stored.
 func (c *Client) AppendPageViewBatch(ctx context.Context, evs []PageView, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvents(ctx, c.store, Catalog, "page_views", evs, (*PageView).fields, opts...)
 }

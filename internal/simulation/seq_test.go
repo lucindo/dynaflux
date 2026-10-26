@@ -5,21 +5,19 @@ package simulation_test
 
 import (
 	"context"
-	"fmt"
 	"math/rand/v2"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/engine"
+	"github.com/lucindo/dynaflux/internal/expr"
+	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/simulation"
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-const (
-	quietStream = "quiet"
-	quietTable  = "stream-quiet"
-	quietEvery  = 20 // the quiet stream gets every quietEvery-th event
-)
+const quietEvery = 20 // the quiet stream gets every quietEvery-th event
 
 // TestEveryStreamCrossesTheWidthBoundary: each stream's sequence numbers, in each region,
 // start with 21 digits and reach 22, however few events the stream gets.
@@ -28,7 +26,7 @@ func TestEveryStreamCrossesTheWidthBoundary(t *testing.T) {
 	sc := oneEvent(simulation.Faults{})
 	sc.Events, sc.Regions = 10*quietEvery, 2
 	sc.Topology.UnitRecords = 40
-	sys := &widths{seen: map[*simulation.Oracle]map[string]map[int]bool{}}
+	sys := &widths{cat: compile(t, streamsSQL), seen: map[store.Backend]map[string]map[int]bool{}}
 	out := simulation.Run(t, sc, sys, 1)
 	if len(out.Violations) > 0 {
 		t.Fatalf("violations: %v", out.Violations)
@@ -45,51 +43,53 @@ func TestEveryStreamCrossesTheWidthBoundary(t *testing.T) {
 	}
 }
 
-// widths is a system whose cores do nothing; it records the widths of the sequence
-// numbers each region's change streams hold.
+// widths is a system whose cores record the widths of the sequence numbers that each
+// region's change streams deliver.
 type widths struct {
-	seen map[*simulation.Oracle]map[string]map[int]bool // by region's oracle, stream
+	cat *engine.Catalog
+
+	mu   sync.Mutex
+	seen map[store.Backend]map[string]map[int]bool // by region's store, stream
 }
 
-func (*widths) Config() simulation.Config {
-	return simulation.Config{
-		Streams: []simulation.Stream{{Name: streamName, Table: streamTable}, {Name: quietStream, Table: quietTable}},
-		Meta:    metaTable,
-		Window:  time.Hour,
-	}
+func (w *widths) Config() simulation.Config {
+	return simulation.Config{Catalog: w.cat, Naming: catalog.Naming{Store: storeName}}
 }
 
-func (*widths) Event(_ *rand.Rand, n int) (string, store.Item) {
+func (*widths) Event(_ *rand.Rand, n int, _ bool) (string, []expr.Value) {
 	stream := streamName
 	if n%quietEvery == 0 {
 		stream = quietStream
 	}
-	return stream, store.Item{
-		catalog.AttrPK: str(fmt.Sprintf("e%06d", n)),
-		catalog.AttrSK: str("!"),
-		"stream":       str(stream),
-	}
+	return stream, []expr.Value{expr.Uint(0), expr.Null()}
 }
 
-func (*widths) NewCore(store.Backend, simulation.Archiver) simulation.Core { return idle{} }
-
-func (w *widths) Expect(o *simulation.Oracle, _ string, rec simulation.Record) {
-	if w.seen[o] == nil {
-		w.seen[o] = map[string]map[int]bool{}
-	}
-	stream := rec.New["stream"].Str
-	if w.seen[o][stream] == nil {
-		w.seen[o][stream] = map[int]bool{}
-	}
-	w.seen[o][stream][len(rec.Seq)] = true
+func (w *widths) NewCore(b store.Backend, _ simulation.Archiver) simulation.Core {
+	return widthsCore{w, b}
 }
+
+func (*widths) Expect(*simulation.Oracle, string, projector.Record) error { return nil }
 
 func (*widths) Read(context.Context, store.Backend) (simulation.State, error) {
 	return simulation.State{}, nil
 }
 
-type idle struct{}
+type widthsCore struct {
+	w *widths
+	b store.Backend
+}
 
-func (idle) Handle(context.Context, simulation.Batch) (simulation.Result, error) {
-	return simulation.Result{}, nil
+func (c widthsCore) Handle(_ context.Context, b projector.Batch) (projector.Result, error) {
+	c.w.mu.Lock()
+	defer c.w.mu.Unlock()
+	if c.w.seen[c.b] == nil {
+		c.w.seen[c.b] = map[string]map[int]bool{}
+	}
+	if c.w.seen[c.b][b.Stream] == nil {
+		c.w.seen[c.b][b.Stream] = map[int]bool{}
+	}
+	for _, rec := range b.Records {
+		c.w.seen[c.b][b.Stream][len(rec.Seq)] = true
+	}
+	return projector.Result{}, nil
 }

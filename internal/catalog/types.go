@@ -5,6 +5,7 @@ package catalog
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -46,6 +47,9 @@ const (
 	DateTime64Millis = 3
 	// DateTime64Micros is the precision of DateTime64(6).
 	DateTime64Micros = 6
+	// TimeLimitMicros is 2106-02-07 06:28:15 UTC in microseconds since the epoch: the first
+	// instant past the range of every temporal type (sql.md §4.1).
+	TimeLimitMicros = math.MaxUint32 * 1_000_000
 )
 
 // String returns the ClickHouse name of k, such as "UInt32" or "Decimal".

@@ -5,10 +5,12 @@ package meta_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/store/mem"
 )
@@ -22,11 +24,11 @@ func setStates(t *testing.T, m *meta.Meta, states ...meta.State) {
 	}
 }
 
-// markBroken breaks the version at sequence number n.
-func markBroken(t *testing.T, m *meta.Meta, n int) {
+// markBroken breaks the version at sequence number 1.
+func markBroken(t *testing.T, m *meta.Meta) {
 	t.Helper()
-	f := meta.Failure{Unit: "u1", Seq: seq(n), EventID: "e", Error: "boom", At: bubbleStart}
-	if err := m.MarkBroken(t.Context(), version, f); err != nil {
+	f := meta.Failure{Unit: "u1", Seq: seq(1), EventID: "e", Error: "boom", At: bubbleStart}
+	if _, err := m.MarkBroken(t.Context(), version, f); err != nil {
 		t.Fatalf("MarkBroken: %v", err)
 	}
 }
@@ -43,7 +45,7 @@ func TestSetViewState(t *testing.T) {
 		"absent":     func(*testing.T, *meta.Meta) {},
 		"activating": func(t *testing.T, m *meta.Meta) { t.Helper(); setStates(t, m, meta.Activating) },
 		"live":       func(t *testing.T, m *meta.Meta) { t.Helper(); setStates(t, m, meta.Activating, meta.Live) },
-		"broken":     func(t *testing.T, m *meta.Meta) { t.Helper(); markBroken(t, m, 1) },
+		"broken":     func(t *testing.T, m *meta.Meta) { t.Helper(); markBroken(t, m) },
 	}
 	tests := []struct {
 		from string
@@ -90,14 +92,15 @@ func TestSetViewState(t *testing.T) {
 func TestMarkBroken(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		setup func(t *testing.T, m *meta.Meta)
-		want  string // the failure's sequence number afterwards
+		name   string
+		setup  func(t *testing.T, m *meta.Meta)
+		want   string // the failure's sequence number afterwards
+		opened bool
 	}{
-		{"from absent", func(*testing.T, *meta.Meta) {}, seq(2)},
-		{"from activating", func(t *testing.T, m *meta.Meta) { t.Helper(); setStates(t, m, meta.Activating) }, seq(2)},
-		{"from live", func(t *testing.T, m *meta.Meta) { t.Helper(); setStates(t, m, meta.Activating, meta.Live) }, seq(2)},
-		{"keeps the first failure", func(t *testing.T, m *meta.Meta) { t.Helper(); markBroken(t, m, 1) }, seq(1)},
+		{"from absent", func(*testing.T, *meta.Meta) {}, seq(2), true},
+		{"from activating", func(t *testing.T, m *meta.Meta) { t.Helper(); setStates(t, m, meta.Activating) }, seq(2), true},
+		{"from live", func(t *testing.T, m *meta.Meta) { t.Helper(); setStates(t, m, meta.Activating, meta.Live) }, seq(2), true},
+		{"keeps the first failure", func(t *testing.T, m *meta.Meta) { t.Helper(); markBroken(t, m) }, seq(1), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -107,7 +110,10 @@ func TestMarkBroken(t *testing.T) {
 					t.Parallel()
 					m := meta.New(bk.new(), table)
 					tt.setup(t, m)
-					markBroken(t, m, 2)
+					opened, err := m.MarkBroken(t.Context(), version, meta.Failure{Unit: "u1", Seq: seq(2)})
+					if err != nil || opened != tt.opened {
+						t.Errorf("MarkBroken = %t, %v; want %t", opened, err, tt.opened)
+					}
 					got := viewStates(t, m)[version]
 					if got.State != meta.Broken || got.Failure == nil || got.Failure.Seq != tt.want {
 						t.Errorf("state %+v, want broken at %s", got, tt.want)
@@ -122,7 +128,7 @@ func TestMarkBrokenRejectsBadSequenceNumbers(t *testing.T) {
 	t.Parallel()
 	m := meta.New(mem.New(), table)
 	for _, sn := range []string{"7", seq(0)} {
-		if err := m.MarkBroken(t.Context(), version, meta.Failure{Seq: sn}); err == nil {
+		if _, err := m.MarkBroken(t.Context(), version, meta.Failure{Seq: sn}); err == nil {
 			t.Errorf("MarkBroken at sequence number %q succeeded", sn)
 		}
 	}
@@ -144,12 +150,34 @@ func TestActivatedAt(t *testing.T) {
 					setStates(t, m, s)
 					time.Sleep(time.Minute)
 				}
-				markBroken(t, m, 1)
+				markBroken(t, m)
 				if got := viewStates(t, m)[version].ActivatedAt; !got.Equal(bubbleStart) {
 					t.Errorf("ActivatedAt = %s, want %s", got, bubbleStart)
 				}
 			})
 		})
+	}
+}
+
+func TestSetLive(t *testing.T) {
+	t.Parallel()
+	m := meta.New(mem.New(), table)
+	setStates(t, m, meta.Activating) // a version part way there
+	cat := &catalog.Catalog{Views: []catalog.View{
+		{Name: "page_daily", Versions: []catalog.ViewVersion{{Number: 1}, {Number: 2}}},
+		{Name: "other", Versions: []catalog.ViewVersion{{Number: 1}}},
+	}}
+	if err := m.SetLive(t.Context(), cat); err != nil {
+		t.Fatal(err)
+	}
+	got := viewStates(t, m)
+	for _, v := range []string{"page_daily@v1", version, "other@v1"} {
+		if got[v].State != meta.Live {
+			t.Errorf("state of %s = %q, want live", v, got[v].State)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("%d states, want 3", len(got))
 	}
 }
 
@@ -160,7 +188,7 @@ func TestViewStatesListsEveryVersion(t *testing.T) {
 	if err := m.SetViewState(t.Context(), "other@v1", meta.Activating); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.MarkBroken(t.Context(), "third@v3", meta.Failure{Seq: seq(1)}); err != nil {
+	if _, err := m.MarkBroken(t.Context(), "third@v3", meta.Failure{Seq: seq(1)}); err != nil {
 		t.Fatal(err)
 	}
 	got := viewStates(t, m)
@@ -172,5 +200,18 @@ func TestViewStatesListsEveryVersion(t *testing.T) {
 		if got[v].Version != v || got[v].State != s {
 			t.Errorf("state of %s = %+v, want %s", v, got[v], s)
 		}
+	}
+}
+
+func TestMarkBrokenCutsLongError(t *testing.T) {
+	t.Parallel()
+	m := meta.New(mem.New(), table)
+	// 1,023 bytes, a 2-byte rune that a cut at 1 KB would split, then more than an item holds.
+	long := strings.Repeat("a", 1023) + "é" + strings.Repeat("b", 500_000)
+	if _, err := m.MarkBroken(t.Context(), version, meta.Failure{Seq: seq(1), Error: long}); err != nil {
+		t.Fatal(err)
+	}
+	if got := viewStates(t, m)[version].Failure; got == nil || got.Error != strings.Repeat("a", 1023) {
+		t.Errorf("failure %+v, want its error cut to the first 1,023 bytes", got)
 	}
 }

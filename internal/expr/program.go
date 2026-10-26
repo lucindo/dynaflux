@@ -303,14 +303,12 @@ func choice(eval evalFunc, isValue func(i, n int) bool) setup {
 	}
 }
 
-func isTrue(v Value) bool { return !v.IsNull() && v.AsBool() }
-
 func evalIf(n *node, f *Frame) (Value, error) {
 	c, err := n.arg(0, f)
 	if err != nil {
 		return Value{}, err
 	}
-	if isTrue(c) {
+	if c.IsTrue() {
 		return n.arg(1, f)
 	}
 	return n.arg(len(n.args)-1, f)
@@ -323,19 +321,24 @@ func evalMultiIf(n *node, f *Frame) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		if isTrue(c) {
+		if c.IsTrue() {
 			return n.arg(i+1, f)
 		}
 	}
 	return n.arg(last, f)
 }
 
+// evalCoalesce evaluates every argument, even after the one it returns (sql.md §5.8).
 func evalCoalesce(n *node, f *Frame) (Value, error) {
+	out := Null()
 	for i := range n.args {
 		v, err := n.arg(i, f)
-		if err != nil || !v.IsNull() {
-			return v, err
+		if err != nil {
+			return Value{}, err
+		}
+		if out.IsNull() {
+			out = v
 		}
 	}
-	return Null(), nil
+	return out, nil
 }

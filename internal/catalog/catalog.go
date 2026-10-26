@@ -14,6 +14,10 @@ const StorageFormatVersion = 1
 // MaxPruneWindowSeconds is the largest runtime.prune_window_seconds: 25 hours.
 const MaxPruneWindowSeconds = 90000
 
+// LifetimeMarginSeconds is how much longer than the longest invocation the prune window is,
+// for writes that land late and clock skew between hosts.
+const LifetimeMarginSeconds = 60
+
 // Catalog is the compiled model of one store, with every default applied. Lists whose order
 // carries meaning keep it (columns, keys, parameters, outputs); [Marshal] sorts the others.
 type Catalog struct {

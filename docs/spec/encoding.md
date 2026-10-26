@@ -292,10 +292,13 @@ scale, such as `-1234.56` for scale 2:
 ### 5.4 `_ttl`
 
 `_ttl` is an N in Unix seconds: the expiry rounded up to a whole second, plus **3600**. Rows
-and events are filtered out by their exact expiry when read
-([sql.md Dev 10](sql.md#11-deviations-from-clickhouse)), so the margin only makes sure
-DynamoDB deletes an item after every reader whose clock is up to an hour slow already
-treats it as expired ([TTL][ttl]). Nothing Dynaflux writes has already expired, so
+are filtered out by their exact expiry when read
+([sql.md Dev 10](sql.md#11-deviations-from-clickhouse)). Events are filtered out from
+`_ttl` − 3600, their expiry rounded up to a whole second: it was fixed when they were
+appended, and `LOG RETENTION` may have changed since
+([sql.md §8.6](sql.md#86-log-retention)). So the margin only makes sure DynamoDB deletes
+an item after every reader whose clock is up to an hour slow already treats it as expired
+([TTL][ttl]). Nothing Dynaflux writes has already expired, so
 DynamoDB's rule about TTL values more than five years in the past never applies.
 
 ## 6. Stream items
@@ -309,6 +312,8 @@ DynamoDB's rule about TTL values more than five years in the past never applies.
 | `_ttl` | `ingest_time` plus `LOG RETENTION` (calendar units clamp to the end of the month), as §5.4. None with `LOG RETENTION FOREVER`. |
 
 - `event_time` and `event_id` are read from `sk`.
+- A reader hides an event from `_ttl` − 3600 seconds on (§5.4), and never hides one
+  without `_ttl`.
 - Attributes that are neither declared columns nor reserved names are ignored (§1).
 - The payload of an event is its declared columns. A `MODIFY` record whose old and new
   payloads decode to different values is a divergent duplicate
@@ -453,6 +458,9 @@ which record introduced it.
   buckets from the largest |x| down, then the zero count, then the positive buckets up, and
   return the first bucket whose running count is greater than rank: −value, 0 or value.
   n = 0 gives `NULL`.
+- A bucket's value is within α·|x| of each x in it, except that for a subnormal x
+  (|x| < 2^−1022) `Ldexp` rounds the value to a multiple of 2^−1074, so the bound is
+  α·|x| + 2^−1075.
 - `rel_acc` must be from 0.002 up to but not including 1
   ([sql.md §7.2](sql.md#72-function-reference), DF5205). At 0.001 (M = 347) one sketch's
   worst case reaches 400 KB (§7.8), and smaller values grow without bound (α = 10⁻⁶ gives
@@ -487,7 +495,8 @@ pass DynamoDB's 400 KB limit in one region only. So every part of an item except
 a largest size known from the definition, assuming at most 2^64 inputs per row, and
 `validate` rejects a view whose largest item (key, key columns, every state, attribute names
 included) passes **400 KB minus a 32 KB reserve** for `_hwm` (about 1,300 entries), `_v`,
-`_ttl` and slack. `agg.MaxSize` gives the state sizes:
+`_ttl` and slack (DF3307, [sql.md §7.2](sql.md#72-function-reference)). `agg.MaxSize` gives
+the state sizes:
 
 | State | Largest value |
 |-------|---------------|
@@ -499,7 +508,7 @@ included) passes **400 KB minus a 32 KB reserve** for `_hwm` (about 1,300 entrie
 | `min`, `max`, `any` | the value: a `String` is at most 4 KB (4,096 bytes), because the 4 KB cap applies to every value that reaches the aggregate ([sql.md §7.2](sql.md#72-function-reference)) |
 | `argMax`, `argMin` | both values, plus about 60 bytes for `event_time`, `event_id` and `array_index` |
 | `uniq` | 2,561 bytes (dense) |
-| `quantile`, `quantileDD` | 2 × (64·M + 1) buckets × 9 bytes (a 1-byte index step and a count of at most 8 bytes, since all counts sum to at most 2^64), plus 30: about 40 KB at α = 0.01 and 200 KB at α = 0.002 |
+| `quantile`, `quantileDD` | 1 + 8 + 2 × (u + v + 8 + (64·M − 1) × 9) + 256 bytes, with u the length of `uvarint(64·M)` and v the length of `varint(−1074·M)`, the lowest index: the version byte, the zero count, and two full stores of 64·M buckets, each bucket after the first a 1-byte index step and a count. A count below 2^56 takes at most 8 bytes; with fewer than 2^64 inputs, at most 255 counts reach 2^56 and take a ninth byte, and one reaches 2^63 and takes a tenth, hence the 256. That is 40,593 bytes at α = 0.01 (M = 35) and 200,721 at α = 0.002 (M = 174) |
 
 `String` key fields count at their DynamoDB limits; other fields have fixed widths. A row put
 that still passes 400 KB carries an `_hwm` past the reserve. The projector fails that row
@@ -509,7 +518,10 @@ with an alarm, never the view's breaker, and pruning (§7.6) heals it.
 
 These are the items the projector and the backfill handoff need. M5 adds the rest of the
 meta table (catalog, backfill jobs, gaps) and M6 adds wait receipts. Meta items are
-read-modify-written whole, conditional on `_v` (§7.1).
+read-modify-written whole, conditional on `_v` (§7.1). Their times, `progress_at`,
+`activated_at` and `broken.at`, are in Unix microseconds, rounded up to the microsecond, so
+a stored deadline or activation time is never earlier than the real one, and a wait
+measured from it is never short.
 
 ### 8.1 Unit item
 
@@ -536,7 +548,7 @@ One per view version, in each region:
 | `sk` | The version ID, such as `page_daily@v2`. |
 | `state` | S: `pending_backfill`, `activating`, `live` or `broken`. A version without an item is `pending_backfill`. The state moves only from `pending_backfill` to `activating` to `live`, or from any state to `broken`, which is final. |
 | `activated_at` | N, microseconds: when the state became `activating`. Units are listed for fencing only after `activated_at` + 30 s (the longest a projector uses a view state it read) + 60 s. |
-| `broken` | M, only when `state` is `broken`: `unit` (S, the full unit ID), `seq` (S, 40 digits), `event_id` (S), `error` (S), `at` (N, microseconds). |
+| `broken` | M, only when `state` is `broken`: `unit` (S, the full unit ID), `seq` (S, 40 digits), `event_id` (S), `error` (S, the evaluation error, cut to at most 1,024 bytes), `at` (N, microseconds). |
 | `_v` | N, as §7.1. |
 
 ## 9. Determinism rules

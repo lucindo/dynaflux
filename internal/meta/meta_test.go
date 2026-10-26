@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"iter"
 	"maps"
 	"reflect"
 	"strings"
@@ -54,34 +53,7 @@ func backends() []backend {
 	}
 }
 
-// staleReads serves eventually consistent reads from a replica that has seen no write, so a
-// read that must be consistent and isn't finds nothing.
-type staleReads struct {
-	store.Backend
-
-	replica store.Backend
-}
-
-func newStaleReads() store.Backend { return staleReads{Backend: mem.New(), replica: mem.New()} }
-
-func (b staleReads) at(consistent bool) store.Backend {
-	if consistent {
-		return b.Backend
-	}
-	return b.replica
-}
-
-func (b staleReads) Get(ctx context.Context, table string, k store.Key, consistent bool) (store.Item, error) {
-	return b.at(consistent).Get(ctx, table, k, consistent)
-}
-
-func (b staleReads) BatchGet(ctx context.Context, table string, ks []store.Key, consistent bool) ([]store.Item, error) {
-	return b.at(consistent).BatchGet(ctx, table, ks, consistent)
-}
-
-func (b staleReads) Query(ctx context.Context, table string, q store.Query) iter.Seq2[store.Item, error] {
-	return b.at(q.Consistent).Query(ctx, table, q)
-}
+func newStaleReads() store.Backend { return storetest.StaleReads(mem.New(), mem.New()) }
 
 // deletedAfterRead reads from snapshot and writes to a store without its items, as when an
 // item expires between a read and the conditional write.
@@ -176,7 +148,7 @@ func TestItemLayout(t *testing.T) {
 			t.Fatal(err)
 		}
 		f := meta.Failure{Unit: "shardId-1", Seq: seq(7), EventID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Error: "division by zero", At: bubbleStart.Add(time.Second)}
-		if err := m.MarkBroken(ctx, version, f); err != nil {
+		if _, err := m.MarkBroken(ctx, version, f); err != nil {
 			t.Fatal(err)
 		}
 
@@ -289,7 +261,7 @@ func TestWriteAfterItemDeleted(t *testing.T) {
 	if _, err := m.EnsureFence(ctx, stale, "other@v1"); err != nil {
 		t.Fatalf("EnsureFence: %v", err)
 	}
-	markBroken(t, m, 1)
+	markBroken(t, m)
 
 	after := meta.New(stored, table)
 	if u := readUnit(t, after, "u1"); u.Progress != seq(20) || !maps.Equal(u.Fences, map[string]string{"other@v1": seq(20)}) {
@@ -321,7 +293,8 @@ func TestWritesGiveUpWhenTheConditionNeverHolds(t *testing.T) {
 		},
 		"SetViewState": func(ctx context.Context, m *meta.Meta) error { return m.SetViewState(ctx, version, meta.Live) },
 		"MarkBroken": func(ctx context.Context, m *meta.Meta) error {
-			return m.MarkBroken(ctx, version, meta.Failure{Unit: "u1", Seq: seq(1)})
+			_, err := m.MarkBroken(ctx, version, meta.Failure{Unit: "u1", Seq: seq(1)})
+			return err
 		},
 	}
 	for name, write := range writes {

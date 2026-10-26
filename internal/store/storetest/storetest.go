@@ -1,14 +1,15 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Package storetest holds the conformance suite that every [store.Backend] passes, and the
-// fault of an SDK retry after a lost response.
+// Package storetest holds the conformance suite that every [store.Backend] passes, and two
+// faults: an SDK retry after a lost response, and eventually consistent reads that lag.
 package storetest
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strconv"
@@ -32,6 +33,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) store.Backend) {
 	t.Run("IfVersion", s.checkIfVersion)
 	t.Run("ConcurrentVersionedWrites", s.checkConcurrentVersionedWrites)
 	t.Run("RetriedWrite", s.checkRetriedWrite)
+	t.Run("StaleReads", s.checkStaleReads)
 	t.Run("CanceledContext", s.checkCanceledContext)
 	t.Run("SortKeyByteOrder", s.checkSortKeyByteOrder)
 	t.Run("QueryBounds", s.checkQueryBounds)
@@ -65,6 +67,36 @@ func (r retried) Put(ctx context.Context, table string, it store.Item, c store.C
 		return fmt.Errorf("storetest: read after a retried write: %w", err)
 	}
 	return &store.ConditionError{Current: cur}
+}
+
+// StaleReads wraps b so that eventually consistent reads go to replica, which no write
+// through the wrapper reaches. With an empty replica, a read that should be consistent and
+// isn't finds nothing.
+func StaleReads(b, replica store.Backend) store.Backend { return stale{b, replica} }
+
+type stale struct {
+	store.Backend
+
+	replica store.Backend
+}
+
+func (s stale) at(consistent bool) store.Backend {
+	if consistent {
+		return s.Backend
+	}
+	return s.replica
+}
+
+func (s stale) Get(ctx context.Context, table string, k store.Key, consistent bool) (store.Item, error) {
+	return s.at(consistent).Get(ctx, table, k, consistent)
+}
+
+func (s stale) BatchGet(ctx context.Context, table string, ks []store.Key, consistent bool) ([]store.Item, error) {
+	return s.at(consistent).BatchGet(ctx, table, ks, consistent)
+}
+
+func (s stale) Query(ctx context.Context, table string, q store.Query) iter.Seq2[store.Item, error] {
+	return s.at(q.Consistent).Query(ctx, table, q)
 }
 
 const part = "p" // the partition most checks use

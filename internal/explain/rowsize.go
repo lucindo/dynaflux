@@ -8,11 +8,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lucindo/dynaflux/internal/agg"
 	"github.com/lucindo/dynaflux/internal/catalog"
 )
 
 // Row sizes follow DynamoDB's item size rules: each attribute costs the bytes of its name
-// plus those of its value. The encodings of keys and states aren't final, so their sizes are
+// plus those of its value. Keys, Strings and sketches take typical sizes, so row sizes are
 // estimates.
 const (
 	bytesPerKB = 1024
@@ -37,16 +38,23 @@ const (
 	expiryBytes    = 6
 	mapHeaderBytes = 3
 	bitsPerByte    = 8
-	// hwmEntryBytes is the size of a high-water mark, as the model adds it to a row.
-	hwmEntryBytes = hwmEntryKB * bytesPerKB
+	// hwmEntryBytes is the size of a high-water mark: a 13-byte unit key, a binary sequence
+	// number of about 10 bytes, and 1 byte of map overhead (encoding.md §7.6).
+	hwmEntryBytes = 24
+	// A typical quantile sketch: values over a million-fold range (20 octaves), M buckets
+	// per octave for its rel_acc (35 at 0.01), about 2 bytes each (encoding.md §7.5).
+	quantileOctaves     = 20
+	quantileBucketBytes = 2
+	quantileRelAcc      = 0.01
 )
 
 // attribute is an attribute of a view row.
 type attribute struct {
-	name  string
-	what  string // what the value holds, for the report
-	bytes int    // name and value; without the sketch of a uniq or quantile
-	state stateKind
+	name     string
+	what     string // what the value holds, for the report
+	bytes    int    // name and value; without the sketch of a uniq
+	state    stateKind
+	maxBytes int // a quantile's largest name and value
 }
 
 type stateKind uint8
@@ -54,7 +62,7 @@ type stateKind uint8
 const (
 	plainState    stateKind = iota
 	hllState                // uniq: the model adds the HyperLogLog
-	quantileState           // quantile: its sketch's size isn't fixed yet, so it isn't estimated
+	quantileState           // quantile, quantileDD: bytes holds a typical sketch, maxBytes the largest
 )
 
 // rowLayout returns the attributes of a row of vv, with _hwm's map header only: the model
@@ -72,6 +80,9 @@ func rowLayout(vv *catalog.ViewVersion) []attribute {
 	attrs := []attribute{
 		{name: catalog.AttrPK, what: keyNames(pk), bytes: len(catalog.AttrPK) + keyBytes(pk)},
 		{name: catalog.AttrSK, what: skWhat, bytes: len(catalog.AttrSK) + skBytes},
+	}
+	for _, k := range vv.Keys {
+		attrs = append(attrs, attribute{name: k.Name, what: "key column", bytes: len(k.Name) + valueBytes(k.Expr.Type)})
 	}
 	for _, a := range vv.Aggregates {
 		attrs = append(attrs, aggregateAttribute(a))
@@ -108,6 +119,15 @@ func aggregateAttribute(a catalog.ViewAggregate) attribute {
 		attr.state = hllState
 	case catalog.AggQuantile, catalog.AggQuantileDD:
 		attr.state = quantileState
+		relAcc := quantileRelAcc
+		if a.Fn == catalog.AggQuantileDD {
+			relAcc = a.Params[0]
+		}
+		perOctave := math.Ceil(math.Ln2 / math.Log((1+relAcc)/(1-relAcc)))
+		attr.bytes += int(perOctave) * quantileOctaves * quantileBucketBytes
+		if f, err := agg.Compile(agg.Spec{Agg: a.Aggregate, ArgTypes: []catalog.Type{a.Args[0].Type}}); err == nil {
+			attr.maxBytes = len(a.Name) + f.MaxSize()
+		}
 	}
 	return attr
 }

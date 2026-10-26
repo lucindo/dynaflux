@@ -19,10 +19,6 @@ import (
 // pickFields counts event_time, event_id and array_index in an argMax, argMin or any state.
 const pickFields = 3
 
-func eventTimeType() catalog.Type {
-	return catalog.Type{Kind: catalog.KindDateTime64, Precision: catalog.DateTime64Micros}
-}
-
 // checkValue applies a view's limits to a value that reaches min, max, argMax, argMin or
 // any: a String of at most [MaxStringBytes], and a Float64 that a DynamoDB number can hold.
 // Every value is checked, not only the one the state keeps, so whether a view breaks
@@ -160,7 +156,7 @@ func (s *pick) Add(in Input) error {
 // checkEvent checks the fields of a view's input row that a state stores beside its values.
 func checkEvent(in Input) error {
 	switch {
-	case in.EventTime < 0 || in.EventTime >= timeLimit:
+	case in.EventTime < 0 || in.EventTime >= catalog.TimeLimitMicros:
 		return fmt.Errorf("event_time %d is outside 1970 to 2106", in.EventTime)
 	case len(in.EventID) != eventIDLen:
 		return fmt.Errorf("event_id %q is not %d characters", in.EventID, eventIDLen)
@@ -218,7 +214,7 @@ func (s *pick) Encode() (store.Value, error) {
 		}
 		list = append(list, a)
 	}
-	t, _, err := keys.EncodeValue(eventTimeType(), expr.Micros(s.e.time))
+	t, _, err := keys.EncodeValue(catalog.EventTimeType(), expr.Micros(s.e.time))
 	if err != nil {
 		return store.Value{}, fmt.Errorf("event_time: %w", err)
 	}
@@ -250,7 +246,7 @@ func (s *pick) decode(a store.Value) error {
 		}
 		l = l[1:]
 	}
-	t, err := keys.DecodeValue(eventTimeType(), l[1], true)
+	t, err := keys.DecodeValue(catalog.EventTimeType(), l[1], true)
 	if err != nil {
 		return fmt.Errorf("event_time: %w", err)
 	}
@@ -271,7 +267,7 @@ func (s *pick) maxSize() int {
 	if s.f.fn != catalog.AggAny {
 		list = append(list, worstValue(s.f.args[1]))
 	}
-	list = append(list, worstValue(eventTimeType()), text(eventIDLen), nines(digits(catalog.MaxArrayLen)))
+	list = append(list, worstValue(catalog.EventTimeType()), text(eventIDLen), nines(digits(catalog.MaxArrayLen)))
 	return size(store.Value{Type: store.L, List: list})
 }
 

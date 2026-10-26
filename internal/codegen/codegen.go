@@ -8,6 +8,7 @@ package codegen
 
 import (
 	"bytes"
+	"cmp"
 	"embed"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/goname"
+	"github.com/lucindo/dynaflux/internal/gotype"
 )
 
 //go:embed templates/*.tmpl
@@ -144,16 +146,18 @@ func newStream(s *catalog.Stream) (streamModel, error) {
 		comment := c.Name + " " + c.Type.String()
 		if c.Default != nil {
 			comment += " DEFAULT " + sqlLiteral(c.Default) +
-				": only for events stored before the column existed; Append stores the value given"
+				": only for events stored before the column existed; Append stores " + cmp.Or(utcDate(c.Type), "the value given")
+		} else {
+			comment = withUTCDate(comment, c.Type)
 		}
-		sm.Columns = append(sm.Columns, field{goname.Field(c.Name), goType(c.Type), comment})
+		sm.Columns = append(sm.Columns, field{goname.Field(c.Name), gotype.Of(c.Type).String(), comment})
 	}
 	for _, c := range slices.Concat(s.Columns, catalog.ImplicitColumns()) {
 		sm.Fields = append(sm.Fields, goname.Field(c.Name))
 	}
 	for _, k := range s.PrimaryKey {
 		c, _ := s.Column(k) // The compiler checked that the key columns exist.
-		sm.KeyFields = append(sm.KeyFields, field{goname.Field(c.Name), goType(c.Type), c.Name + " " + c.Type.String()})
+		sm.KeyFields = append(sm.KeyFields, field{goname.Field(c.Name), gotype.Of(c.Type).String(), withUTCDate(c.Name+" "+c.Type.String(), c.Type)})
 	}
 	return sm, nil
 }
@@ -168,45 +172,32 @@ func newQuery(q *catalog.Query) queryModel {
 		Source:   string(q.Source.Kind) + " " + q.Source.Name,
 	}
 	for _, p := range q.Params {
-		comment := "{" + p.Name + ":" + p.Type.String() + "}"
+		comment := withUTCDate("{"+p.Name+":"+p.Type.String()+"}", p.Type)
 		if limitParam && q.Limit.Name == p.Name {
 			comment += " LIMIT: 0 returns no rows"
 		}
-		qm.ParamFields = append(qm.ParamFields, field{goname.Field(p.Name), goType(p.Type), comment})
+		qm.ParamFields = append(qm.ParamFields, field{goname.Field(p.Name), gotype.Of(p.Type).String(), comment})
 	}
 	for _, c := range q.Columns {
-		qm.RowFields = append(qm.RowFields, field{goname.Field(c.Name), goType(c.Expr.Type), c.Name + " " + c.Expr.Type.String()})
+		qm.RowFields = append(qm.RowFields, field{goname.Field(c.Name), gotype.Of(c.Expr.Type).String(), c.Name + " " + c.Expr.Type.String()})
 	}
 	return qm
 }
 
-// goType is the Go type of a catalog type, which the runtime decodes into.
-func goType(t catalog.Type) string {
-	var s string
-	switch t.Kind {
-	case catalog.KindString:
-		s = "string"
-	case catalog.KindUInt8, catalog.KindUInt16, catalog.KindUInt32, catalog.KindUInt64,
-		catalog.KindInt8, catalog.KindInt16, catalog.KindInt32, catalog.KindInt64:
-		s = strings.ToLower(t.Kind.String())
-	case catalog.KindFloat64:
-		s = "float64"
-	case catalog.KindDecimal:
-		s = "dynaflux.Decimal"
-	case catalog.KindBool:
-		s = "bool"
-	case catalog.KindUUID:
-		s = "dynaflux.UUID"
-	case catalog.KindDate, catalog.KindDateTime, catalog.KindDateTime64:
-		s = "time.Time"
+// utcDate says, for an input of type t, that a time given stands for its UTC date, or
+// returns "" when t isn't a Date type.
+func utcDate(t catalog.Type) string {
+	if t.Kind != catalog.KindDate {
+		return ""
 	}
-	switch {
-	case t.Array:
-		return "[]" + s
-	case t.Nullable:
-		return "*" + s
+	return "the UTC date of the time given"
+}
+
+func withUTCDate(comment string, t catalog.Type) string {
+	if note := utcDate(t); note != "" {
+		return comment + ": " + note
 	}
-	return s
+	return comment
 }
 
 // sqlLiteral writes a column DEFAULT as SQL: an OpLiteral, or an OpArray of them.

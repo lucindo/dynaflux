@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
@@ -54,7 +55,7 @@ func integer(v store.Value) int64 {
 
 // cloneRecord copies a record, so the code under test can't change what the oracle and
 // other deliveries read.
-func cloneRecord(rec Record) Record {
+func cloneRecord(rec projector.Record) projector.Record {
 	rec.New = cloneItem(rec.New)
 	rec.Old = cloneItem(rec.Old)
 	return rec

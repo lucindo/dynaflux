@@ -316,7 +316,7 @@ func TestExplain(t *testing.T) {
 func TestExplainReportWithError(t *testing.T) {
 	t.Parallel()
 	got := run(writeProject(t, "oversized"), "explain", "page_daily")
-	want := "\nerror page_daily: rows reach 729 KB, over DynamoDB's 400 KB item limit: every write to them would fail\n" +
+	want := "\nerror page_daily: rows reach 590 KB, over DynamoDB's 400 KB item limit: every write to them would fail\n" +
 		"  hint: shorten LOG RETENTION on page_views (fewer shards), or runtime.prune_window_seconds; SPLIT 2 keeps each item under the limit\n"
 	if got.status != 1 || !strings.HasSuffix(got.stdout, want) || got.stderr != "" {
 		t.Errorf("got %+v, want status 1 and stdout ending with %q", got, want)

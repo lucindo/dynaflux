@@ -100,14 +100,16 @@ layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
   rows         shared: GROUP BY (page, day) leaves out user_id, the PRIMARY KEY of page_views, so any shard can write any row; ~1,000 active
   backfill     fenced handoff: count and sum are additive
 
-row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
+row, estimated (String values are taken as 32 bytes)
   pk        page                                                  34 B
   sk        day                                                    6 B
+  page      key column                                            36 B
+  day       key column                                             9 B
   views     count()                                               13 B
   total_ms  sum(duration_ms)                                      20 B
   _v        row version                                           10 B
-  _hwm      ~20.1 high-water marks of ~30 B                      604 B
-  total     1 write unit, 1 read unit; the item limit is 400 KB  687 B
+  _hwm      ~20.1 high-water marks of ~24 B                      490 B
+  total     1 write unit, 1 read unit; the item limit is 400 KB  618 B
 
 per event, per region
   rows         1.07 write units and 1.07 read units: a batch of 50 events updates 48.8 rows, and 10% of writes conflict and retry
@@ -125,14 +127,16 @@ layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
   rows         a row per entity: GROUP BY (user_id, day) holds user_id, the PRIMARY KEY of page_views
   backfill     fenced handoff: count is additive
 
-row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
-  pk     user_id, day                                          38 B
-  sk     a constant                                             3 B
-  views  count()                                               13 B
-  pages  uniqExact(page)                                       13 B
-  _v     row version                                           10 B
-  _hwm   ~1 high-water mark of ~30 B                           37 B
-  total  1 write unit, 1 read unit; the item limit is 400 KB  114 B
+row, estimated (String values are taken as 32 bytes)
+  pk       user_id, day                                          38 B
+  sk       a constant                                             3 B
+  user_id  key column                                            39 B
+  day      key column                                             9 B
+  views    count()                                               13 B
+  pages    uniqExact(page)                                       13 B
+  _v       row version                                           10 B
+  _hwm     ~1 high-water mark of ~24 B                           31 B
+  total    1 write unit, 1 read unit; the item limit is 400 KB  156 B
 
 per event, per region
   rows         1.10 write units and 1.10 read units: a batch of 50 events updates 50 rows, and 10% of writes conflict and retry
@@ -147,7 +151,7 @@ query PageStats :many, from view page_daily
   read         Query of page = {page} AND day >= {from} AND day <= {to}
   calls        1 Query per call, one per key combination
   items        every row in the range
-  read cost    0.671 KB per row, and a Query rounds its total up to 4 KB: ~0.0839 read units per row eventually consistent, ~0.168 with WaitFor, which reads with strong consistency
+  read cost    0.603 KB per row, and a Query rounds its total up to 4 KB: ~0.0754 read units per row eventually consistent, ~0.151 with WaitFor, which reads with strong consistency
 -- explain LastPage --
 query LastPage :one, from view user_latest
   assumptions  --rate 1000  --event-kb 1
@@ -156,7 +160,7 @@ query LastPage :one, from view user_latest
 
   read         GetItem of user_id = {user}
   items        1 item per call
-  read cost    0.131 KB per item, each rounded up to 4 KB: ~0.5 read units per item eventually consistent, ~1 with WaitFor, which reads with strong consistency
+  read cost    0.163 KB per item, each rounded up to 4 KB: ~0.5 read units per item eventually consistent, ~1 with WaitFor, which reads with strong consistency
 -- explain RecentViews --
 query RecentViews :many, from stream page_views
   assumptions  --event-kb 1

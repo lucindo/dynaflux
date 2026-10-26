@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
@@ -32,15 +33,15 @@ type stream struct {
 	open        []*unit // one per key range; together they cover every key
 }
 
-func newStream(rg *region, s Stream) *stream {
+func newStream(rg *region, name, table string) *stream {
 	// Every region gets each of the stream's n events, and each adds at least 1, so a
 	// start more than maxSeqGap and at most n below 10^21 gives sequence numbers of 21
 	// and of 22 digits, which compare wrongly unpadded, whenever n > maxSeqGap.
-	n := int64(rg.run.counts[s.Table])
+	n := int64(rg.run.counts[name])
 	lo := min(maxSeqGap+1, n)
 	seq, _ := new(big.Int).SetString(firstWideSeq, 0)
 	seq.Sub(seq, big.NewInt(lo+rg.run.topo.Int64N(n-lo+1)))
-	return &stream{rg: rg, name: s.Name, table: s.Table, seq: seq}
+	return &stream{rg: rg, name: name, table: table, seq: seq}
 }
 
 // append writes an append to the replica and its change stream, then ships it to every
@@ -76,7 +77,7 @@ func (s *stream) emit(it store.Item) {
 	h := keyHash(keyOf(it))
 	u := s.unitFor(h)
 	s.seq.Add(s.seq, big.NewInt(1+s.rg.run.topo.Int64N(maxSeqGap)))
-	u.add(Record{Op: Insert, Seq: s.seq.String(), New: it}, h)
+	u.add(projector.Record{Op: projector.Insert, Seq: s.seq.String(), New: it}, h)
 	if u.left--; u.left == 0 {
 		s.rollover(u)
 	}
@@ -162,7 +163,7 @@ type unit struct {
 	prefix   uint64
 	left     int // records until it closes
 	closed   bool
-	recs     []Record
+	recs     []projector.Record
 	lanes    []*lane   // one per mapping and PF lane
 	finished time.Time // when every lane delivered the closed unit
 }
@@ -172,7 +173,7 @@ func (u *unit) covers(h uint64) bool {
 	return h%parts == u.root && (h/parts)&(1<<u.depth-1) == u.prefix
 }
 
-func (u *unit) add(rec Record, h uint64) {
+func (u *unit) add(rec projector.Record, h uint64) {
 	u.recs = append(u.recs, rec)
 	pf := uint64(u.s.rg.run.sc.ESM.PF) //nolint:gosec // Scenario.check keeps it positive
 	part := int((h >> partShift) % pf) //nolint:gosec // below PF
@@ -201,7 +202,7 @@ type lane struct {
 	m           *mapping
 	part        int
 	parents     []*lane // the parent unit's lanes of the same mapping
-	recs        []Record
+	recs        []projector.Record
 	acked       int
 	invocations int           // only the poller touches it
 	changed     chan struct{} // closed and replaced when a record arrives or the unit closes

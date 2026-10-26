@@ -6,6 +6,7 @@ package simulation
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/engine"
+	"github.com/lucindo/dynaflux/internal/expr"
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
@@ -27,6 +30,7 @@ type run struct {
 	sc      Scenario
 	sys     System
 	cfg     Config
+	meta    string        // the meta table: P3 reads its view states, P5 checks its unit items
 	window  time.Duration // W in P4
 	seed    uint64
 	sched   *sched
@@ -34,9 +38,8 @@ type run struct {
 	topo    *rand.Rand // drawn only right after a gate
 	arch    *rand.Rand // drawn only right after a gate
 	regions []*region
-	tables  map[string]string // stream name → table
 	events  []event
-	counts  map[string]int // events by stream table
+	counts  map[string]int // events by stream
 	stop    chan struct{}  // closed at quiescence, or when the budget runs out
 	quiet   chan struct{}  // closed when nothing is left to deliver
 
@@ -48,8 +51,8 @@ type run struct {
 }
 
 type event struct {
-	table string
-	item  store.Item
+	stream string
+	vals   []expr.Value
 }
 
 type tableKey struct {
@@ -57,35 +60,39 @@ type tableKey struct {
 	key   store.Key
 }
 
-func newRun(sc Scenario, sys System, seed uint64) (*run, error) {
+func newRun(ctx context.Context, sc Scenario, sys System, seed uint64) (*run, error) {
 	cfg := sys.Config()
+	if cfg.Catalog == nil || cfg.Naming.Store != cfg.Catalog.Catalog().Store {
+		return nil, fmt.Errorf("the system needs a catalog, and tables named for its store: got %+v", cfg.Naming)
+	}
 	r := &run{
 		sc:      sc,
 		sys:     sys,
 		cfg:     cfg,
-		window:  cmp.Or(sc.Window, cfg.Window),
+		meta:    cfg.Naming.MetaTable(),
+		window:  cmp.Or(sc.Window, time.Duration(cfg.Catalog.Catalog().PruneWindowSeconds)*time.Second),
 		seed:    seed,
 		faults:  newRand(seed, streamFaults),
 		topo:    newRand(seed, streamTopology),
 		arch:    newRand(seed, streamArchive),
-		tables:  map[string]string{},
 		counts:  map[string]int{},
 		stop:    make(chan struct{}),
 		quiet:   make(chan struct{}),
 		applied: map[tableKey]bool{},
 	}
-	if cfg.Meta == "" || r.window <= 0 {
-		return nil, fmt.Errorf("the system needs a meta table and a prune window, got %q and %v", cfg.Meta, r.window)
+	if r.window <= 0 {
+		return nil, fmt.Errorf("the prune window is %v", r.window)
 	}
 	r.sched = newSched(seed, r.violatef)
-	for _, s := range cfg.Streams {
-		r.tables[s.Name] = s.Table
-	}
 	if err := r.generate(); err != nil {
 		return nil, err
 	}
 	for i := range sc.Regions {
-		r.regions = append(r.regions, newRegion(r, i))
+		rg, err := newRegion(ctx, r, i)
+		if err != nil {
+			return nil, err
+		}
+		r.regions = append(r.regions, rg)
 	}
 	for _, from := range r.regions {
 		for _, to := range r.regions {
@@ -99,20 +106,17 @@ func newRun(sc Scenario, sys System, seed uint64) (*run, error) {
 
 func (r *run) generate() error {
 	rng := newRand(r.seed, streamEvents)
-	seen := map[tableKey]bool{}
 	for n := range r.sc.Events {
-		name, it := r.sys.Event(rng, n)
-		table, ok := r.tables[name]
-		if !ok {
-			return fmt.Errorf("event %d is on stream %q, which System.Streams doesn't list", n, name)
+		poison := chance(rng, r.sc.Poison)
+		if poison {
+			r.count(&r.stats.Poison)
 		}
-		k := tableKey{table, keyOf(it)}
-		if seen[k] {
-			return fmt.Errorf("event %d repeats the key %v", n, k.key)
+		name, vals := r.sys.Event(rng, n, poison)
+		if _, ok := r.cfg.Catalog.Catalog().Stream(name); !ok {
+			return fmt.Errorf("event %d is on stream %q, which the catalog doesn't have", n, name)
 		}
-		seen[k] = true
-		r.events = append(r.events, event{table, cloneItem(it)})
-		r.counts[table]++
+		r.events = append(r.events, event{name, vals})
+		r.counts[name]++
 	}
 	return nil
 }
@@ -133,29 +137,37 @@ func (r *run) start() {
 }
 
 // write appends every Writers-th event, each to a random home region, retrying until
-// the append is acknowledged.
+// the append is acknowledged. A retry gets a new event_id, so an append that applied
+// before its caller saw a timeout stays as an event of its own.
 func (r *run) write(w int) {
 	id := "w" + strconv.Itoa(w)
 	rng := r.actorRNG(id)
 	ctx := withInvocation(context.Background(), &invocation{id: id, stallAt: -1})
+	// Entropy of its own keeps the writer's event_ids apart from the others'.
+	entropy := rand.NewChaCha8(sha256.Sum256(fmt.Appendf(nil, "%d %s", r.seed, id)))
+	engines := make([]*engine.Engine, len(r.regions))
+	for i, rg := range r.regions {
+		engines[i] = engine.New(rg.store, engine.Options{Region: rg.name, Prefix: r.cfg.Naming.Prefix, Entropy: entropy})
+	}
 	for n := w; n < len(r.events); n += r.sc.Writers {
 		time.Sleep(time.Duration(rng.Int64N(int64(writeGap))))
-		r.append(ctx, r.regions[rng.IntN(len(r.regions))], r.events[n])
+		r.append(ctx, engines[rng.IntN(len(engines))], r.events[n])
 	}
 	r.sched.gate(id, "done")
 	r.settle(1)
 }
 
-func (r *run) append(ctx context.Context, home *region, ev event) {
-	for !isClosed(r.stop) {
-		err := home.store.Put(ctx, ev.table, ev.item, store.IfAbsent())
+func (r *run) append(ctx context.Context, e *engine.Engine, ev event) {
+	for !r.stopped() {
+		res, err := e.Append(ctx, r.cfg.Catalog, ev.stream, [][]expr.Value{ev.vals}, engine.AppendMode{})
+		if err == nil {
+			err = res[0].Err
+		}
 		switch {
-		// Event keys are unique, so a failed condition is this append's own write, which
-		// the SDK's retry or an earlier attempt applied.
-		case err == nil, errors.Is(err, store.ErrConditionFailed):
+		case err == nil:
 			return
-		case errors.Is(err, store.ErrInvalidRequest), errors.Is(err, store.ErrTooLarge):
-			r.violatef("events: append of %v: %v", keyOf(ev.item), err)
+		case !errors.Is(err, errTransient) && !errors.Is(err, errAmbiguous):
+			r.violatef("events: append to %s: %v", ev.stream, err)
 			return
 		}
 		time.Sleep(writeRetry)

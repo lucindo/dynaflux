@@ -14,7 +14,8 @@
 //   - P0: every applied append is in each region's change stream exactly once.
 //   - P1: each region's views equal the oracle over that region's records.
 //   - P2: regions hold the same rows.
-//   - P3: a view is broken exactly when a record fails its evaluation.
+//   - P3: a view is broken exactly when a record fails its evaluation; a live view, by
+//     the time a Handle of that record returns without error.
 //   - P4: a row holds high-water marks only for units that can still deliver.
 //   - P5: row versions rise by one; marker owners, progress and fences never go back.
 //   - P6: the run reaches quiescence within its budget.
@@ -33,70 +34,44 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/engine"
+	"github.com/lucindo/dynaflux/internal/expr"
+	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
 )
-
-// Op is the kind of a change-stream record.
-type Op uint8
-
-// Record kinds.
-const (
-	Insert Op = iota + 1
-	Modify
-	Remove
-)
-
-// Record is one change-stream record as a projector receives it.
-type Record struct {
-	Op       Op
-	Seq      string // as delivered: unpadded decimal, 21 digits or more
-	New, Old store.Item
-}
-
-// Batch is one invocation's records: one delivery unit's, in sequence order.
-type Batch struct {
-	Stream  string
-	Unit    string
-	Records []Record
-}
-
-// Result is an invocation's partial batch response.
-type Result struct {
-	FailedSeq string // the lowest sequence number to deliver again; "" when all succeeded
-}
 
 // Core is the projector instance of one warm container. Its only clock limit is the
 // deadline of the context Handle gets.
 type Core interface {
-	Handle(ctx context.Context, b Batch) (Result, error)
+	Handle(ctx context.Context, b projector.Batch) (projector.Result, error)
 }
 
 // Archiver takes the records a core archives.
 type Archiver interface {
-	Archive(ctx context.Context, stream, unit string, recs []Record) error
+	Archive(ctx context.Context, stream, unit string, recs []projector.Record) error
 }
 
-// Stream names a change stream and the table that feeds it.
-type Stream struct{ Name, Table string }
-
-// Config is what the harness needs of a system's tables and settings.
+// Config is what the harness needs of a system: the catalog whose streams the writers
+// append to, through [engine.Engine.Append], and the names of the store's tables. Every
+// view version is live when a run starts.
 type Config struct {
-	Streams []Stream
-	Meta    string        // the meta table, whose unit items P5 checks
-	Window  time.Duration // the prune window W of its cores, which P4 checks
+	Catalog *engine.Catalog
+	Naming  catalog.Naming
 }
 
 // System is the code under test with its reference semantics.
 type System interface {
 	Config() Config
-	// Event returns the n-th event to append: its stream's name and its item, whose key
-	// no other event shares.
-	Event(r *rand.Rand, n int) (stream string, it store.Item)
+	// Event returns the values of the n-th event to append, as Append takes them, and its
+	// stream. A poison event fails the evaluation of a view.
+	Event(r *rand.Rand, n int, poison bool) (stream string, vals []expr.Value)
 	// NewCore returns a new container's core; b and a carry the region's faults.
 	NewCore(b store.Backend, a Archiver) Core
-	// Expect feeds the oracle one INSERT record of a region. Each event reaches it once
-	// per region, whatever the deliveries were.
-	Expect(o *Oracle, unit string, rec Record)
+	// Expect feeds an oracle one INSERT record of a region. A region's oracle gets each
+	// record once, whatever the deliveries were; P3 also feeds the records of a batch to
+	// an oracle of their own, to learn which views they fail.
+	Expect(o *Oracle, unit string, rec projector.Record) error
 	// Read reads every view of a region through the read path, without faults.
 	Read(ctx context.Context, b store.Backend) (State, error)
 }
@@ -107,11 +82,12 @@ type Scenario struct {
 	Regions  int
 	Events   int
 	Writers  int
+	Poison   float64 // the share of poison events
 	Faults   Faults
 	Topology Topology
 	ESM      ESM
 	Archive  Archive
-	// Window, when set, replaces the System's W in P4, for a core that prunes with another.
+	// Window, when set, replaces the catalog's W in P4, for a core that prunes with another.
 	Window time.Duration
 	// Budget is the fake time a seed has to reach quiescence (P6).
 	Budget time.Duration
@@ -171,10 +147,11 @@ type Outcome struct {
 }
 
 // Stats counts what a run exercised. Killed counts the requests refused because their
-// invocation had died or reached its deadline; Slow counts stalled responses.
+// invocation had died or reached its deadline; Slow counts stalled responses; Poison
+// counts poison events.
 type Stats struct {
 	Requests, Transient, Ambiguous, Retried, Spikes, Crashes, Killed, Late, Slow int64
-	Invocations, Timeouts, Stale, Dups, Empty, Containers, Units                 int64
+	Invocations, Timeouts, Stale, Dups, Empty, Containers, Units, Poison         int64
 }
 
 // Run runs seed of sc against sys in its own synctest bubble and checks the properties.
@@ -187,7 +164,7 @@ func Run(t *testing.T, sc Scenario, sys System, seed uint64) Outcome {
 	var out Outcome
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
-		r, err := newRun(sc, sys, seed)
+		r, err := newRun(t.Context(), sc, sys, seed)
 		if err != nil {
 			t.Fatalf("scenario %s seed %d: %v", sc.Name, seed, err)
 		}

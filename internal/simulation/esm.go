@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strconv"
 	"time"
+
+	"github.com/lucindo/dynaflux/internal/projector"
 )
 
 const (
@@ -69,7 +71,7 @@ func (m *mapping) poll(l *lane) {
 
 // deliver invokes a batch, with the extra deliveries the scenario draws, and returns how
 // many of its records the mapping may checkpoint.
-func (m *mapping) deliver(l *lane, rng *rand.Rand, recs []Record) int {
+func (m *mapping) deliver(l *lane, rng *rand.Rand, recs []projector.Record) int {
 	r := m.rg.run
 	e := r.sc.ESM
 	if chance(rng, e.Stale) {
@@ -92,7 +94,7 @@ func (m *mapping) deliver(l *lane, rng *rand.Rand, recs []Record) int {
 		}
 		return len(recs)
 	}
-	i := slices.IndexFunc(recs, func(rec Record) bool { return rec.Seq == o.res.FailedSeq })
+	i := slices.IndexFunc(recs, func(rec projector.Record) bool { return rec.Seq == o.res.FailedSeq })
 	if i < 0 {
 		r.violatef("ESM: %s returned FailedSeq %s, which isn't in its batch", l.id, o.res.FailedSeq)
 		return 0
@@ -106,7 +108,7 @@ func (l *lane) nextID() string {
 }
 
 type outcome struct {
-	res Result
+	res projector.Result
 	err error
 }
 
@@ -118,7 +120,7 @@ type call struct {
 
 // invoke runs one invocation on a warm container and waits for its result or its
 // deadline, whichever comes first.
-func (m *mapping) invoke(l *lane, id string, rng *rand.Rand, recs []Record) outcome {
+func (m *mapping) invoke(l *lane, id string, rng *rand.Rand, recs []projector.Record) outcome {
 	rg := m.rg
 	r := rg.run
 	e := r.sc.ESM
@@ -128,7 +130,7 @@ func (m *mapping) invoke(l *lane, id string, rng *rand.Rand, recs []Record) outc
 		inv.stallAt = rng.IntN(stallSpread * len(recs))
 		inv.stall = between(rng, -time.Millisecond, e.Timeout/stallFraction)
 	}
-	b := Batch{Stream: l.unit.s.name, Unit: l.unit.id, Records: make([]Record, len(recs))}
+	b := projector.Batch{Stream: l.unit.s.name, Unit: l.unit.id, Records: make([]projector.Record, len(recs))}
 	for i, rec := range recs {
 		b.Records[i] = cloneRecord(rec)
 	}
@@ -154,13 +156,16 @@ func (m *mapping) invoke(l *lane, id string, rng *rand.Rand, recs []Record) outc
 	if !errors.Is(c.out.err, errCrashed) {
 		rg.pool = append(rg.pool, core)
 	}
+	if c.out.err == nil {
+		r.checkBreakers(rg, b)
+	}
 	return c.out
 }
 
 // handle runs Handle as one invocation. A crash, a kill or a panic leaves errCrashed; a
 // panic is also a bug (P8). A crash or a kill on a goroutine Handle started ends only that
 // goroutine, so Handle may still return; the invocation died all the same.
-func (r *run) handle(ctx context.Context, inv *invocation, core Core, b Batch, c *call) {
+func (r *run) handle(ctx context.Context, inv *invocation, core Core, b projector.Batch, c *call) {
 	c.out.err = errCrashed
 	killed := true // until Handle returns or panics: the gates ended its goroutine
 	defer func() {

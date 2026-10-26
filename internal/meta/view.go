@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -94,19 +95,44 @@ func (m *Meta) SetViewState(ctx context.Context, version string, s State) error 
 	})
 }
 
-// MarkBroken moves a version to [Broken] from any state, recording f. A broken version keeps
-// the first failure.
-func (m *Meta) MarkBroken(ctx context.Context, version string, f Failure) error {
-	if !isSeq(f.Seq) {
-		return fmt.Errorf("meta: mark %s broken: %q is not a sequence number in its stored form", version, f.Seq)
-	}
-	return m.updateView(ctx, version, func(vs *ViewState) (bool, error) {
-		if vs.State == Broken {
-			return false, nil
+// SetLive moves every view version of cat through [Activating] to [Live], for a store with
+// no events to backfill, such as a test's.
+func (m *Meta) SetLive(ctx context.Context, cat *catalog.Catalog) error {
+	for _, v := range cat.Views {
+		for _, vv := range v.Versions {
+			for _, s := range []State{Activating, Live} {
+				if err := m.SetViewState(ctx, catalog.VersionID(v.Name, vv.Number), s); err != nil {
+					return err
+				}
+			}
 		}
-		vs.State, vs.Failure = Broken, &f
-		return true, nil
+	}
+	return nil
+}
+
+// maxErrorBytes bounds a stored failure's error, which may quote a value of any size.
+const maxErrorBytes = 1024
+
+// MarkBroken moves a version to [Broken] from any state, recording f with at most the first
+// 1 KB of its error, and reports whether this call opened the breaker. A broken version
+// keeps the first failure.
+func (m *Meta) MarkBroken(ctx context.Context, version string, f Failure) (bool, error) {
+	if !isSeq(f.Seq) {
+		return false, fmt.Errorf("meta: mark %s broken: %q is not a sequence number in its stored form", version, f.Seq)
+	}
+	// Dropping invalid UTF-8 also drops a rune that the cut splits.
+	f.Error = strings.ToValidUTF8(f.Error[:min(len(f.Error), maxErrorBytes)], "")
+	opened := false // set once this call writes
+	err := m.updateView(ctx, version, func(vs *ViewState) (bool, error) {
+		if vs.State != Broken {
+			vs.State, vs.Failure, opened = Broken, &f, true
+			return true, nil
+		}
+		// After a write, f in the stored state is that write, retried by the SDK.
+		opened = opened && vs.Failure.Unit == f.Unit && vs.Failure.Seq == f.Seq
+		return false, nil
 	})
+	return opened && err == nil, err
 }
 
 // viewState reads a version's state and its item's version with a consistent read.

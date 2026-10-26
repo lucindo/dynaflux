@@ -119,7 +119,7 @@ func decimalLiteral(n *sql.NumberLit) (catalog.Expr, bool) {
 // Bounds of temporal values (sql.md §4.1): dates through 2106-02-07, and times before
 // 2106-02-07 06:28:15.
 func timeLimit() time.Time {
-	return time.Unix(math.MaxUint32, 0).UTC()
+	return time.UnixMicro(catalog.TimeLimitMicros).UTC()
 }
 
 func lastDate() time.Time {

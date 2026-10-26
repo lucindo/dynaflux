@@ -28,16 +28,15 @@ import (
 // MaxViewStateAge is the longest a projector uses a view state it read.
 const MaxViewStateAge = 30 * time.Second
 
-// ListingDelay is how long after a version's activation the units listed for
-// [Meta.FenceUnits] may be listed: the longest a projector uses a view state, plus a minute
-// for clock skew and request latency.
+// ListingDelay is how long after a version's activation [Meta.FenceUnits] waits before it
+// lists the units: the longest a projector uses a view state, plus a minute for clock skew
+// and request latency.
 const ListingDelay = MaxViewStateAge + 60*time.Second
 
 var (
-	ErrFenced         = errors.New("meta: a fence exists for a version this batch didn't apply")
-	ErrTransition     = errors.New("meta: view state can't move there")
-	ErrListedTooEarly = errors.New("meta: units listed before every projector saw activating")
-	ErrNotActivating  = errors.New("meta: the version isn't activating")
+	ErrFenced        = errors.New("meta: a fence exists for a version this batch didn't apply")
+	ErrTransition    = errors.New("meta: view state can't move there")
+	ErrNotActivating = errors.New("meta: the version isn't activating")
 )
 
 // Meta reads and writes one meta table. It is safe for concurrent use.

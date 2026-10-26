@@ -151,7 +151,7 @@ type ReadingsParams struct {
 	D     dynaflux.Decimal // {d:Decimal(10, 2)}
 	B     bool             // {b:Bool}
 	ID    dynaflux.UUID    // {id:UUID}
-	Day   time.Time        // {day:Date}
+	Day   time.Time        // {day:Date}: the UTC date of the time given
 	MS    time.Time        // {ms:DateTime64(3)}
 	N     uint32           // {n:UInt32} LIMIT: 0 returns no rows
 }
@@ -210,7 +210,7 @@ type Reading struct {
 	D      dynaflux.Decimal // d Decimal(10, 2)
 	B      bool             // b Bool
 	ID     dynaflux.UUID    // id UUID
-	Day    time.Time        // day Date
+	Day    time.Time        // day Date: the UTC date of the time given
 	MS     time.Time        // ms DateTime64(3)
 	Us     time.Time        // us DateTime64(6)
 	Note   *string          // note Nullable(String)
@@ -220,7 +220,7 @@ type Reading struct {
 	Label  string           // label String DEFAULT 'it\'s a \\ path': only for events stored before the column existed; Append stores the value given
 	Level  uint8            // level UInt8 DEFAULT 3: only for events stored before the column existed; Append stores the value given
 	Price  dynaflux.Decimal // price Decimal(10, 2) DEFAULT 9.50: only for events stored before the column existed; Append stores the value given
-	Since  time.Time        // since Date DEFAULT '2024-01-31': only for events stored before the column existed; Append stores the value given
+	Since  time.Time        // since Date DEFAULT '2024-01-31': only for events stored before the column existed; Append stores the UTC date of the time given
 	Active bool             // active Bool DEFAULT true: only for events stored before the column existed; Append stores the value given
 	Codes  []uint16         // codes Array(UInt16) DEFAULT [1, 2]: only for events stored before the column existed; Append stores the value given
 
@@ -244,8 +244,9 @@ func (c *Client) AppendReading(ctx context.Context, ev Reading, opts ...dynaflux
 }
 
 // AppendReadingBatch appends evs to stream readings, each event as its own write.
-// The Token covers every event it stored. When an event fails, the error is a
-// *dynaflux.BatchError whose Errs line up with evs, nil for each stored event.
+// The Token covers every event stored, by this call or before it. When an event
+// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
+// each event this call stored.
 func (c *Client) AppendReadingBatch(ctx context.Context, evs []Reading, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvents(ctx, c.store, Catalog, "readings", evs, (*Reading).fields, opts...)
 }

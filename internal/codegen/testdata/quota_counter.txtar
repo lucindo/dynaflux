@@ -147,8 +147,9 @@ func (c *Client) AppendAPICall(ctx context.Context, ev APICall, opts ...dynaflux
 }
 
 // AppendAPICallBatch appends evs to stream api_calls, each event as its own write.
-// The Token covers every event it stored. When an event fails, the error is a
-// *dynaflux.BatchError whose Errs line up with evs, nil for each stored event.
+// The Token covers every event stored, by this call or before it. When an event
+// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
+// each event this call stored.
 // A retried batch reports the events it stored before as dynaflux.ErrDuplicate, so
 // check each event rather than the whole error:
 //
