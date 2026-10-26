@@ -1,0 +1,84 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A stream with UInt64, Nullable, Array, Decimal and DEFAULT columns, and a second stream
+whose name is a prefix of the first's.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (
+    path     String,
+    user_id  UInt64,
+    referrer Nullable(String),
+    tags     Array(String) DEFAULT [],
+    amount   Decimal(10, 2),
+    clicks   UInt32 DEFAULT 0
+)
+PRIMARY KEY (path);
+
+CREATE STREAM page (
+    path String
+)
+PRIMARY KEY (path);
+-- want/fingerprint --
+sha256:4508e0c737b6b831ac5c03d18f47f4921b77af3e3dd18776499609e273de49f9
+-- want/page.create.sql --
+CREATE TABLE `prod_analytics`.`page` (
+  `event_id` string,
+  `event_time` timestamp,
+  `ingest_time` timestamp,
+  `origin_region` string,
+  `path` string,
+  `_shard` string,
+  `_seq` string,
+  `_arrival` timestamp)
+PARTITIONED BY (day(`event_time`))
+LOCATION 's3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/page/iceberg/'
+TBLPROPERTIES ('table_type' = 'ICEBERG', 'format' = 'parquet', 'write_compression' = 'zstd')
+-- want/page.dedup.sql --
+CREATE OR REPLACE VIEW "prod_analytics"."page_dedup" AS
+SELECT
+  "event_id",
+  "event_time",
+  "ingest_time",
+  "origin_region",
+  "path"
+FROM (
+  SELECT *, row_number() OVER (
+    PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
+  FROM "prod_analytics"."page")
+WHERE "_dedup_rn" = 1
+-- want/page_views.create.sql --
+CREATE TABLE `prod_analytics`.`page_views` (
+  `event_id` string,
+  `event_time` timestamp,
+  `ingest_time` timestamp,
+  `origin_region` string,
+  `path` string,
+  `user_id` decimal(20,0),
+  `referrer` string,
+  `tags` array<string>,
+  `amount` decimal(10,2),
+  `clicks` bigint,
+  `_shard` string,
+  `_seq` string,
+  `_arrival` timestamp)
+PARTITIONED BY (day(`event_time`))
+LOCATION 's3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/page_views/iceberg/'
+TBLPROPERTIES ('table_type' = 'ICEBERG', 'format' = 'parquet', 'write_compression' = 'zstd')
+-- want/page_views.dedup.sql --
+CREATE OR REPLACE VIEW "prod_analytics"."page_views_dedup" AS
+SELECT
+  "event_id",
+  "event_time",
+  "ingest_time",
+  "origin_region",
+  "path",
+  "user_id",
+  "referrer",
+  coalesce("tags", ARRAY[]) AS "tags",
+  "amount",
+  coalesce("clicks", BIGINT '0') AS "clicks"
+FROM (
+  SELECT *, row_number() OVER (
+    PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
+  FROM "prod_analytics"."page_views")
+WHERE "_dedup_rn" = 1
