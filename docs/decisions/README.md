@@ -16,3 +16,4 @@ old one's status to `Superseded by NNNN`.
 |---|---|---|
 | [0001](0001-sql-parser.md) | Hand-written parser for the SQL dialect | Accepted |
 | [0002](0002-view-version-lock-file.md) | Number view versions with a committed lock file | Accepted |
+| [0003](0003-shard-identity-from-tumbling-window.md) | The projector learns its shard from a Lambda tumbling window | Accepted |
