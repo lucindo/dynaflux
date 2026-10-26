@@ -40,6 +40,18 @@ func TestDiagnosticString(t *testing.T) {
 			},
 			want: "a.sql:1:1: warning DF2501: m",
 		},
+		{
+			name: "control characters escaped",
+			d: diag.Diagnostic{
+				Pos:       diag.Pos{File: "dynaflux/\x1b[31mred.sql", Line: 1, Col: 1},
+				Severity:  diag.SeverityError,
+				Code:      "DF6501",
+				Statement: "a\tb",
+				Message:   "x\n  hint: fake",
+				Hint:      "h\r",
+			},
+			want: `dynaflux/\x1b[31mred.sql:1:1: error DF6501: a\tb: x\n  hint: fake` + "\n" + `  hint: h\r`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -89,5 +101,34 @@ func TestHasErrors(t *testing.T) {
 	}
 	if !diag.HasErrors([]diag.Diagnostic{warn, errd}) {
 		t.Error("HasErrors missed an error")
+	}
+}
+
+func TestSuggest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		unknown    string
+		candidates []string
+		want       string // "" for no suggestion
+	}{
+		{"letter case beats a closer name", "Page", []string{"pages", "Pag", "page"}, "page"},
+		{"two edits", "uesr_id", []string{"user_id", "page"}, "user_id"},
+		{"three edits are too many", "views", []string{"visits"}, ""},
+		{"ties go to the name that sorts first", "cat", []string{"cut", "bat"}, "bat"},
+		{"the name itself isn't suggested", "page", []string{"page", "pages"}, "pages"},
+		{"only the name itself", "page", []string{"page"}, ""},
+		{"empty name", "", []string{"a"}, ""},
+		{"edits count code points, not bytes", "éé", []string{"ee"}, "ee"},
+		{"no candidates", "page", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := diag.Suggest(tt.unknown, tt.candidates)
+			if got != tt.want || ok != (tt.want != "") {
+				t.Errorf("Suggest(%q, %q) = %q, %v; want %q", tt.unknown, tt.candidates, got, ok, tt.want)
+			}
+		})
 	}
 }

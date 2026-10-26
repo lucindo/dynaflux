@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Severity tells whether a diagnostic fails validation.
@@ -58,7 +60,8 @@ type Diagnostic struct {
 }
 
 // String renders d as validate prints it: one line, plus a hint line when
-// d has a hint.
+// d has a hint. Control characters print escaped, as \n or \x1b: the text can
+// come from a cloned repository, and must not fake a line or drive the terminal.
 func (d Diagnostic) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %s %s: ", d.Pos, d.Severity, d.Code)
@@ -67,9 +70,22 @@ func (d Diagnostic) String() string {
 		b.WriteString(": ")
 	}
 	b.WriteString(d.Message)
-	if d.Hint != "" {
-		b.WriteString("\n  hint: ")
-		b.WriteString(d.Hint)
+	line := escapeControl(b.String())
+	if d.Hint == "" {
+		return line
+	}
+	return line + "\n  hint: " + escapeControl(d.Hint)
+}
+
+func escapeControl(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		} else {
+			b.WriteRune(r)
+		}
 	}
 	return b.String()
 }
