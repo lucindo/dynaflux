@@ -1,0 +1,97 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The live table lacks two columns: one statement adds them, in declaration order.
+-- properties.json --
+{
+  "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:prod-analytics-setup",
+  "ServiceTimeout": "900",
+  "Database": "prod_analytics",
+  "WorkGroup": "prod-analytics",
+  "DatabaseLocation": "s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/",
+  "OptimizerRoleArn": "arn:aws:iam::123456789012:role/prod-analytics-regional-RoleArchiveOptimizer-1A2B3C4D5E6F",
+  "Optimizers": {
+    "Compaction": "binpack",
+    "SnapshotRetentionDays": "5",
+    "SnapshotsToKeep": "1"
+  },
+  "Fingerprint": "sha256:dcae5e48c651f60ae727fb9b1da394287be3fce686a1d9abfd61801c5d7a7632",
+  "Tables": [
+    {
+      "Name": "page",
+      "Location": "s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/page/iceberg/",
+      "Columns": [
+        {
+          "Name": "event_id",
+          "Type": "string"
+        },
+        {
+          "Name": "event_time",
+          "Type": "timestamp"
+        },
+        {
+          "Name": "user",
+          "Type": "string"
+        },
+        {
+          "Name": "clicks",
+          "Type": "bigint",
+          "Default": "BIGINT '0'"
+        },
+        {
+          "Name": "_shard",
+          "Type": "string"
+        },
+        {
+          "Name": "_seq",
+          "Type": "string"
+        },
+        {
+          "Name": "_arrival",
+          "Type": "timestamp"
+        }
+      ]
+    }
+  ]
+}
+-- glue.json --
+{
+  "page": {
+    "location": "s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/page/iceberg/",
+    "partition": "day(event_time)",
+    "table_type": "ICEBERG",
+    "columns": {
+      "event_id": "string",
+      "event_time": "timestamp",
+      "_shard": "string",
+      "_seq": "string",
+      "_arrival": "timestamp"
+    }
+  }
+}
+-- want --
+glue database prod_analytics at s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/
+
+athena prod-analytics
+ALTER TABLE `prod_analytics`.`page` ADD COLUMNS (`user` string, `clicks` bigint)
+
+glue optimizer prod_analytics.page
+{Type:compaction Role:arn:aws:iam::123456789012:role/prod-analytics-regional-RoleArchiveOptimizer-1A2B3C4D5E6F Strategy:binpack RetentionDays:0 SnapshotsToKeep:0}
+
+glue optimizer prod_analytics.page
+{Type:retention Role:arn:aws:iam::123456789012:role/prod-analytics-regional-RoleArchiveOptimizer-1A2B3C4D5E6F Strategy: RetentionDays:5 SnapshotsToKeep:1}
+
+athena prod-analytics
+CREATE OR REPLACE VIEW "prod_analytics"."page_dedup" AS
+SELECT
+  "event_id",
+  "event_time",
+  "user",
+  coalesce("clicks", BIGINT '0') AS "clicks"
+FROM (
+  SELECT *, row_number() OVER (
+    PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
+  FROM "prod_analytics"."page")
+WHERE "_dedup_rn" = 1
+
+response: prod_analytics map[Fingerprint:sha256:dcae5e48c651f60ae727fb9b1da394287be3fce686a1d9abfd61801c5d7a7632]

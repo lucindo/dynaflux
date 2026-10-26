@@ -1,0 +1,163 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+No archive table exists yet, as on the first deploy: each table is created, then its
+optimizers are put, then its dedup view is created. Every name is quoted, reserved words
+(order, date, user) and names starting with _ among them.
+-- properties.json --
+{
+  "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:prod-analytics-setup",
+  "ServiceTimeout": "900",
+  "Database": "prod_analytics",
+  "WorkGroup": "prod-analytics",
+  "DatabaseLocation": "s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/",
+  "OptimizerRoleArn": "arn:aws:iam::123456789012:role/prod-analytics-regional-RoleArchiveOptimizer-1A2B3C4D5E6F",
+  "Optimizers": {
+    "Compaction": "binpack",
+    "SnapshotRetentionDays": "5",
+    "SnapshotsToKeep": "1"
+  },
+  "Fingerprint": "sha256:dcae5e48c651f60ae727fb9b1da394287be3fce686a1d9abfd61801c5d7a7632",
+  "Tables": [
+    {
+      "Name": "page",
+      "Location": "s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/page/iceberg/",
+      "Columns": [
+        {
+          "Name": "event_id",
+          "Type": "string"
+        },
+        {
+          "Name": "event_time",
+          "Type": "timestamp"
+        },
+        {
+          "Name": "user",
+          "Type": "string"
+        },
+        {
+          "Name": "clicks",
+          "Type": "bigint",
+          "Default": "BIGINT '0'"
+        },
+        {
+          "Name": "_shard",
+          "Type": "string"
+        },
+        {
+          "Name": "_seq",
+          "Type": "string"
+        },
+        {
+          "Name": "_arrival",
+          "Type": "timestamp"
+        }
+      ]
+    },
+    {
+      "Name": "order",
+      "Location": "s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/order/iceberg/",
+      "Columns": [
+        {
+          "Name": "event_id",
+          "Type": "string"
+        },
+        {
+          "Name": "event_time",
+          "Type": "timestamp"
+        },
+        {
+          "Name": "date",
+          "Type": "date"
+        },
+        {
+          "Name": "amount",
+          "Type": "decimal(20,0)",
+          "Default": "DECIMAL '0'"
+        },
+        {
+          "Name": "_shard",
+          "Type": "string"
+        },
+        {
+          "Name": "_seq",
+          "Type": "string"
+        },
+        {
+          "Name": "_arrival",
+          "Type": "timestamp"
+        }
+      ]
+    }
+  ]
+}
+-- glue.json --
+{}
+-- want --
+glue database prod_analytics at s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/
+
+athena prod-analytics
+CREATE TABLE `prod_analytics`.`page` (
+  `event_id` string,
+  `event_time` timestamp,
+  `user` string,
+  `clicks` bigint,
+  `_shard` string,
+  `_seq` string,
+  `_arrival` timestamp)
+PARTITIONED BY (day(`event_time`))
+LOCATION 's3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/page/iceberg/'
+TBLPROPERTIES ('table_type' = 'ICEBERG', 'format' = 'parquet', 'write_compression' = 'zstd')
+
+athena prod-analytics
+CREATE TABLE `prod_analytics`.`order` (
+  `event_id` string,
+  `event_time` timestamp,
+  `date` date,
+  `amount` decimal(20,0),
+  `_shard` string,
+  `_seq` string,
+  `_arrival` timestamp)
+PARTITIONED BY (day(`event_time`))
+LOCATION 's3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/order/iceberg/'
+TBLPROPERTIES ('table_type' = 'ICEBERG', 'format' = 'parquet', 'write_compression' = 'zstd')
+
+glue optimizer prod_analytics.page
+{Type:compaction Role:arn:aws:iam::123456789012:role/prod-analytics-regional-RoleArchiveOptimizer-1A2B3C4D5E6F Strategy:binpack RetentionDays:0 SnapshotsToKeep:0}
+
+glue optimizer prod_analytics.page
+{Type:retention Role:arn:aws:iam::123456789012:role/prod-analytics-regional-RoleArchiveOptimizer-1A2B3C4D5E6F Strategy: RetentionDays:5 SnapshotsToKeep:1}
+
+glue optimizer prod_analytics.order
+{Type:compaction Role:arn:aws:iam::123456789012:role/prod-analytics-regional-RoleArchiveOptimizer-1A2B3C4D5E6F Strategy:binpack RetentionDays:0 SnapshotsToKeep:0}
+
+glue optimizer prod_analytics.order
+{Type:retention Role:arn:aws:iam::123456789012:role/prod-analytics-regional-RoleArchiveOptimizer-1A2B3C4D5E6F Strategy: RetentionDays:5 SnapshotsToKeep:1}
+
+athena prod-analytics
+CREATE OR REPLACE VIEW "prod_analytics"."page_dedup" AS
+SELECT
+  "event_id",
+  "event_time",
+  "user",
+  coalesce("clicks", BIGINT '0') AS "clicks"
+FROM (
+  SELECT *, row_number() OVER (
+    PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
+  FROM "prod_analytics"."page")
+WHERE "_dedup_rn" = 1
+
+athena prod-analytics
+CREATE OR REPLACE VIEW "prod_analytics"."order_dedup" AS
+SELECT
+  "event_id",
+  "event_time",
+  "date",
+  coalesce("amount", DECIMAL '0') AS "amount"
+FROM (
+  SELECT *, row_number() OVER (
+    PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
+  FROM "prod_analytics"."order")
+WHERE "_dedup_rn" = 1
+
+response: prod_analytics map[Fingerprint:sha256:dcae5e48c651f60ae727fb9b1da394287be3fce686a1d9abfd61801c5d7a7632]
