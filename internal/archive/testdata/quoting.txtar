@@ -1,0 +1,53 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Names that are reserved words in Athena, and string defaults with quotes and control
+characters.
+-- dynaflux/order.sql --
+CREATE STREAM order (
+    date     Date,
+    user     String,
+    "select" UInt8 DEFAULT 1,
+    "from"   Array(String) DEFAULT ['it''s', 'tab\there'],
+    table    Nullable(String),
+    "values" String DEFAULT 'line\nbreak'
+)
+PRIMARY KEY (user);
+-- want/fingerprint --
+sha256:4ae9651e706a6a01747af860357d07b1cf4d60208daac22e0603c3145144be54
+-- want/order.create.sql --
+CREATE TABLE `prod_analytics`.`order` (
+  `event_id` string,
+  `event_time` timestamp,
+  `ingest_time` timestamp,
+  `origin_region` string,
+  `date` date,
+  `user` string,
+  `select` int,
+  `from` array<string>,
+  `table` string,
+  `values` string,
+  `_shard` string,
+  `_seq` string,
+  `_arrival` timestamp)
+PARTITIONED BY (day(`event_time`))
+LOCATION 's3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/order/iceberg/'
+TBLPROPERTIES ('table_type' = 'ICEBERG', 'format' = 'parquet', 'write_compression' = 'zstd')
+-- want/order.dedup.sql --
+CREATE OR REPLACE VIEW "prod_analytics"."order_dedup" AS
+SELECT
+  "event_id",
+  "event_time",
+  "ingest_time",
+  "origin_region",
+  "date",
+  "user",
+  coalesce("select", INTEGER '1') AS "select",
+  coalesce("from", ARRAY['it''s', U&'tab\0009here']) AS "from",
+  "table",
+  coalesce("values", U&'line\000Abreak') AS "values"
+FROM (
+  SELECT *, row_number() OVER (
+    PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
+  FROM "prod_analytics"."order")
+WHERE "_dedup_rn" = 1

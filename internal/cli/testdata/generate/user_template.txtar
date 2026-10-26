@@ -1,0 +1,14 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+infra.out holds global.yaml without the generated-file line: generate refuses to
+overwrite it, and writes nothing.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id);
+-- infra/dynaflux/global.yaml --
+# My own template.
+AWSTemplateFormatVersion: "2010-09-09"

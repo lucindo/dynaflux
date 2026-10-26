@@ -25,11 +25,16 @@ func TestNaming(t *testing.T) {
 		{"MetaTable", n.MetaTable(), "prod-analytics-meta"},
 		{"ProjectorFunction", n.ProjectorFunction(), "prod-analytics-projector"},
 		{"StreamProjectorFunction", n.StreamProjectorFunction("page_views"), "prod-analytics-projector-page_views"},
+		{"SetupFunction", n.SetupFunction(), "prod-analytics-setup"},
+		{"Bucket", n.Bucket("123456789012", "us-east-1"), "prod-analytics-123456789012-us-east-1-an"},
+		{"FunctionLogGroup", catalog.FunctionLogGroup(n.SetupFunction()), "/aws/lambda/prod-analytics-setup"},
 		{"QueryFunction", n.QueryFunction(), "prod-analytics-query"},
 		{"BackfillFunction", n.BackfillFunction(), "prod-analytics-backfill"},
 		{"BackfillStateMachine", n.BackfillStateMachine(), "prod-analytics-backfill"},
 		{"ArchiveStream", n.ArchiveStream("page_views"), "prod-analytics-archive-page_views"},
 		{"ArchiveDatabase", n.ArchiveDatabase(), "prod_analytics"},
+		{"ArchiveWorkGroup", n.ArchiveWorkGroup(), "prod-analytics"},
+		{"ArchiveLogGroup", n.ArchiveLogGroup(), "/aws/kinesisfirehose/prod-analytics-archive"},
 		{"IcebergTable", catalog.IcebergTable("page_views"), "page_views"},
 		{"DedupView", catalog.DedupView("page_views"), "page_views_dedup"},
 		{"StreamTable without prefix", catalog.Naming{Store: "analytics"}.StreamTable("page_views"), "analytics-stream-page_views"},
@@ -61,10 +66,14 @@ func TestResourceNameLimits(t *testing.T) {
 		{"projector at P = 55", 55, false, catalog.ResourceProjectorFunction, true},
 		{"stream projector at P + stream = 53", 43, true, catalog.ResourceProjectorFunction, false},
 		{"stream projector at P + stream = 54", 44, true, catalog.ResourceProjectorFunction, true},
+		{"setup function at P = 58", 58, false, catalog.ResourceSetupFunction, false},
+		{"setup function at P = 59", 59, false, catalog.ResourceSetupFunction, true},
 		{"query function at P = 58", 58, false, catalog.ResourceQueryFunction, false},
 		{"query function at P = 59", 59, false, catalog.ResourceQueryFunction, true},
 		{"Firehose at P + stream = 55", 45, false, catalog.ResourceArchiveStream, false},
 		{"Firehose at P + stream = 56", 46, false, catalog.ResourceArchiveStream, true},
+		{"Athena workgroup at P = 128", 128, false, catalog.ResourceArchiveWorkGroup, false},
+		{"Athena workgroup at P = 129", 129, false, catalog.ResourceArchiveWorkGroup, true},
 		{"state machine at P = 71", 71, false, catalog.ResourceBackfillStateMachine, false},
 		{"state machine at P = 72", 72, false, catalog.ResourceBackfillStateMachine, true},
 	}
@@ -95,10 +104,12 @@ func TestStoreResources(t *testing.T) {
 	n := catalog.Naming{Prefix: "prod-", Store: "analytics"}
 	store := []catalog.Resource{
 		{Kind: catalog.ResourceMetaTable, Name: "prod-analytics-meta"},
+		{Kind: catalog.ResourceSetupFunction, Name: "prod-analytics-setup"},
 		{Kind: catalog.ResourceQueryFunction, Name: "prod-analytics-query"},
 		{Kind: catalog.ResourceBackfillFunction, Name: "prod-analytics-backfill"},
 		{Kind: catalog.ResourceBackfillStateMachine, Name: "prod-analytics-backfill"},
 		{Kind: catalog.ResourceArchiveDatabase, Name: "prod_analytics"},
+		{Kind: catalog.ResourceArchiveWorkGroup, Name: "prod-analytics"},
 	}
 	tests := []struct {
 		name      string

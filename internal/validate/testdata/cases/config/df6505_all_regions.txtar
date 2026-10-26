@@ -1,0 +1,20 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+With archive.regions: all, a region that lacks Firehose delivery to Iceberg or the Glue
+table optimizers fails at its entry in regions, and the hint lists the regions that can
+archive.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, mx-central-1, eu-west-1, us-west-1]
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:2:22: error DF6505
+dynaflux.yaml:2:47: error DF6505
+-- want-text --
+dynaflux.yaml:2:22: error DF6505: archive.regions is all, so mx-central-1 archives too, but it has no Firehose delivery to Apache Iceberg Tables and no AWS Glue table optimizers
+  hint: list the regions to archive in, such as archive.regions: [us-east-1, eu-west-1]
+dynaflux.yaml:2:47: error DF6505: archive.regions is all, so us-west-1 archives too, but it has no AWS Glue table optimizers
+  hint: list the regions to archive in, such as archive.regions: [us-east-1, eu-west-1]

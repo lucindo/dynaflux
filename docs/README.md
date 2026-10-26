@@ -17,6 +17,7 @@ The specifications are normative: they define what Dynaflux accepts and what it 
 | [spec/sql.md](spec/sql.md) | The SQL dialect: types, expressions, functions, streams, materialized views and named queries. [Section 12](spec/sql.md#12-worked-examples) has worked examples, and [Appendix A](spec/sql.md#appendix-a-diagnostics) lists every diagnostic code with its message and hint. |
 | [spec/config.md](spec/config.md) | The `dynaflux.yaml` schema: every key and its default, the SQL file patterns, the AWS resource names, and the diagnostic codes for the file. |
 | [spec/encoding.md](spec/encoding.md) | How Dynaflux stores data in DynamoDB: item keys, attribute values, aggregate states, and the bookkeeping items of the projector. |
+| [spec/infra.md](spec/infra.md) | The CloudFormation templates that `dynaflux generate` writes: every resource with its name and settings, IAM, alarms, and how to deploy and change them. |
 
 ## Decisions
 
@@ -29,3 +30,4 @@ it.
 | Document | What it covers |
 |----------|----------------|
 | [runbooks/simulation.md](runbooks/simulation.md) | The simulation harness: its test tiers and how long they take, rerunning a failing seed, and the negative controls. |
+| [runbooks/e2e.md](runbooks/e2e.md) | The maintainer's procedure for the end-to-end suite on AWS, with the one-time experiments whose answers go into the specifications. |

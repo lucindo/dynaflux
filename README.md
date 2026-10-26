@@ -210,9 +210,10 @@ dynaflux/top_pages.sql:4:1: error DF4101: TopPages: view page_daily is partition
 - `Float64` results must be the same on every CPU, so `make cross-arch` runs the
   cross-architecture tests as amd64: natively on an amd64 machine, and through Rosetta on
   Apple silicon. It isn't part of `make verify`.
-- A test fails when `dynaflux generate` would change the code generated in
-  [examples/analytics](examples/analytics). After changing the templates, run
-  `go run ../../cmd/dynaflux generate` in that directory.
+- A test fails when `dynaflux generate` would change the files generated in
+  [examples/analytics](examples/analytics): its Go code, CloudFormation templates and lock.
+  After changing what generate writes, run `go run ../../cmd/dynaflux generate` in that
+  directory.
 - `make test` runs a smoke tier of the simulation harness. `make sim` and `make sim-controls`
   run its full tier and its negative controls, as
   [docs/runbooks/simulation.md](docs/runbooks/simulation.md) describes.

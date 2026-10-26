@@ -13,8 +13,9 @@ Every command that loads a project (`dynaflux validate`, `dynaflux explain`, and
 `dynaflux generate`) applies all the rules below, including those for keys that only later
 milestones use.
 
-The SQL dialect is specified in [sql.md](sql.md), and how Dynaflux stores data in
-[encoding.md](encoding.md).
+The SQL dialect is specified in [sql.md](sql.md), how Dynaflux stores data in
+[encoding.md](encoding.md), and the infrastructure that `dynaflux generate` writes in
+[infra.md](infra.md).
 
 ## Minimal example
 
@@ -153,7 +154,7 @@ The **Used by** column names who reads each value. `validate` checks every key.
 | `explain` | The cost model of `dynaflux explain` (M1). |
 | `catalog` | Resolved into the catalog that the generated code embeds and the runtime reads (M2). |
 | `codegen` | The Go files that `dynaflux generate` writes (M2). |
-| `infra` | The generated CloudFormation/SAM templates (M4; HTTP front doors M6). |
+| `infra` | The generated CloudFormation/SAM templates ([infra.md](infra.md); HTTP front doors in M6). |
 | `names` | The [resource names](#resource-names). The operate commands find resources by these names (M5). |
 
 A clause in SQL always wins over a config default: `MODE` over `defaults.view_mode`, and
@@ -165,28 +166,36 @@ A clause in SQL always wins over a config default: `MODE` over `defaults.view_mo
 |-----|------|---------|-------|---------|
 | `store` | string | required (`DF6008`) | Lowercase letters, digits and `-`. Starts with a letter and doesn't end with `-` (`DF6101`). Its length is limited by the derived names (`DF6110`). | `names`, `catalog`, `infra` |
 | `prefix` | string | `""` (no prefix) | Empty, or lowercase letters, digits and `-`, starting with a letter and ending with `-`, such as `prod-` (`DF6102`). | `names`, `infra` |
-| `regions` | list of regions | required (`DF6008`) | At least one entry (`DF6011`), no repeats (`DF6012`), each a region code (`DF6103`). | `catalog` (Global Table replicas, archive placement), `infra`, `explain` |
+| `regions` | list of regions | required (`DF6008`) | At least one entry (`DF6011`), no repeats (`DF6012`), each a region code (`DF6103`) where Dynaflux can place its bucket (`DF6104`). | `catalog` (Global Table replicas, archive placement), `infra`, `explain` |
 | `sql` | list of glob patterns | `["dynaflux/**/*.sql"]` | At least one pattern (`DF6011`), no repeats after cleaning (`DF6012`). See [SQL file patterns](#sql-file-patterns). | `validate` |
 
 - `store` and `prefix` allow neither uppercase letters nor `_`: S3 bucket names allow
   neither, and the Glue database name replaces `-` with `_`, so a `_` would let two stores
   map to the same database.
+- `{prefix}{store}` must not start with `xn--`, `sthree-` or `amzn-s3-demo-`, which S3
+  reserves at the start of bucket names (`DF6112`).
 - `prefix` usually names an environment, such as `prod-` or `staging-`. It isn't part of
   the catalog, so the generated Go code is the same for every prefix. The runtime reads its
   prefix from the `DYNAFLUX_PREFIX` environment variable.
-- In M1, `prefix` comes only from this file, and `validate` checks name lengths with its
-  value. How the generated templates and the operate commands target another environment
-  from the same checkout, for example through a template parameter or a flag, is decided in
-  M4 and M5. If such an override can set a longer prefix, `validate` must check the name
-  budgets against the longest prefix allowed.
+- The generated templates take the prefix as their `Prefix` parameter, whose default is
+  this key, so one set of templates serves every environment from the same checkout: deploy
+  them with `Prefix=staging-`, for example ([infra.md](infra.md#2-parameters)). `validate`
+  checks the names with this key's value. The parameter's maximum length is the longest
+  prefix with which every name fits, so CloudFormation refuses a longer one. How the
+  operate commands target another environment is decided in M5.
 - The order of `regions` and `archive.regions` doesn't matter: the catalog stores them
   sorted.
 - All of `regions` must be in one AWS partition, because a Global Table can't span
   partitions: `cn-north-1` and `us-east-1` can't be mixed. `validate` checks only the form
   of each code.
 - Add or remove one region per deploy: CloudFormation adds or removes only one Global Table
-  replica per stack update. Removing a region deletes that region's replica of every stream
-  table, with its data.
+  replica per stack update, and `dynaflux generate` refuses a bigger change (`DF6017`). It
+  also refuses to remove a region whose replicas still have deletion protection (`DF6018`).
+  Removing a region deletes that region's replica of every stream table, with its data.
+  [infra.md](infra.md#12-changes-after-the-first-deploy) gives the steps.
+- Dynaflux puts an S3 bucket in every region, named in the S3 account regional namespace.
+  `me-south-1` and `me-central-1` don't offer that namespace, so they can't be in
+  `regions` (`DF6104`).
 
 ### `go`
 
@@ -197,8 +206,10 @@ A clause in SQL always wins over a config default: `MODE` over `defaults.view_mo
 
 ### `runtime`
 
-These settings apply to every Lambda function Dynaflux generates: the projector, query and
-backfill functions all run the same binary.
+These settings apply to every Lambda function Dynaflux generates, because the projector,
+setup, query and backfill functions all run the same binary. The one exception is the setup
+function's timeout, always 900 seconds: it runs deploy-time steps and never writes view rows
+([infra.md](infra.md#61-functions)).
 
 | Key | Type | Default | Rules | Used by |
 |-----|------|---------|-------|---------|
@@ -229,7 +240,7 @@ and for clock differences between hosts.
 | Key | Type | Default | Rules | Used by |
 |-----|------|---------|-------|---------|
 | `infra.format` | string | `sam` | `sam` (CloudFormation/SAM) is the only format (`DF6009`). | `infra` |
-| `infra.out` | path | `infra/dynaflux` | Path rules (`DF6302`, `DF6303`). | `infra`: writes `global.yaml` and `regional.yaml` here |
+| `infra.out` | path | `infra/dynaflux` | Path rules (`DF6302`, `DF6303`). | `infra`: writes `global.yaml`, `global.stack-policy.json` and `regional.yaml` here ([infra.md](infra.md)) |
 
 ### `defaults`
 
@@ -280,8 +291,8 @@ capacity at the target utilization.
 | Key | Type | Default | Rules | Used by |
 |-----|------|---------|-------|---------|
 | `archive.enabled` | boolean | `true` | Applies to every stream not listed in `archive.streams`. | `catalog`, `infra`, `explain` |
-| `archive.catalog` | string | `glue` | `glue` (Iceberg tables in the Glue Data Catalog) or `s3tables` (Amazon S3 Tables) (`DF6009`). | `infra`, `names` |
-| `archive.regions` | `all` or list of regions | `all` | `all`, or a list of entries from `regions` (`DF6501`) with at least one entry (`DF6011`) and no repeats (`DF6012`). Any other string is `DF6009`. | `catalog`, `infra`, `explain` |
+| `archive.catalog` | string | `glue` | `glue` (Iceberg tables in the Glue Data Catalog) or `s3tables` (Amazon S3 Tables) (`DF6009`). `s3tables` isn't supported yet (`DF6506`). | `infra`, `names` |
+| `archive.regions` | `all` or list of regions | `all` | `all`, or a list of entries from `regions` (`DF6501`) with at least one entry (`DF6011`) and no repeats (`DF6012`). Any other string is `DF6009`. Each region must be able to hold the archive (`DF6505`, below). | `catalog`, `infra`, `explain` |
 | `archive.events` | string | `all` | `all`: each archiving region archives every event, local and replicated. `local`: each region archives only the events it accepted, which requires `archive.regions: all` (`DF6502`). Other values are `DF6009`. | `catalog`, `infra`, `explain` |
 | `archive.streams` | mapping from a stream name to an entry | none | Each key names a stream (`DF6503`). | `catalog`, `infra`, `explain` |
 | `archive.streams.<name>.enabled` | boolean | required (`DF6008`) | Overrides `archive.enabled` for this stream, in either direction. | `catalog`, `infra`, `explain` |
@@ -289,10 +300,14 @@ capacity at the target utilization.
 A stream that keeps events for a limited time and isn't archived gets warning `DF6504`: its
 older events are gone for good.
 
-Each region in `archive.regions` must support Firehose delivery to Apache Iceberg Tables.
-Some regions don't, including the China and AWS GovCloud (US) regions; see the
-[Firehose list](https://docs.aws.amazon.com/firehose/latest/dev/apache-iceberg-considerations.html).
-`validate` doesn't check this. M4 decides whether it should.
+When at least one stream is archived, each archive region must support Firehose delivery
+to Apache Iceberg Tables and AWS Glue table optimizers, which compact the archive's small
+files and expire its old snapshots (`DF6505`). With `archive.regions: all`, that is every
+region in `regions`; if one of them lacks either service, list the regions to archive in.
+Firehose doesn't deliver to Iceberg in some regions, including the China and AWS GovCloud
+(US) regions ([Firehose list](https://docs.aws.amazon.com/firehose/latest/dev/apache-iceberg-considerations.html)),
+and Glue offers table optimizers in 15 regions
+([Glue list](https://docs.aws.amazon.com/glue/latest/dg/regions-optimizers.html)).
 
 Choosing a placement:
 
@@ -389,16 +404,21 @@ length of `store`.
 | Meta table (per region) | `{prefix}{store}-meta` | `prod-analytics-meta` | DynamoDB table | P ≤ 250 |
 | Projector function, `split: store` | `{prefix}{store}-projector` | `prod-analytics-projector` | Lambda function name: 64 characters from `A-Z a-z 0-9 _ -` | P ≤ 54 |
 | Projector function, `split: stream` | `{prefix}{store}-projector-{stream}` | `prod-analytics-projector-page_views` | Lambda function name | P + stream ≤ 53 |
+| Setup function | `{prefix}{store}-setup` | `prod-analytics-setup` | Lambda function name | P ≤ 58 |
 | Query function | `{prefix}{store}-query` | `prod-analytics-query` | Lambda function name | P ≤ 58 |
 | Backfill function | `{prefix}{store}-backfill` | `prod-analytics-backfill` | Lambda function name | P ≤ 55 |
 | Backfill state machine | `{prefix}{store}-backfill` | `prod-analytics-backfill` | Step Functions: 80 characters; only `A-Z a-z 0-9 _ -` for CloudWatch Logs logging | P ≤ 71 |
-| Firehose stream (per archived stream) | `{prefix}{store}-archive-{stream}` (see [Names decided in M4](#names-decided-in-m4)) | `prod-analytics-archive-page_views` | 64 characters from `A-Z a-z 0-9 _ . -` | P + stream ≤ 55 |
+| S3 bucket (per region) | `{prefix}{store}-{account}-{region}-an` | `prod-analytics-123456789012-us-east-1-an` | S3 bucket in the account regional namespace: 3 to 63 characters from `a-z 0-9 . -`, and no prefix that S3 reserves (`DF6112`); see the [bucket naming rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html) | P + region ≤ 46, for every region in `regions` |
+| Firehose stream (per archived stream) | `{prefix}{store}-archive-{stream}` | `prod-analytics-archive-page_views` | 64 characters from `A-Z a-z 0-9 _ . -` | P + stream ≤ 55 |
 | Glue database or S3 Tables namespace | `{prefix}{store}` with every `-` replaced by `_` | `prod_analytics` | Iceberg on Glue: `[a-z0-9_]`, 1 to 252 characters. S3 Tables: 1 to 255 characters, must not start with `aws` (`DF6111`). | P ≤ 252 |
 | Iceberg table | `{stream}` | `page_views` | `[a-z0-9_]`, 1 to 255 characters | stream ≤ 255 |
 | Athena view with one row per event | `{stream}_dedup` | `page_views_dedup` | 255 characters | stream ≤ 249 |
-| Runtime environment variables | `DYNAFLUX_STORE={store}`, `DYNAFLUX_PREFIX={prefix}`, and `DYNAFLUX_MODE` (`projector`, `query` or `backfill`) | | | |
+| Athena workgroup | `{prefix}{store}` | `prod-analytics` | 1 to 128 characters from `A-Z a-z 0-9 _ . -` | P ≤ 128 |
+| Runtime environment variables | `DYNAFLUX_STORE={store}`, `DYNAFLUX_PREFIX={prefix}`, `DYNAFLUX_MODE` (`projector`, `setup`, `query` or `backfill`), and for projectors in archive regions `DYNAFLUX_ARCHIVE_SCHEMA` (the archive schema's fingerprint) | | | |
 
-- The tightest limit is the 64-character Lambda function name: P ≤ 54.
+- The tightest limits are the bucket name, P + region ≤ 46 for every region in `regions`
+  (P ≤ 37 with `us-east-1`, and P ≤ 32 with a 14-character region such as
+  `ap-northeast-1`), and the 64-character Lambda function name, P ≤ 54.
 - For every archived stream, P + stream ≤ 55 (its Firehose name). With `split: stream`,
   every stream also needs P + stream ≤ 53 (its projector function).
 - Stream names that end in `_dedup` are reserved for the Athena views (DF2101 in
@@ -414,23 +434,22 @@ length of `store`.
   can't detect this, and the second deploy fails. Avoid store names whose last `-` part is
   `stream`, `view` or `projector`.
 
-### Names decided in M4
+### Names that `validate` doesn't check
 
-Infrastructure generation (M4) names these resources. `regional.yaml` is deployed in every
-region of one account, so names that are unique per account, or across accounts, must
-include the region or be left to CloudFormation.
+`regional.yaml` is deployed in every region of one account, so a name that must be unique
+in the account includes the region or is left to CloudFormation.
+[infra.md](infra.md#3-names-tags-and-logical-ids) lists every name.
 
-| Resource | AWS rule the name must meet |
-|----------|-----------------------------|
-| S3 general purpose buckets: Iceberg warehouse, Firehose error output, event source mapping failure destination | Unique across all AWS accounts in a partition, unless the bucket is in the account regional namespace: a name ending in `-{account}-{region}-an`, which only that account can create. 3 to 63 characters from `a-z 0-9 . -`, plus reserved prefixes and suffixes; see the [bucket naming rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html). |
-| S3 table bucket (`archive.catalog: s3tables`) | Unique per account and region. 3 to 63 characters from `a-z 0-9 -`, plus reserved prefixes (including `aws`) and suffixes; see the [table bucket naming rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-buckets-naming.html). |
-| IAM roles | Unique within the account (IAM is global), ignoring case. 64 characters. |
-| CloudWatch dashboards | Global per account. 255 characters from `A-Z a-z 0-9 - _`. |
-| CloudWatch alarms | Regional. Naming scheme not decided. |
-| Firehose streams | One per archived stream, named `{prefix}{store}-archive-{stream}` as above, because each Iceberg table should have a single writer. M4 confirms the name; until then `validate` checks this form. |
-| Tags `dynaflux:store`, `dynaflux:kind`, `dynaflux:name`, `dynaflux:version` | Not decided: whether `dynaflux:version` holds the view version or the Dynaflux version. Tag values are at most 256 characters. |
+| Resource | Name | AWS rule |
+|----------|------|----------|
+| IAM roles | Chosen by CloudFormation | Unique in the account, which IAM shares across regions. |
+| CloudWatch dashboard (per region) | `{prefix}{store}-{region}` | Unique in the account. 255 characters from `A-Z a-z 0-9 - _`. |
+| CloudWatch alarms | `{resource name}-{signal}`, or `{prefix}{store}-{signal}` for the store-wide ones | 255 characters. |
+| Log groups | `/aws/lambda/{function}` and `/aws/kinesisfirehose/{prefix}{store}-archive` | 512 characters. |
+| Tags | `dynaflux:store`, `dynaflux:kind` and `dynaflux:name`; view tables also carry `dynaflux:version`, the view version number, and `dynaflux:fingerprint` | Values of at most 256 characters. |
 
-M4 may add rules on `store` and `prefix` for these names.
+The dashboard and log group names always fit once the function names do. `generate` fails
+if an alarm name would be too long.
 
 ## Diagnostics
 
@@ -454,6 +473,10 @@ dynaflux.yaml:15:14: error DF6010: runtime.memory_mb is 64; it must be between 1
 - `DF6403` points at `defaults.log_retention`. `DF6504` points at
   `archive.streams.<name>.enabled` when that entry turns archiving off, and at the stream
   name in its SQL file otherwise.
+- `DF6104` points at the region in `regions`. `DF6505` points at the region in
+  `archive.regions`, or in `regions` when `archive.regions` is `all`.
+- `DF6016` points at line 1, column 1 of `dynaflux.lock`, and `DF6017` and `DF6018` at
+  `regions`.
 - Output is sorted by path, line, column, code and message.
 - Codes are stable: a code keeps its meaning and is never reused.
 
@@ -461,15 +484,19 @@ dynaflux.yaml:15:14: error DF6010: runtime.memory_mb is 64; it must be between 1
 
 1. Find and parse `dynaflux.yaml`: `DF6001` to `DF6004`, `DF6006` and `DF6014`. It stops
    on an error, so a duplicate key can hide other mistakes until it's fixed.
-2. Check every key, and the names built from `prefix` and `store` alone: `DF6111`, and
-   `DF6110` for the meta table, the store-wide functions, the state machine and the Glue
-   database. It reports every diagnostic of this step, then stops if any is an error.
+2. Check every key, and the names built from `prefix`, `store` and `regions` alone:
+   `DF6111`, `DF6112`, and `DF6110` for the meta table, the store-wide functions, the state
+   machine, the Glue database, the Athena workgroup and the bucket in each region. It
+   reports every diagnostic of this step, then stops if any is an error.
 3. Expand the `sql` patterns (`DF6204`, `DF6205`), and read `dynaflux.lock` when it
    exists (`DF6002`, `DF6013`). It stops on an error.
 4. Read and check the SQL files ([sql.md](sql.md)), then run the checks that need both:
    `DF6110` for names that include a stream or view, `DF6403`, `DF6407`, `DF6503`,
-   `DF6504`, and `DF6015`, which also needs the lock. These use every name the SQL
-   defines, even in a statement with errors.
+   `DF6504`, `DF6505`, and `DF6015`, which also needs the lock. These use every name the
+   SQL defines, even in a statement with errors.
+
+`dynaflux generate` runs the same steps, then compares its output with the templates it
+wrote last time: `DF6016` to `DF6018` ([infra.md](infra.md#13-checks-in-generate)).
 
 | Exit status | Meaning |
 |-------------|---------|
@@ -499,11 +526,16 @@ Severity column.
 | DF6013 | error | `dynaflux.lock` can't be used: it isn't valid JSON in the lock format (for example, it has merge-conflict markers), it has an unknown field or `format`, a key that appears twice in one object (as "accept both" in a merge tool can leave) or isn't in lower case, a view repeats a version number, an entry's definition doesn't match its fingerprint (a hand edit), or an entry is `retired`, which only `dynaflux retire` (M5) writes. The message gives the reason. Reported from M2. | If it has merge conflicts, keep the lock from the branch that merged first, then run `dynaflux generate`. Undo hand edits. Don't delete the file: that renumbers every view. |
 | DF6014 | error | The file uses an anchor (`&a`), an alias (`*a`), a merge key (`<<`) or an explicit tag (`!!str`, `!x`). | Write each value out in full. Quote a string instead of tagging it. |
 | DF6015 | error | A view version that `dynaflux.lock` retains can't be maintained: the stream it reads is gone, the stream no longer has a column it reads with the type it reads, the stream now has a column named like the version's `ARRAY JOIN` alias (the column would win), or a stream now has the view's name. The message names the version and the reason. | Restore the stream or the column, or rename the stream or the new column; or retire the version with `dynaflux retire` (M5). |
+| DF6016 | error | Reported by `generate` only. A view version's table in the `regional.yaml` that `generate` wrote last time is missing from the new one, and `dynaflux.lock` doesn't mark the version retired; or a version keeps its number but its fingerprint changed. Deploying would delete a table the application reads, or write rows of a new definition into an old version's table. This happens when the lock was lost, reverted or merged badly. Until `dynaflux retire` (M5), no version may disappear. | Restore `dynaflux.lock` from version control and run `dynaflux generate` again. To start over on purpose, delete the old templates first. |
+| DF6017 | error | Reported by `generate` only. `regions` differs by more than one region from the replica regions of the `global.yaml` that `generate` wrote last time. CloudFormation adds or removes one Global Table replica per stack update. | Add or remove one region, generate and deploy `global.yaml`; then the next region. |
+| DF6018 | error | Reported by `generate` only. `regions` drops a region whose stream table replicas have deletion protection in the `global.yaml` that `generate` wrote last time. Turning protection off is the first step of removing a region. | Put the region back, run `dynaflux generate -unprotect-region <region>` and deploy `global.yaml`; then remove the region. |
 | DF6101 | error | `store` isn't a valid store name. | Use lowercase letters, digits and `-`; start with a letter; don't end with `-`. For example `analytics`. |
 | DF6102 | error | `prefix` isn't a valid prefix. | Use lowercase letters, digits and `-`; start with a letter; end with `-`. For example `prod-`. |
 | DF6103 | error | A region isn't an AWS region code. | Use a code such as `us-east-1`. |
+| DF6104 | error | `regions` holds `me-south-1` or `me-central-1`, which don't offer the S3 account regional namespace, so Dynaflux can't name its bucket there. | Remove the region. |
 | DF6110 | error | A derived resource name is longer than the AWS limit. The message gives the name, its length and the limit. | Shorten the stream or view name, `store` or `prefix`. The hint gives the budget from [Resource names](#resource-names). |
 | DF6111 | error | With `archive.catalog: s3tables`, the S3 Tables namespace starts with `aws`, which S3 Tables reserves. | Change `prefix` or `store`, or use `archive.catalog: glue`. |
+| DF6112 | error | `{prefix}{store}` starts with `xn--`, `sthree-` or `amzn-s3-demo-`, which S3 reserves at the start of bucket names. | Change `prefix` or `store`. |
 | DF6201 | error | An `sql` pattern is absolute or has a `..` segment. | Write the pattern relative to the project root. |
 | DF6202 | error | An `sql` pattern has bad syntax, such as an unclosed `[`, or is empty or ends in `/`. | Patterns use `*`, `?`, `[a-z]`, and `**` for any number of directories. |
 | DF6203 | error | `**` is part of a path segment, as in `dynaflux/**.sql`. | Write `dynaflux/**/*.sql`. |
@@ -526,6 +558,8 @@ Severity column.
 | DF6502 | error | `archive.events: local` without `archive.regions: all`. With `local`, events accepted in a region that doesn't archive would never reach the archive. | Set `archive.regions: all`, or `archive.events: all`. |
 | DF6503 | error | An `archive.streams` key names no stream. | `did you mean "<name>"?` when a name is close; otherwise the stream names the SQL files define. |
 | DF6504 | warning | A stream keeps events for a limited time and isn't archived. Older events are deleted for good, and new views can be backfilled only from the events still in DynamoDB. | Archive the stream, or give it `LOG RETENTION FOREVER`. |
+| DF6505 | error | At least one stream is archived, and an archive region doesn't support Firehose delivery to Apache Iceberg Tables or doesn't offer AWS Glue table optimizers. The message names the region and the missing service. | Remove the region from `archive.regions`. With `archive.regions: all`, list the regions to archive in. |
+| DF6506 | error | `archive.catalog: s3tables`. Dynaflux doesn't support Amazon S3 Tables yet. | Use `archive.catalog: glue`, the default. |
 | DF6601 | error | `http.auth` isn't supported by `http.frontend`. | The `auth` values this front door supports. |
 | DF6602 | error | `http.auth: none` without `http.allow_public: true`. | Set `allow_public: true` to confirm that anyone may call the exposed queries, or use `auth: iam`. |
 | DF6603 | warning | `http.auth` is `none`: anyone with the URL can call every query annotated `-- expose: http`. Reported whether or not a query is exposed yet. | Use `auth: iam` unless the queries must be public. |

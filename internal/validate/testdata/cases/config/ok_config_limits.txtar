@@ -31,7 +31,7 @@ tables:
   page_views:
     capacity: on_demand
 archive:
-  catalog: s3tables
+  catalog: glue
   regions: [us-east-1]
   events: all
 http:

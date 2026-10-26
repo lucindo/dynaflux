@@ -23,3 +23,4 @@ whose decision stands, amends it instead: the older record gets the line
 | [0005](0005-public-go-value-types.md) | Go types for SQL values in generated code | Accepted |
 | [0006](0006-generated-code-contract.md) | Generated code calls six generic helpers in package `fluxgen` | Accepted |
 | [0007](0007-lock-file-format.md) | Format details of `dynaflux.lock` | Accepted |
+| [0008](0008-archive-schema-migration.md) | A custom resource served by the runtime binary migrates the archive schema | Accepted |

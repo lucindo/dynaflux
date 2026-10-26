@@ -26,15 +26,17 @@ type Config struct {
 	Store  string
 	Prefix string // empty for no prefix
 	// Regions are in file order; the catalog sorts them.
-	Regions  []string
-	SQL      []Pattern
-	Go       Go
-	Runtime  Runtime
-	Infra    Infra
-	Defaults Defaults
-	Tables   []Table // in file order
-	Archive  Archive
-	HTTP     HTTP
+	Regions []string
+	// RegionsPos is where regions is set, for DF6017.
+	RegionsPos diag.Pos
+	SQL        []Pattern
+	Go         Go
+	Runtime    Runtime
+	Infra      Infra
+	Defaults   Defaults
+	Tables     []Table // in file order
+	Archive    Archive
+	HTTP       HTTP
 }
 
 // Naming returns the resource namer for the store and prefix.
@@ -141,8 +143,13 @@ type Archive struct {
 	Catalog ArchiveCatalog
 	// Regions are the archiving regions; archive.regions: all resolves to Config.Regions.
 	Regions []string
-	Events  catalog.ArchiveEvents
-	Streams []ArchiveStream // in file order
+	// AllRegions is set when archive.regions is all.
+	AllRegions bool
+	// RegionPos is where each of Regions is written, for DF6505: in archive.regions, or in
+	// regions when archive.regions is all.
+	RegionPos map[string]diag.Pos
+	Events    catalog.ArchiveEvents
+	Streams   []ArchiveStream // in file order
 }
 
 // ArchiveCatalog is where the archive's Iceberg tables are cataloged.

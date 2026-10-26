@@ -1,0 +1,10 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A store without a stream has no infrastructure to deploy: generate fails, and writes
+nothing.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+-- dynaflux/streams.sql --
+-- No streams yet.

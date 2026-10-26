@@ -40,6 +40,10 @@ const (
 	maxDomainName  = 253
 	maxDomainLabel = 63
 
+	// sampleAccount stands in for the account ID in bucket names, which every account ID
+	// fills to the same length.
+	sampleAccount = "123456789012"
+
 	hintDuration = "write a whole number and one unit, such as 36h, 2d or 1w, or write forever"
 )
 
@@ -96,11 +100,16 @@ func lowerDashed(s string) bool {
 
 func (d *decoder) regions(top object, c *Config) {
 	d.require(top, "regions", "[us-east-1]")
+	c.RegionsPos = top.at("regions")
 	seen := map[string]bool{}
 	for _, e := range d.list(top, "regions", "[us-east-1]", false) {
 		if !isRegion(e.Value) {
 			d.errorf(at(e), "DF6103", "use a code such as us-east-1", "%q isn't an AWS region code", e.Value)
 			continue
+		}
+		if !catalog.BucketNamespaceRegion(e.Value) {
+			d.errorf(at(e), "DF6104", "remove it from regions",
+				"%s doesn't offer the S3 account regional namespace, so Dynaflux can't name its bucket there", e.Value)
 		}
 		if !d.repeated(seen, "regions", e.Value, e) {
 			c.Regions = append(c.Regions, e.Value)
@@ -453,18 +462,25 @@ func (d *decoder) tables(top object, c *Config) {
 
 func (d *decoder) archive(top object, c *Config) {
 	c.Archive = Archive{
-		Enabled: true,
-		Catalog: ArchiveCatalogGlue,
-		Regions: slices.Clone(c.Regions),
-		Events:  catalog.ArchiveEventsAll,
+		Enabled:    true,
+		Catalog:    ArchiveCatalogGlue,
+		Regions:    slices.Clone(c.Regions),
+		AllRegions: true,
+		RegionPos:  firstPositions(top.vals["regions"]),
+		Events:     catalog.ArchiveEventsAll,
 	}
 	o, ok := d.object("archive", top.vals["archive"], top.at("archive"), "enabled", "catalog", "regions", "events", "streams")
 	if !ok {
 		return
 	}
 	d.boolean(o, "enabled", &c.Archive.Enabled)
-	enum(d, o, "catalog", &c.Archive.Catalog, ArchiveCatalogGlue, ArchiveCatalogS3Tables)
+	if enum(d, o, "catalog", &c.Archive.Catalog, ArchiveCatalogGlue, ArchiveCatalogS3Tables) &&
+		c.Archive.Catalog == ArchiveCatalogS3Tables {
+		d.errorf(o.at("catalog"), "DF6506", "use archive.catalog: glue, the default",
+			"archive.catalog is s3tables, and Dynaflux doesn't support Amazon S3 Tables yet")
+	}
 	all := d.archiveRegions(o, c)
+	c.Archive.AllRegions = all
 	local := enum(d, o, "events", &c.Archive.Events, catalog.ArchiveEventsAll, catalog.ArchiveEventsLocal) &&
 		c.Archive.Events == catalog.ArchiveEventsLocal
 	if local && !all {
@@ -504,6 +520,7 @@ func (d *decoder) archiveRegions(o object, c *Config) bool {
 		return true
 	}
 	c.Archive.Regions = nil
+	c.Archive.RegionPos = firstPositions(n)
 	seen := map[string]bool{}
 	for _, e := range d.list(o, "regions", "[us-east-1]", true) {
 		switch {
@@ -518,6 +535,20 @@ func (d *decoder) archiveRegions(o object, c *Config) bool {
 		}
 	}
 	return len(n.Content) == 0
+}
+
+// firstPositions returns where each entry of list n first appears; nothing for a nil n.
+func firstPositions(n *yaml.Node) map[string]diag.Pos {
+	m := map[string]diag.Pos{}
+	if n == nil {
+		return m
+	}
+	for _, e := range n.Content {
+		if _, seen := m[e.Value]; !seen {
+			m[e.Value] = at(e)
+		}
+	}
+	return m
 }
 
 func (d *decoder) http(top object, c *Config) {
@@ -612,12 +643,17 @@ func isDomainName(s string) bool {
 	})
 }
 
-// storeNames checks the resource names that store and prefix alone imply. Without a known
-// runtime.split, whether a store-wide projector exists is unknown, so its name isn't checked.
+// storeNames checks the resource names that store, prefix and regions alone imply. Without
+// a known runtime.split, whether a store-wide projector exists is unknown, so its name isn't
+// checked.
 func (d *decoder) storeNames(c *Config, storePos diag.Pos, splitKnown bool) {
 	n := c.Naming()
 	base := len(c.Prefix) + len(c.Store)
-	for _, r := range n.StoreResources(c.Runtime.Split == SplitStream || !splitKnown) {
+	res := n.StoreResources(c.Runtime.Split == SplitStream || !splitKnown)
+	for _, region := range c.Regions {
+		res = append(res, catalog.Resource{Kind: catalog.ResourceBucket, Name: n.Bucket(sampleAccount, region)})
+	}
+	for _, r := range res {
 		if !r.TooLong() {
 			continue
 		}
@@ -629,5 +665,11 @@ func (d *decoder) storeNames(c *Config, storePos diag.Pos, splitKnown bool) {
 	if ns := n.ArchiveDatabase(); c.Archive.Catalog == ArchiveCatalogS3Tables && strings.HasPrefix(ns, "aws") {
 		d.errorf(storePos, "DF6111", "change prefix or store, or use archive.catalog: glue",
 			"the S3 Tables namespace %s starts with aws, which S3 Tables reserves", ns)
+	}
+	for _, reserved := range catalog.ReservedBucketPrefixes() {
+		if strings.HasPrefix(c.Prefix+c.Store, reserved) {
+			d.errorf(storePos, "DF6112", "change prefix or store",
+				"the bucket names start with %s, which S3 reserves at the start of bucket names", reserved)
+		}
 	}
 }

@@ -44,10 +44,6 @@ const (
 	compression       = 6.0 // of the archive's Parquet files
 )
 
-// DefaultBatchSize is the BatchSize of an event source mapping from a DynamoDB stream that
-// doesn't set one.
-const DefaultBatchSize = 100
-
 // Arch is a Lambda architecture.
 type Arch string
 

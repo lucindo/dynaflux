@@ -30,6 +30,47 @@ func (p *project) checkConfigNames() {
 	}
 	p.checkInheritedForever()
 	p.checkUnarchived()
+	p.checkArchiveRegions()
+}
+
+// checkArchiveRegions reports each archive region that lacks Firehose delivery to Iceberg
+// or the Glue table optimizers, when a stream is archived (DF6505).
+func (p *project) checkArchiveRegions() {
+	if !slices.ContainsFunc(p.decls, func(d *decl) bool { return d.stream != nil && d.stream.stream.Archive != nil }) {
+		return
+	}
+	a := p.cfg.Archive
+	var supported []string
+	for _, r := range a.Regions {
+		if catalog.FirehoseIcebergRegion(r) && catalog.GlueOptimizerRegion(r) {
+			supported = append(supported, r)
+		}
+	}
+	for _, r := range a.Regions {
+		var missing []string
+		if !catalog.FirehoseIcebergRegion(r) {
+			missing = append(missing, "Firehose delivery to Apache Iceberg Tables")
+		}
+		if !catalog.GlueOptimizerRegion(r) {
+			missing = append(missing, "AWS Glue table optimizers")
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		lacks := strings.Join(missing, " and no ")
+		switch {
+		case !a.AllRegions:
+			p.configErrorf(a.RegionPos[r], "DF6505", "remove it from archive.regions",
+				"archive.regions lists %s, which has no %s", r, lacks)
+		case len(supported) > 0:
+			p.configErrorf(a.RegionPos[r], "DF6505",
+				"list the regions to archive in, such as archive.regions: ["+strings.Join(supported, ", ")+"]",
+				"archive.regions is all, so %s archives too, but it has no %s", r, lacks)
+		default:
+			p.configErrorf(a.RegionPos[r], "DF6505", "add a region that has both to regions, or set archive.enabled: false",
+				"archive.regions is all, so %s archives too, but it has no %s", r, lacks)
+		}
+	}
 }
 
 func (p *project) configErrorf(pos diag.Pos, code, hint, format string, args ...any) {
