@@ -1,0 +1,6 @@
+# Copyright 2026 The Dynaflux Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Golden test data depends on exact bytes (CRLF, a byte-order mark, invalid UTF-8),
+# so git must never convert line endings there.
+**/testdata/** -text
