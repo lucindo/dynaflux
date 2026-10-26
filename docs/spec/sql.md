@@ -176,6 +176,8 @@ Rules:
   2. The words after the key must match the grammar in number and layout (DF1201).
   3. Each value must be known. Others, such as `:exec` or `grpc`, are DF1202.
   4. `<Name>` must match `[A-Z][A-Za-z0-9]*` (DF1206).
+- An annotation that fails step 2 or 3 still counts as present, so a `SELECT` with a bad
+  `-- name:` doesn't also get DF1104. No other check applies to it.
 - Annotations attach to the next statement. They must sit between the previous statement's
   `;` (or the start of the file) and the statement's first token. Ordinary comments and
   blank lines can be mixed in. An annotation inside a statement, after the last statement,
@@ -325,7 +327,8 @@ operators such as `DIV`, `MOD` and `LIKE` are errors with a hint (DF1102,
 
 ```ebnf
 type     = identifier [ "(" type_arg { "," type_arg } ")" ] ;
-type_arg = type | integer | string ;
+type_arg = type | integer | string [ "=" [ "-" ] integer ] ;
+           (* 'a' = 1 is an Enum value, accepted only to reject Enum8 and Enum16 (DF5002) *)
 ```
 
 A type with the wrong number or kind of arguments, such as `String(10)`, `Array()`,
@@ -2068,22 +2071,23 @@ Placeholders are in angle brackets. Messages after the statement name are shown 
 
 | Feature | Hint |
 |---------|------|
-| `JOIN`, subqueries, `WITH`, `UNION`, `INTERSECT`, `EXCEPT` | A statement reads one stream or view. Put the data you need into the stream, and split the work into views and queries. |
-| `SELECT DISTINCT` | Use `GROUP BY`. |
-| `HAVING` | Not in v1. Filter the rows in the caller. |
-| `PREWHERE`, `FINAL`, `SAMPLE`, `SETTINGS`, `FORMAT` | Not needed: view rows are always merged. |
-| `OFFSET`, `LIMIT m, n`, `LIMIT … BY`, `WITH TIES`, `TOP` | No pagination in v1. Narrow the key range instead. |
-| `ORDER BY ALL`, positional `ORDER BY 1` | Name the column. |
-| Window functions (`OVER`) | Not in v1. |
-| `CASE` | `multiIf(cond1, value1, cond2, value2, default)` |
-| `CAST`, `::` | No type conversions in v1. |
-| `LIKE`, `ILIKE`, `NOT LIKE`, `REGEXP` | Compare with `=` or `IN`. |
-| `\|\|` | `concat(a, b)` |
-| `? :` | `if(cond, a, b)` |
-| `DIV`, `MOD` | `intDiv(a, b)`, `a % b` |
-| `IS [NOT] DISTINCT FROM`, `<=>` | `IS NULL` and `=` |
-| `GLOBAL IN`, tuples, `[ ]` subscripts, array literals outside `DEFAULT`, `->` lambdas | Not in v1. |
-| `IF NOT EXISTS`, `OR REPLACE`, `ON CLUSTER`, `ENGINE`, `TO`, `POPULATE` | Dynaflux creates and manages the tables. |
+| `JOIN`, subqueries, `WITH`, `UNION`, `INTERSECT`, `EXCEPT` | a statement reads one stream or view; put the data you need into the stream, and split the work into views and queries |
+| `SELECT DISTINCT` | use GROUP BY |
+| `HAVING` | not in v1; filter the rows in the caller |
+| `PREWHERE`, `FINAL`, `SAMPLE`, `SETTINGS` after `SELECT`, `FORMAT` | not needed: view rows are always merged |
+| `OFFSET`, `LIMIT m, n`, `LIMIT … BY`, `WITH TIES`, `TOP` | no pagination in v1; narrow the key range instead |
+| `ORDER BY ALL`, positional `ORDER BY 1` | name the column |
+| Window functions (`OVER`) | window functions are not in v1 |
+| `CASE` | use multiIf(cond1, value1, cond2, value2, default) |
+| `CAST`, `::` | no type conversions in v1 |
+| `LIKE`, `ILIKE`, `NOT LIKE`, `REGEXP` | compare with = or IN |
+| `\|\|` | use concat(a, b) |
+| `? :` | use if(cond, a, b) |
+| `DIV`, `MOD` | use intDiv(a, b) or a % b |
+| `IS [NOT] DISTINCT FROM`, `<=>` | use IS NULL and = |
+| `GLOBAL IN`, tuples, `[ ]` subscripts, array literals outside `DEFAULT`, `->` lambdas | not in v1 |
+| `IF NOT EXISTS`, `OR REPLACE`, `ON CLUSTER`, `ENGINE`, `SETTINGS` in `CREATE`, `TO`, `POPULATE` | Dynaflux creates and manages the tables |
+| Nesting deeper than 1000 levels | simplify the expression |
 
 #### Table A.2. Replacements for unknown functions (DF5201)
 
@@ -2095,6 +2099,6 @@ Placeholders are in angle brackets. Messages after the statement name are shown 
 | `isNull(x)`, `isNotNull(x)` | `x IS NULL`, `x IS NOT NULL` |
 | `ifNull`, `nullIf` | `coalesce`, `if` |
 | `toString`, `toInt*`, `toUInt*`, `toFloat64`, `toDecimal*`, `toDateTime`, `toDateTime64`, `parseDateTimeBestEffort` | No conversions in v1. Compare with a literal or a parameter. |
-| `plus`, `minus`, `multiply`, `divide`, `modulo`, `equals`, `and`, `or`, `not` | The operator |
+| `plus`, `minus`, `multiply`, `divide`, `modulo`, `equals`, `and`, `or` | The operator |
 | `arrayJoin` | `ARRAY JOIN <array> AS <element>` in a view |
 | The aggregates in [§7.6](#76-unsupported-aggregates) | The replacement listed there |
