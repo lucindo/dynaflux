@@ -1,0 +1,107 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Annotations attach to the next statement, across ordinary comments and blank
+lines, whatever the statement's kind (the compiler checks the kind, duplicate
+keys and Go names). Malformed annotations and unknown keys or values are
+DF1201 and DF1202; one with a known key stays on its statement, marked bad.
+Annotations inside a statement, before an empty statement or after the last
+one are DF1203, unless they are bad.
+-- in.sql --
+--name:	PageStats	:one   
+-- an ordinary comment
+--   expose: http
+
+/* -- name: NotAnAnnotation :one */
+-- Name: AlsoOrdinary :one
+-- names: Ordinary :one
+SELECT a FROM t;
+
+-- go:type PageView
+-- name: OnAStream :many
+-- name: Twice :one
+-- go:type 123
+CREATE STREAM s (a String) PRIMARY KEY a;
+
+-- name: Malformed
+-- name:NoBlank :one
+-- name: Three words :one
+-- expose:http
+-- expose: http extra
+-- go:type
+-- name: Upper :ONE
+-- name: Exec :exec
+-- expose: grpc
+-- go:package main
+-- go:
+SELECT b FROM t;
+
+SELECT c
+-- name: Inside :one
+-- name: InsideBad :ONE
+FROM t
+-- expose: http
+;
+-- name: BeforeEmpty :one
+;
+-- name: AtTheEnd :one
+-- ast --
+query @8:1
+  -- name: PageStats :one (name @1:9) @1:1
+  -- expose: http @3:1
+  select @8:1
+    item a @8:8
+    from t @8:15
+stream s @14:1
+  -- go:type PageView (name @10:12) @10:1
+  -- name: OnAStream :many (name @11:10) @11:1
+  -- name: Twice :one (name @12:10) @12:1
+  -- go:type 123 (name @13:12) @13:1
+  column a String @14:18
+  primary key a @14:28
+query @27:1
+  bad -- name @16:1
+  bad -- name @17:1
+  bad -- name @18:1
+  bad -- expose @19:1
+  bad -- expose @20:1
+  bad -- go:type @21:1
+  bad -- name Upper (name @22:10) @22:1
+  bad -- name Exec (name @23:10) @23:1
+  bad -- expose @24:1
+  select @27:1
+    item b @27:8
+    from t @27:15
+query @29:1
+  select @29:1
+    item c @29:8
+    from t @32:6
+-- diagnostics --
+in.sql:16:1: error DF1201: malformed annotation: -- name: Malformed
+  hint: the forms are -- name: <Name> :one, -- name: <Name> :many, -- expose: http, -- go:type <Name>
+in.sql:17:1: error DF1201: malformed annotation: -- name:NoBlank :one
+  hint: the forms are -- name: <Name> :one, -- name: <Name> :many, -- expose: http, -- go:type <Name>
+in.sql:18:1: error DF1201: malformed annotation: -- name: Three words :one
+  hint: the forms are -- name: <Name> :one, -- name: <Name> :many, -- expose: http, -- go:type <Name>
+in.sql:19:1: error DF1201: malformed annotation: -- expose:http
+  hint: the forms are -- name: <Name> :one, -- name: <Name> :many, -- expose: http, -- go:type <Name>
+in.sql:20:1: error DF1201: malformed annotation: -- expose: http extra
+  hint: the forms are -- name: <Name> :one, -- name: <Name> :many, -- expose: http, -- go:type <Name>
+in.sql:21:1: error DF1201: malformed annotation: -- go:type
+  hint: the forms are -- name: <Name> :one, -- name: <Name> :many, -- expose: http, -- go:type <Name>
+in.sql:22:1: error DF1202: unknown annotation -- name: Upper :ONE
+  hint: the keys are name, expose and go:type; the values are :one, :many and http
+in.sql:23:1: error DF1202: unknown annotation -- name: Exec :exec
+  hint: the keys are name, expose and go:type; the values are :one, :many and http
+in.sql:24:1: error DF1202: unknown annotation -- expose: grpc
+  hint: the keys are name, expose and go:type; the values are :one, :many and http
+in.sql:25:1: error DF1202: unknown annotation -- go:package main
+  hint: the keys are name, expose and go:type; the values are :one, :many and http
+in.sql:26:1: error DF1202: unknown annotation -- go:
+  hint: the keys are name, expose and go:type; the values are :one, :many and http
+in.sql:31:1: error DF1202: unknown annotation -- name: InsideBad :ONE
+  hint: the keys are name, expose and go:type; the values are :one, :many and http
+in.sql:30:1: error DF1203: annotation must come right before a statement
+in.sql:33:1: error DF1203: annotation must come right before a statement
+in.sql:35:1: error DF1203: annotation must come right before a statement
+in.sql:37:1: error DF1203: annotation must come right before a statement

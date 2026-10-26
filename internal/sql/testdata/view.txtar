@@ -1,0 +1,65 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+CREATE MATERIALIZED VIEW: every view clause, in any order, and a SELECT with
+every clause. LEFT ARRAY JOIN, several arrays and ORDER BY or LIMIT inside a
+view parse; the compiler rejects them.
+-- in.sql --
+CREATE MATERIALIZED VIEW quota_usage
+SPLIT 4
+TTL month + INTERVAL 13 MONTH
+PRIMARY KEY account_id
+ORDER BY (account_id, month)
+MODE SYNC
+AS SELECT
+    account_id,
+    toStartOfMonth(event_time) AS month,
+    sumIf(units, endpoint = 'x') AS used_units,
+    count() AS calls
+FROM api_calls
+WHERE units > 0
+GROUP BY account_id, month;
+
+create materialized view tags_view mode async order by tag as
+select tag, k, uniqExact(user_id) as users
+from page_views
+left array join tags as tag, keys as k
+array join more
+where tag != ''
+group by tag, k
+order by tag
+limit 5;
+-- ast --
+view quota_usage @1:1
+  mode sync @6:1
+  order by account_id, month @5:1
+  primary key account_id @4:1
+  ttl (+ month (interval 13 MONTH)) @3:1
+  split 4 @2:1
+  select @7:4
+    item account_id @8:5
+    item toStartOfMonth(event_time) as month @9:5
+    item sumIf(units, (= endpoint 'x')) as used_units @10:5
+    item count() as calls @11:5
+    from api_calls @12:6
+    where (> units 0) @13:1
+    group by account_id, month @14:1
+view tags_view @16:1
+  mode async @16:36
+  order by tag @16:47
+  select @17:1
+    item tag @17:8
+    item k @17:13
+    item uniqExact(user_id) as users @17:16
+    from page_views @18:6
+    left array join @19:1
+      item tags as tag @19:17
+      item keys as k @19:30
+    array join @20:1
+      item more @20:12
+    where (!= tag '') @21:1
+    group by tag, k @22:1
+    order by @23:1
+      item tag @23:10
+    limit 5 @24:1
+-- diagnostics --

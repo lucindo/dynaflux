@@ -1,0 +1,110 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Keywords are contextual: words such as day, mode, order, key, ttl, split,
+shards, log and stream work as names, and keywords match in any letter case.
+-- in.sql --
+CREATE STREAM stream (
+    day Date, mode String, order UInt8, key String, ttl Date, split UInt8,
+    shards UInt8, log String, stream String, primary String, dedup String,
+    accept Bool, retention UInt8, consistency String, pii String,
+    "default" String, view String, materialized String, from String,
+    select String, where String, group String, by String, limit UInt8,
+    asc String, desc String, nulls String, first String, last String,
+    array String, join String, left String, as String, sync String
+)
+PRIMARY KEY (key, mode)
+DEDUP BY (order)
+SHARDS 2;
+
+CREATE MATERIALIZED VIEW mode
+MODE ASYNC
+ORDER BY (day, mode, order)
+TTL day
+AS SELECT day, mode, order, count() AS ttl
+FROM stream
+ARRAY JOIN array AS join
+WHERE mode = 'x' AND split > 1 AND key != log
+GROUP BY day, mode, order;
+
+-- name: Keys :many
+sElEcT select, from, where, group, by, limit, asc AS desc, nulls
+FrOm stream
+WhErE accept AND as = sync
+GrOuP By select, from
+OrDeR By asc DESC, desc NULLS FIRST, limit, nulls nulls last
+LiMiT 3;
+-- ast --
+stream stream @1:1
+  column day Date @2:5
+  column mode String @2:15
+  column order UInt8 @2:28
+  column key String @2:41
+  column ttl Date @2:53
+  column split UInt8 @2:63
+  column shards UInt8 @3:5
+  column log String @3:19
+  column stream String @3:31
+  column primary String @3:46
+  column dedup String @3:62
+  column accept Bool @4:5
+  column retention UInt8 @4:18
+  column consistency String @4:35
+  column pii String @4:55
+  column "default" String @5:5
+  column view String @5:23
+  column materialized String @5:36
+  column from String @5:57
+  column select String @6:5
+  column where String @6:20
+  column group String @6:34
+  column by String @6:48
+  column limit UInt8 @6:59
+  column asc String @7:5
+  column desc String @7:17
+  column nulls String @7:30
+  column first String @7:44
+  column last String @7:58
+  column array String @8:5
+  column join String @8:19
+  column left String @8:32
+  column as String @8:45
+  column sync String @8:56
+  primary key key, mode @10:1
+  dedup by order @11:1
+  shards 2 @12:1
+view mode @14:1
+  mode async @15:1
+  order by day, mode, order @16:1
+  ttl day @17:1
+  select @18:4
+    item day @18:11
+    item mode @18:16
+    item order @18:22
+    item count() as ttl @18:29
+    from stream @19:6
+    array join @20:1
+      item array as join @20:12
+    where (and (and (= mode 'x') (> split 1)) (!= key log)) @21:1
+    group by day, mode, order @22:1
+query @25:1
+  -- name: Keys :many (name @24:10) @24:1
+  select @25:1
+    item select @25:8
+    item from @25:16
+    item where @25:22
+    item group @25:29
+    item by @25:36
+    item limit @25:40
+    item asc as desc @25:47
+    item nulls @25:60
+    from stream @26:6
+    where (and accept (= as sync)) @27:1
+    group by select, from @28:1
+    order by @29:1
+      item asc desc @29:10
+      item desc nulls first @29:20
+      item limit @29:38
+      item nulls @29:45
+    limit 3 @30:1
+-- diagnostics --

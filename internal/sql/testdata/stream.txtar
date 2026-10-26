@@ -1,0 +1,96 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+CREATE STREAM: every clause, column option and type form the grammar
+accepts. The compiler rejects some of them (other column options, PII,
+CONSISTENCY, Array(), quoted type names, Enum8); the parser keeps them in the
+tree.
+A clause or option that appears twice is DF1105, and the first one stays.
+-- in.sql --
+-- go:type ApiCall
+create stream api_calls (
+    account_id String,
+    endpoint   LowCardinality(String) DEFAULT '',
+    units      UInt32 DEFAULT 1 + 2,
+    request_id UUID PII,
+    email      String PII('email') DEFAULT 'x' DEFAULT 'y',
+    tags       Array(String) DEFAULT [],
+    scores     Array(Int64) DEFAULT [-1, 2, 0],
+    price      Decimal(10, 2),
+    at         DateTime64(3, 'UTC'),
+    empty      Array(),
+    nested     LowCardinality(Nullable(String)),
+    quoted     `String`,
+    legacy     Nullable(String) NULL NOT NULL MATERIALIZED 1 ALIAS 2 EPHEMERAL
+               CODEC(ZSTD(1), Delta) TTL at + INTERVAL 1 DAY COMMENT 'c' NULL,
+    eph        String EPHEMERAL 'x'
+)
+PRIMARY KEY (account_id)
+DEDUP BY request_id
+LOG RETENTION 36 HOUR
+ACCEPT event_time <= now() + INTERVAL 5 MINUTE
+SHARDS 4
+CONSISTENCY = 'strong'
+PRIMARY KEY (endpoint);
+
+CREATE STREAM forever (a String) PRIMARY KEY (a) LOG RETENTION FOREVER;
+
+CREATE STREAM enums (a Enum8('a' = 1, 'b' = -2), b Enum16('x' = 1000)) PRIMARY KEY a;
+
+CREATE STREAM negative (a String) PRIMARY KEY (a, b) LOG RETENTION -2 days
+-- the last statement needs no ;
+-- ast --
+stream api_calls @2:1
+  -- go:type ApiCall (name @1:12) @1:1
+  column account_id String @3:5
+  column endpoint LowCardinality(String) @4:5
+    default '' @4:39
+  column units UInt32 @5:5
+    default (+ 1 2) @5:23
+  column request_id UUID @6:5
+    pii @6:21
+  column email String @7:5
+    default 'x' @7:36
+    pii 'email' @7:23
+  column tags Array(String) @8:5
+    default [] @8:30
+  column scores Array(Int64) @9:5
+    default [-1, 2, 0] @9:29
+  column price Decimal(10, 2) @10:5
+  column at DateTime64(3, 'UTC') @11:5
+  column empty Array() @12:5
+  column nested LowCardinality(Nullable(String)) @13:5
+  column quoted `String` @14:5
+  column legacy Nullable(String) @15:5
+    option NULL @15:33
+    option NOT NULL @15:38
+    option MATERIALIZED @15:47
+    option ALIAS @15:62
+    option EPHEMERAL @15:70
+    option CODEC @16:16
+    option TTL @16:38
+    option COMMENT @16:62
+  column eph String @17:5
+    option EPHEMERAL @17:23
+  primary key account_id @19:1
+  dedup by request_id @20:1
+  log retention 36 HOUR @21:1
+  accept (<= event_time (+ now() (interval 5 MINUTE))) @22:1
+  shards 4 @23:1
+  consistency 'strong' @24:1
+stream forever @27:1
+  column a String @27:24
+  primary key a @27:34
+  log retention forever @27:50
+stream enums @29:1
+  column a Enum8('a' = 1, 'b' = -2) @29:22
+  column b Enum16('x' = 1000) @29:50
+  primary key a @29:72
+stream negative @31:1
+  column a String @31:25
+  primary key a, b @31:35
+  log retention -2 days @31:54
+-- diagnostics --
+in.sql:7:48: error DF1105: api_calls: DEFAULT appears twice
+in.sql:16:74: error DF1105: api_calls: NULL appears twice
+in.sql:25:1: error DF1105: api_calls: PRIMARY KEY appears twice

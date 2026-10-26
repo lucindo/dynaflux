@@ -1,0 +1,146 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The page views example of the dialect specification: a stream, two views
+and three named queries in one file.
+-- in.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32,
+    country     LowCardinality(String) DEFAULT ''
+)
+PRIMARY KEY (user_id)
+LOG RETENTION 2 DAY
+ACCEPT event_time BETWEEN now() - INTERVAL 30 DAY AND now() + INTERVAL 5 MINUTE;
+
+CREATE MATERIALIZED VIEW page_daily
+MODE ASYNC
+ORDER BY (page, day)
+PRIMARY KEY (page)
+TTL day + INTERVAL 2 YEAR
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms,
+    max(event_time)          AS last_view
+FROM page_views
+WHERE page != ''
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW tag_hourly
+ORDER BY (tag, hour)
+PRIMARY KEY (tag)
+TTL hour + INTERVAL 30 DAY
+AS SELECT
+    tag,
+    toStartOfHour(event_time) AS hour,
+    count()                   AS views,
+    uniq(user_id)             AS users
+FROM page_views
+ARRAY JOIN tags AS tag
+GROUP BY tag, hour;
+
+-- name: PageStats :many
+SELECT day, views, visitors
+FROM page_daily
+WHERE page = {page:String}
+  AND day BETWEEN {from:Date} AND {to:Date}
+ORDER BY day;
+
+-- name: TagTotals :many
+-- expose: http
+SELECT tag, sum(views) AS total_views, uniqMerge(users) AS total_users
+FROM tag_hourly
+WHERE tag IN {tags:Array(String)}
+  AND hour >= {since:DateTime64(6)}
+GROUP BY tag
+ORDER BY total_views DESC
+LIMIT 10;
+
+-- name: RecentPageViews :many
+SELECT event_time, page, duration_ms
+FROM page_views
+WHERE user_id = {user:String}
+  AND event_time >= {since:DateTime64(6)}
+ORDER BY event_time DESC
+LIMIT {n:UInt32};
+-- ast --
+stream page_views @1:1
+  column user_id String @2:5
+  column page String @3:5
+  column referrer Nullable(String) @4:5
+  column tags Array(String) @5:5
+  column duration_ms UInt32 @6:5
+  column country LowCardinality(String) @7:5
+    default '' @7:40
+  primary key user_id @9:1
+  log retention 2 DAY @10:1
+  accept (between event_time (- now() (interval 30 DAY)) (+ now() (interval 5 MINUTE))) @11:1
+view page_daily @13:1
+  mode async @14:1
+  order by page, day @15:1
+  primary key page @16:1
+  ttl (+ day (interval 2 YEAR)) @17:1
+  select @18:4
+    item page @19:5
+    item toStartOfDay(event_time) as day @20:5
+    item count() as views @21:5
+    item uniqExact(user_id) as visitors @22:5
+    item sum(duration_ms) as total_ms @23:5
+    item max(event_time) as last_view @24:5
+    from page_views @25:6
+    where (!= page '') @26:1
+    group by page, day @27:1
+view tag_hourly @29:1
+  order by tag, hour @30:1
+  primary key tag @31:1
+  ttl (+ hour (interval 30 DAY)) @32:1
+  select @33:4
+    item tag @34:5
+    item toStartOfHour(event_time) as hour @35:5
+    item count() as views @36:5
+    item uniq(user_id) as users @37:5
+    from page_views @38:6
+    array join @39:1
+      item tags as tag @39:12
+    group by tag, hour @40:1
+query @43:1
+  -- name: PageStats :many (name @42:10) @42:1
+  select @43:1
+    item day @43:8
+    item views @43:13
+    item visitors @43:20
+    from page_daily @44:6
+    where (and (= page {page:String}) (between day {from:Date} {to:Date})) @45:1
+    order by @47:1
+      item day @47:10
+query @51:1
+  -- name: TagTotals :many (name @49:10) @49:1
+  -- expose: http @50:1
+  select @51:1
+    item tag @51:8
+    item sum(views) as total_views @51:13
+    item uniqMerge(users) as total_users @51:40
+    from tag_hourly @52:6
+    where (and (in tag {tags:Array(String)}) (>= hour {since:DateTime64(6)})) @53:1
+    group by tag @55:1
+    order by @56:1
+      item total_views desc @56:10
+    limit 10 @57:1
+query @60:1
+  -- name: RecentPageViews :many (name @59:10) @59:1
+  select @60:1
+    item event_time @60:8
+    item page @60:20
+    item duration_ms @60:26
+    from page_views @61:6
+    where (and (= user_id {user:String}) (>= event_time {since:DateTime64(6)})) @62:1
+    order by @64:1
+      item event_time desc @64:10
+    limit {n:UInt32} @65:1
+-- diagnostics --

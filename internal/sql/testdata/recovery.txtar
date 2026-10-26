@@ -1,0 +1,65 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A lexical or syntax error ends its statement: the parser reports the first
+one, skips to the next ; outside strings and comments, and goes on. A broken
+statement keeps its name and annotations, so the name still counts as
+defined; that is why IF NOT EXISTS and OR REPLACE are reported after the
+name.
+-- in.sql --
+CREATE STREAM a (x Strin g, y Bad Type) PRIMARY KEY x;
+CREATE STREAM b (x String) PRIMARY KEY x;
+
+-- name: Q1 :one
+SELECT x FROM b WHERE y = 'a;b' AND z = @ AND w = !;
+
+-- name: Q2 :many
+SELECT x FROM b WHERE y = 'a;b' /* ; */ -- ;
+  AND z = 1;
+
+CREATE MATERIALIZED VIEW v ORDER BY x AS SELECT x FROM b GROUP BY x HAVING x = 1 HAVING;
+INSERT INTO b VALUES (';');
+SELECT x FROM b WHERE s = 'unclosed;
+  AND this line is skipped too;
+SELECT x FROM b;
+CREATE STREAM IF NOT EXISTS d (x String) PRIMARY KEY x;
+CREATE OR REPLACE MATERIALIZED VIEW w ORDER BY x AS SELECT x FROM b GROUP BY x;
+CREATE STREAM c (x String) PRIMARY KEY x /* unclosed ;
+SELECT x FROM b;
+-- ast --
+stream a broken @1:1
+stream b @2:1
+  column x String @2:18
+  primary key x @2:28
+query broken @5:1
+  -- name: Q1 :one (name @4:10) @4:1
+query @8:1
+  -- name: Q2 :many (name @7:10) @7:1
+  select @8:1
+    item x @8:8
+    from b @8:15
+    where (and (= y 'a;b') (= z 1)) @8:17
+view v broken @11:1
+query broken @13:1
+query @15:1
+  select @15:1
+    item x @15:8
+    from b @15:15
+stream d broken @16:1
+view w broken @17:1
+stream c broken @18:1
+-- diagnostics --
+in.sql:1:26: error DF1101: a: expected , or ), found g
+in.sql:5:41: error DF1002: Q1: unexpected character @
+in.sql:11:69: error DF1102: v: HAVING is not supported
+  hint: not in v1; filter the rows in the caller
+in.sql:12:1: error DF1103: INSERT statements are not supported
+  hint: use CREATE STREAM, CREATE MATERIALIZED VIEW or a named SELECT; for CREATE TABLE, use CREATE STREAM
+in.sql:13:27: error DF1003: string literal is not closed on this line
+  hint: close it with ', and write a line break as \n
+in.sql:16:15: error DF1102: d: IF NOT EXISTS is not supported
+  hint: Dynaflux creates and manages the tables
+in.sql:17:8: error DF1102: w: OR REPLACE is not supported
+  hint: Dynaflux creates and manages the tables
+in.sql:18:42: error DF1004: c: block comment is not closed
+  hint: add */; block comments nest, so every /* needs its own */

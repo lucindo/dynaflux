@@ -1,0 +1,77 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Named queries and the expression forms: parameters, calls with *, DISTINCT
+and parameter lists, IN lists and Array parameters, intervals, qualified
+names and SELECT *. The compiler rejects several of them; the parser keeps
+them in the tree.
+-- in.sql --
+-- name: Everything :many
+SELECT
+    *,
+    t.page,
+    "quoted name" AS `alias`,
+    quantile(0.9)(duration_ms) AS p90,
+    quantileDD(0.01, 0.5)(duration_ms) AS p50,
+    quantile()(x) AS empty_params,
+    count(*) AS star,
+    count(DISTINCT user_id) AS distinct_users,
+    count() AS rows,
+    if(a IS NULL, 0, a) AS a0,
+    multiIf(b, 1, c, 2, 3) AS m,
+    INTERVAL 1 DAY AS i1,
+    INTERVAL -1 DAY AS i2,
+    INTERVAL '2 days' AS i3,
+    INTERVAL 1.5 DAY TO HOUR AS i4,
+    TRUE AS t, false AS f, NULL AS n
+FROM db.page_daily
+WHERE page IN ('a', 'b', {p:String})
+  AND day NOT IN {days:Array(Date)}
+  AND hits IN (-1, 0, 1.5, TRUE, NULL)
+  AND d BETWEEN {from:Date} AND { to : Date }
+  AND x NOT BETWEEN 1 AND 2
+  AND r IS NOT NULL
+  AND -(1) < - 1
+GROUP BY page, day
+ORDER BY day DESC NULLS FIRST, page ASC NULLS LAST, total
+LIMIT {n:UInt32};
+
+-- name: Limited :one
+SELECT x FROM s LIMIT 1
+-- ast --
+query @2:1
+  -- name: Everything :many (name @1:10) @1:1
+  select @2:1
+    item * @3:5
+    item t.page @4:5
+    item "quoted name" as `alias` @5:5
+    item quantile(0.9)(duration_ms) as p90 @6:5
+    item quantileDD(0.01, 0.5)(duration_ms) as p50 @7:5
+    item quantile()(x) as empty_params @8:5
+    item count(*) as star @9:5
+    item count(DISTINCT user_id) as distinct_users @10:5
+    item count() as rows @11:5
+    item if((is-null a), 0, a) as a0 @12:5
+    item multiIf(b, 1, c, 2, 3) as m @13:5
+    item (interval 1 DAY) as i1 @14:5
+    item (interval -1 DAY) as i2 @15:5
+    item (interval '2 days') as i3 @16:5
+    item (interval 1.5 DAY TO HOUR) as i4 @17:5
+    item true as t @18:5
+    item false as f @18:16
+    item NULL as n @18:28
+    from db.page_daily @19:6
+    where (and (and (and (and (and (and (in page (list 'a' 'b' {p:String})) (not-in day {days:Array(Date)})) (in hits (list -1 0 1.5 true NULL))) (between d {from:Date} {to:Date})) (not-between x 1 2)) (is-not-null r)) (< (neg (paren 1)) -1)) @20:1
+    group by page, day @27:1
+    order by @28:1
+      item day desc nulls first @28:10
+      item page @28:32
+      item total @28:53
+    limit {n:UInt32} @29:1
+query @32:1
+  -- name: Limited :one (name @31:10) @31:1
+  select @32:1
+    item x @32:8
+    from s @32:15
+    limit 1 @32:17
+-- diagnostics --
