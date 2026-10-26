@@ -1,0 +1,32 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Every scalar function with valid arguments, including the toStartOfFiveMinute alias,
+toStartOfWeek mode 9, and names that match in any letter case.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux/queries.sql --
+-- name: PageDays :many
+SELECT day, if(views > 10, 'busy', 'quiet') AS label, multiIf(views > 100, 'hot', views > 10, 'warm', 'cold') AS heat, lower(page) AS lower_page, UPPER(page) AS upper_page, concat(page, '/', 'all') AS path, length(page) AS page_length, toDate(day) AS date_only, toStartOfMinute(day) AS minute, toStartOfFiveMinutes(day) AS five, toStartOfFiveMinute(day) AS five_alias, toStartOfHour(day) AS hour, toStartOfDay(day) AS start_of_day, toStartOfWeek(day) AS week_sunday, toStartOfWeek(day, 9) AS week_mode_9, toStartOfMonth(day) AS month, toYYYYMM(day) AS yyyymm, toDate('2024-05-31') AS fixed_day
+FROM page_daily
+WHERE page = {page:String};
+-- want --

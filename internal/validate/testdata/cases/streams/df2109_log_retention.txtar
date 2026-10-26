@@ -1,0 +1,57 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+LOG RETENTION is a positive whole number of HOUR, DAY, WEEK, MONTH or YEAR, from 1 day
+to 36525 days: each stream is one step outside a bound, or uses a value of the wrong
+kind.
+-- dynaflux/retention.sql --
+CREATE STREAM r_hours (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 23 HOURS;
+
+CREATE STREAM r_hours_max (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 876601 HOUR;
+
+CREATE STREAM r_days (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 36526 DAY;
+
+CREATE STREAM r_weeks (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 5218 WEEK;
+
+CREATE STREAM r_months (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 1201 MONTH;
+
+CREATE STREAM r_years (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 101 YEARS;
+
+CREATE STREAM r_zero (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 0 DAY;
+
+CREATE STREAM r_negative (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION -1 DAY;
+
+CREATE STREAM r_fraction (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 1.5 DAY;
+
+CREATE STREAM r_minutes (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 3000 MINUTE;
+-- want --
+dynaflux/retention.sql:3:1: error DF2109
+dynaflux/retention.sql:7:1: error DF2109
+dynaflux/retention.sql:11:1: error DF2109
+dynaflux/retention.sql:15:1: error DF2109
+dynaflux/retention.sql:19:1: error DF2109
+dynaflux/retention.sql:23:1: error DF2109
+dynaflux/retention.sql:27:1: error DF2109
+dynaflux/retention.sql:31:1: error DF2109
+dynaflux/retention.sql:35:1: error DF2109
+dynaflux/retention.sql:39:1: error DF2109

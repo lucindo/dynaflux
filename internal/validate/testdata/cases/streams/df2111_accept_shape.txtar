@@ -1,0 +1,17 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+ACCEPT takes event_time BETWEEN <bound> AND <bound> or event_time <= <bound>, where a
+bound is now() plus or minus an interval: < is another shape, and a function of now()
+is another bound.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id)
+ACCEPT event_time < now() + INTERVAL 5 MINUTE;
+
+CREATE STREAM clicks (user_id String)
+PRIMARY KEY (user_id)
+ACCEPT event_time <= toStartOfDay(now());
+-- want --
+dynaflux/streams.sql:3:1: error DF2111
+dynaflux/streams.sql:7:1: error DF2111

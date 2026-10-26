@@ -1,0 +1,19 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+LOG RETENTION FOREVER is a warning. A query over the stream gets no DF4501, because no
+event leaves the log.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id)
+LOG RETENTION FOREVER;
+
+-- name: RecentPages :many
+SELECT event_time, page
+FROM page_views
+WHERE user_id = {user:String};
+-- want --
+dynaflux/page_views.sql:3:1: warning DF2501
+-- want-text --
+dynaflux/page_views.sql:3:1: warning DF2501: page_views: LOG RETENTION FOREVER keeps every event in DynamoDB; the table and the cost of projecting it keep growing
+  hint: keep a short log (the default is 2 DAY) and use the archive as the permanent record; dynaflux explain shows the cost

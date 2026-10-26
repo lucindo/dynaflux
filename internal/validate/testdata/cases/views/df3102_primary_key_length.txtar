@@ -1,0 +1,21 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A PRIMARY KEY longer than ORDER BY isn't a prefix of it.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page)
+PRIMARY KEY (page, page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+-- want --
+dynaflux/views.sql:3:1: error DF3102
+-- want-text --
+dynaflux/views.sql:3:1: error DF3102: page_totals: Primary key must be a prefix of the sorting key, but its length: 2 is greater than the sorting key length: 1

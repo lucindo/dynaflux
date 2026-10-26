@@ -1,0 +1,33 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A SELECT needs a -- name: annotation, and an ordinary comment isn't one. The rest of the
+query is checked as usual, and is valid.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux/queries.sql --
+-- daily views of the home page
+SELECT day, views
+FROM page_daily
+WHERE page = '/home';
+-- want --
+dynaflux/queries.sql:2:1: error DF1104

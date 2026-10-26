@@ -1,0 +1,24 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+ORDER BY is required. With the clause missing, the diagnostic points at the statement's
+first token.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_totals
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+-- want --
+dynaflux/views.sql:1:1: error DF3007
+-- want-text --
+dynaflux/views.sql:1:1: error DF3007: page_totals: view has no ORDER BY
+  hint: add ORDER BY (page) before AS

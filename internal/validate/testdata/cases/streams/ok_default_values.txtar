@@ -1,0 +1,333 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The compiler computes each DEFAULT and stores it as a literal of the column's type.
+Integer results wrap as sql.md §5.6 says: -7 % 2 is -1, intDiv(-7, 2) is -3, the UInt8
+200 % the Int8 -3 is 2, the smallest Int64 minus 1 is the largest, the largest UInt64
+plus the Int8 1 is the Int64 0, and intDiv of the largest UInt64 by -1 is the Int64 1.
+lower changes ASCII letters only, length counts bytes, and toStartOfWeek clamps to
+1970-01-01. Guards keep the divisions by zero from being evaluated or warned about. A
+number literal stands for its exact text, a UUID is stored in lowercase, and a Nullable
+column's DEFAULT NULL is stored as no default.
+-- dynaflux/defaults.sql --
+CREATE STREAM defaults (
+    user_id  String,
+    rem      Int64 DEFAULT -7 % 2,
+    quot     Int64 DEFAULT intDiv(-7, 2),
+    rem_u8   UInt8 DEFAULT 200 % -3,
+    wrapped  Int64 DEFAULT -9223372036854775808 - 1,
+    to_zero  Int64 DEFAULT 18446744073709551615 + -(-1),
+    div_neg  Int64 DEFAULT intDiv(18446744073709551615, -1),
+    quarter  Float64 DEFAULT 1 / 4,
+    zero     Float64 DEFAULT -0.0,
+    lowered  String DEFAULT lower('ÀB'),
+    bytes    UInt64 DEFAULT length('é'),
+    joined   String DEFAULT concat('a', 'b', 'c'),
+    sunday   Date DEFAULT toStartOfWeek(toDate('2024-05-31')),
+    monday   Date DEFAULT toStartOfWeek(toDate('2024-05-31'), 1),
+    clamped  Date DEFAULT toStartOfWeek(toDate('1970-01-02'), 1),
+    yyyymm   UInt32 DEFAULT toYYYYMM(toDate('2024-05-31')),
+    month    Date DEFAULT toStartOfMonth(toDate('2024-05-31')),
+    midnight DateTime64(3) DEFAULT toStartOfDay(toDate('2024-05-31')),
+    picked   String DEFAULT if(1 = 1, 'yes', 'no'),
+    widened  UInt16 DEFAULT multiIf(1 > 2, 1, 2 > 1, 300, 0),
+    first    Int32 DEFAULT coalesce(NULL, -5),
+    guarded  Float64 DEFAULT if(1 - 1 != 0, 10 / (1 - 1), 0),
+    unless   Float64 DEFAULT if(1 - 1 = 0, 0, 10 / (1 - 1)),
+    same_day Bool DEFAULT if(toDate('2024-05-31') = '2024-05-31' AND true, true, false),
+    price    Decimal(5, 2) DEFAULT 999.99,
+    padded   Decimal(10, 2) DEFAULT 12,
+    request  UUID DEFAULT '61F0C404-5CB3-11E7-907B-A6006AD3DBA0',
+    since    DateTime64(6) DEFAULT '2024-05-31',
+    scores   Array(UInt8) DEFAULT [1, 2],
+    none     Nullable(String) DEFAULT NULL
+)
+PRIMARY KEY (user_id);
+-- want --
+-- want-catalog --
+{
+  "format": 1,
+  "catalog": {
+    "streams": [
+      {
+        "name": "defaults",
+        "columns": [
+          {
+            "name": "user_id",
+            "type": "String"
+          },
+          {
+            "name": "rem",
+            "type": "Int64",
+            "default": {
+              "op": "literal",
+              "type": "Int64",
+              "value": "-1"
+            }
+          },
+          {
+            "name": "quot",
+            "type": "Int64",
+            "default": {
+              "op": "literal",
+              "type": "Int64",
+              "value": "-3"
+            }
+          },
+          {
+            "name": "rem_u8",
+            "type": "UInt8",
+            "default": {
+              "op": "literal",
+              "type": "UInt8",
+              "value": "2"
+            }
+          },
+          {
+            "name": "wrapped",
+            "type": "Int64",
+            "default": {
+              "op": "literal",
+              "type": "Int64",
+              "value": "9223372036854775807"
+            }
+          },
+          {
+            "name": "to_zero",
+            "type": "Int64",
+            "default": {
+              "op": "literal",
+              "type": "Int64",
+              "value": "0"
+            }
+          },
+          {
+            "name": "div_neg",
+            "type": "Int64",
+            "default": {
+              "op": "literal",
+              "type": "Int64",
+              "value": "1"
+            }
+          },
+          {
+            "name": "quarter",
+            "type": "Float64",
+            "default": {
+              "op": "literal",
+              "type": "Float64",
+              "value": "0.25"
+            }
+          },
+          {
+            "name": "zero",
+            "type": "Float64",
+            "default": {
+              "op": "literal",
+              "type": "Float64",
+              "value": "0"
+            }
+          },
+          {
+            "name": "lowered",
+            "type": "String",
+            "default": {
+              "op": "literal",
+              "type": "String",
+              "value": "Àb"
+            }
+          },
+          {
+            "name": "bytes",
+            "type": "UInt64",
+            "default": {
+              "op": "literal",
+              "type": "UInt64",
+              "value": "2"
+            }
+          },
+          {
+            "name": "joined",
+            "type": "String",
+            "default": {
+              "op": "literal",
+              "type": "String",
+              "value": "abc"
+            }
+          },
+          {
+            "name": "sunday",
+            "type": "Date",
+            "default": {
+              "op": "literal",
+              "type": "Date",
+              "value": "2024-05-26"
+            }
+          },
+          {
+            "name": "monday",
+            "type": "Date",
+            "default": {
+              "op": "literal",
+              "type": "Date",
+              "value": "2024-05-27"
+            }
+          },
+          {
+            "name": "clamped",
+            "type": "Date",
+            "default": {
+              "op": "literal",
+              "type": "Date",
+              "value": "1970-01-01"
+            }
+          },
+          {
+            "name": "yyyymm",
+            "type": "UInt32",
+            "default": {
+              "op": "literal",
+              "type": "UInt32",
+              "value": "202405"
+            }
+          },
+          {
+            "name": "month",
+            "type": "Date",
+            "default": {
+              "op": "literal",
+              "type": "Date",
+              "value": "2024-05-01"
+            }
+          },
+          {
+            "name": "midnight",
+            "type": "DateTime64(3)",
+            "default": {
+              "op": "literal",
+              "type": "DateTime64(3)",
+              "value": "2024-05-31 00:00:00.000"
+            }
+          },
+          {
+            "name": "picked",
+            "type": "String",
+            "default": {
+              "op": "literal",
+              "type": "String",
+              "value": "yes"
+            }
+          },
+          {
+            "name": "widened",
+            "type": "UInt16",
+            "default": {
+              "op": "literal",
+              "type": "UInt16",
+              "value": "300"
+            }
+          },
+          {
+            "name": "first",
+            "type": "Int32",
+            "default": {
+              "op": "literal",
+              "type": "Int32",
+              "value": "-5"
+            }
+          },
+          {
+            "name": "guarded",
+            "type": "Float64",
+            "default": {
+              "op": "literal",
+              "type": "Float64",
+              "value": "0"
+            }
+          },
+          {
+            "name": "unless",
+            "type": "Float64",
+            "default": {
+              "op": "literal",
+              "type": "Float64",
+              "value": "0"
+            }
+          },
+          {
+            "name": "same_day",
+            "type": "Bool",
+            "default": {
+              "op": "literal",
+              "type": "Bool",
+              "value": "true"
+            }
+          },
+          {
+            "name": "price",
+            "type": "Decimal(5, 2)",
+            "default": {
+              "op": "literal",
+              "type": "Decimal(5, 2)",
+              "value": "999.99"
+            }
+          },
+          {
+            "name": "padded",
+            "type": "Decimal(10, 2)",
+            "default": {
+              "op": "literal",
+              "type": "Decimal(10, 2)",
+              "value": "12.00"
+            }
+          },
+          {
+            "name": "request",
+            "type": "UUID",
+            "default": {
+              "op": "literal",
+              "type": "UUID",
+              "value": "61f0c404-5cb3-11e7-907b-a6006ad3dba0"
+            }
+          },
+          {
+            "name": "since",
+            "type": "DateTime64(6)",
+            "default": {
+              "op": "literal",
+              "type": "DateTime64(6)",
+              "value": "2024-05-31 00:00:00.000000"
+            }
+          },
+          {
+            "name": "scores",
+            "type": "Array(UInt8)",
+            "default": {
+              "op": "array",
+              "type": "Array(UInt8)",
+              "args": [
+                {
+                  "op": "literal",
+                  "type": "UInt8",
+                  "value": "1"
+                },
+                {
+                  "op": "literal",
+                  "type": "UInt8",
+                  "value": "2"
+                }
+              ]
+            }
+          },
+          {
+            "name": "none",
+            "type": "Nullable(String)"
+          }
+        ],
+        "primary_key": [
+          "user_id"
+        ]
+      }
+    ]
+  }
+}

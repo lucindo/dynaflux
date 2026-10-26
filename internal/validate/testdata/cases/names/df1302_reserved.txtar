@@ -1,0 +1,23 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The implicit column names, pk and sk can't be stream columns, and pk and sk can't be
+view output columns.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id    String,
+    page       String,
+    event_time String,
+    pk         String
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_totals.sql --
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page)
+AS SELECT page, count() AS sk
+FROM page_views
+GROUP BY page;
+-- want --
+dynaflux/page_totals.sql:3:28: error DF1302
+dynaflux/page_views.sql:4:5: error DF1302
+dynaflux/page_views.sql:5:5: error DF1302

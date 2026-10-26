@@ -1,0 +1,101 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Key binding and read-time aggregation at the edges of sql.md §10:
+- NoPartition: NOT IN never binds, so each partition key column gets DF4101.
+- BoundTwice: BETWEEN is one lower and one upper bound, so after >= it is a second lower
+  bound.
+- AliasOfAggregate, GroupByAggregate: an alias stands for its expression, so an alias of
+  an aggregate can't be used in WHERE or GROUP BY.
+- Ungrouped: an aggregation without GROUP BY has no keys, so a plain column is DF4207.
+- SetOfTwo, LimitParam: a set of two values, or LIMIT with a parameter, can return more
+  than one row.
+-- dynaflux/members.sql --
+CREATE STREAM member_events (
+    workspace_id String,
+    member_id    String
+)
+PRIMARY KEY (workspace_id);
+
+CREATE MATERIALIZED VIEW member_daily
+ORDER BY (workspace_id, member_id, day)
+PRIMARY KEY (workspace_id, member_id)
+AS SELECT
+    workspace_id,
+    member_id,
+    toDate(event_time) AS day,
+    count()            AS actions
+FROM member_events
+GROUP BY workspace_id, member_id, day;
+-- dynaflux/queries.sql --
+-- name: NoPartition :many
+SELECT day, actions
+FROM member_daily
+WHERE workspace_id NOT IN ('w1')
+  AND day >= {from:Date};
+
+-- name: BoundTwice :many
+SELECT day, actions
+FROM member_daily
+WHERE workspace_id = {workspace:String}
+  AND member_id = {member:String}
+  AND day >= {from:Date}
+  AND day BETWEEN {a:Date} AND {b:Date};
+
+-- name: AliasOfAggregate :many
+SELECT day, sum(actions) AS total
+FROM member_daily
+WHERE workspace_id = {workspace:String}
+  AND member_id = {member:String}
+  AND total > 10
+GROUP BY day;
+
+-- name: GroupByAggregate :many
+SELECT sum(actions) AS total
+FROM member_daily
+WHERE workspace_id = {workspace:String}
+  AND member_id = {member:String}
+GROUP BY total;
+
+-- name: Ungrouped :one
+SELECT day, sum(actions) AS total
+FROM member_daily
+WHERE workspace_id = {workspace:String}
+  AND member_id = {member:String};
+
+-- name: SetOfTwo :one
+SELECT actions
+FROM member_daily
+WHERE workspace_id = {workspace:String}
+  AND member_id = {member:String}
+  AND day IN ('2024-05-01', '2024-05-02');
+
+-- name: LimitParam :one
+SELECT actions
+FROM member_daily
+WHERE workspace_id = {workspace:String}
+  AND member_id = {member:String}
+LIMIT {n:UInt8};
+-- want --
+dynaflux/queries.sql:4:1: error DF4101
+dynaflux/queries.sql:4:1: error DF4101
+dynaflux/queries.sql:13:7: error DF4102
+dynaflux/queries.sql:20:7: error DF5204
+dynaflux/queries.sql:28:10: error DF5204
+dynaflux/queries.sql:31:8: error DF4207
+dynaflux/queries.sql:36:1: error DF4304
+dynaflux/queries.sql:43:1: error DF4304
+-- want-text --
+dynaflux/queries.sql:4:1: error DF4101: NoPartition: view member_daily is partitioned by (workspace_id, member_id), but WHERE does not bind "member_id" with = or IN. Every query must fix the partition key.
+  hint: add member_id = {member_id:String} to WHERE, or declare a view whose PRIMARY KEY matches this query
+dynaflux/queries.sql:4:1: error DF4101: NoPartition: view member_daily is partitioned by (workspace_id, member_id), but WHERE does not bind "workspace_id" with = or IN. Every query must fix the partition key.
+  hint: add workspace_id = {workspace_id:String} to WHERE, or declare a view whose PRIMARY KEY matches this query
+dynaflux/queries.sql:13:7: error DF4102: BoundTwice: day is bound more than once
+  hint: combine the conditions: one = or IN, or one lower and one upper bound
+dynaflux/queries.sql:20:7: error DF5204: AliasOfAggregate: aggregate sum is not allowed in WHERE
+dynaflux/queries.sql:28:10: error DF5204: GroupByAggregate: aggregate sum is not allowed in GROUP BY
+dynaflux/queries.sql:31:8: error DF4207: Ungrouped: day must be a GROUP BY key or inside an aggregate
+dynaflux/queries.sql:36:1: error DF4304: SetOfTwo: :one query can return more than one row
+  hint: use :many, bind every view key with =, or add LIMIT 1
+dynaflux/queries.sql:43:1: error DF4304: LimitParam: :one query can return more than one row
+  hint: use :many, bind every view key with =, or add LIMIT 1

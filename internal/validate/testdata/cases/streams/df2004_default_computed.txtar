@@ -1,0 +1,32 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+DEFAULT values that fail to compute or don't fit the column type: the smallest Int8
+divided by -1, a Float64 overflow, a Float64 that DynamoDB can't store, an integer out of
+range, a date that doesn't exist, more fractional digits than DateTime64(3) holds, an
+array element out of range, a number for a String, and NULL for a column that isn't
+Nullable. The diagnostic points at DEFAULT.
+-- dynaflux/defaults.sql --
+CREATE STREAM defaults (
+    user_id String,
+    min_div Int8 DEFAULT intDiv(-128, -1),
+    huge    Float64 DEFAULT 1e308 * 10,
+    tiny    Float64 DEFAULT 1e-200,
+    narrow  Int8 DEFAULT 200,
+    day     Date DEFAULT '2024-02-30',
+    millis  DateTime64(3) DEFAULT '2024-05-31 10:00:00.1234',
+    bytes   Array(UInt8) DEFAULT [1, 256],
+    text    String DEFAULT 1,
+    count   UInt8 DEFAULT NULL
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/defaults.sql:3:18: error DF2004
+dynaflux/defaults.sql:4:21: error DF2004
+dynaflux/defaults.sql:5:21: error DF2004
+dynaflux/defaults.sql:6:18: error DF2004
+dynaflux/defaults.sql:7:18: error DF2004
+dynaflux/defaults.sql:8:27: error DF2004
+dynaflux/defaults.sql:9:26: error DF2004
+dynaflux/defaults.sql:10:20: error DF2004
+dynaflux/defaults.sql:11:19: error DF2004

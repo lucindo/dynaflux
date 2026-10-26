@@ -1,0 +1,22 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The TTL key must be of a temporal type.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+TTL page
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+-- want --
+dynaflux/views.sql:3:5: error DF3302

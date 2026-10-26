@@ -1,0 +1,11 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Statements other than CREATE STREAM, CREATE MATERIALIZED VIEW and SELECT are DF1103.
+-- dynaflux/statements.sql --
+INSERT INTO page_views VALUES ('u1', '/home');
+
+CREATE TABLE page_views (user_id String) ENGINE = MergeTree ORDER BY user_id;
+-- want --
+dynaflux/statements.sql:1:1: error DF1103
+dynaflux/statements.sql:3:1: error DF1103

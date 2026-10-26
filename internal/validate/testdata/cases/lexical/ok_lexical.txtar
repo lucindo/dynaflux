@@ -1,0 +1,27 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Lexical forms at the edges of the rules, with no diagnostics: a byte-order mark, nested
+block comments, every string escape, number forms, the integer limits, quoted
+identifiers and keywords in any letter case.
+-- dynaflux/bom.sql --
+﻿CREATE STREAM visits (user_id String)
+PRIMARY KEY (user_id);
+-- dynaflux/literals.sql --
+/* Block comments /* nest */ and span
+   several lines. */
+create stream page_views (
+    `user_id` String,
+    "page"    String DEFAULT 'it''s \'home\'',
+    path      String DEFAULT 'C:\\pages\x41\n\r\t\0',
+    city      String DEFAULT 'Zürich', -- non-ASCII text
+    hops      UInt32 DEFAULT 1_000_000,
+    level     UInt8 DEFAULT 08,
+    big       UInt64 DEFAULT 18446744073709551615,
+    small     Int64 DEFAULT -9223372036854775808,
+    ratio     Float64 DEFAULT 2.0e-3,
+    scale     Float64 DEFAULT 1e6,
+    share     Float64 DEFAULT 1.5
+)
+Primary Key (user_id);
+-- want --

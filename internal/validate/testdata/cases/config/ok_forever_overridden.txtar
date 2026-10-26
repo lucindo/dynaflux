@@ -1,0 +1,14 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+defaults.log_retention: forever warns only for streams that inherit it.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+defaults:
+  log_retention: forever
+-- dynaflux/clicks.sql --
+CREATE STREAM clicks (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 2 DAY;
+-- want --

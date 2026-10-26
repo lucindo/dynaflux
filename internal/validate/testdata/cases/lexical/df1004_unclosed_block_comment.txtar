@@ -1,0 +1,14 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Block comments nest, so the outer comment is never closed.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id);
+
+/* draft /* nested */ still open
+-- want --
+dynaflux/page_views.sql:4:1: error DF1004
+-- want-text --
+dynaflux/page_views.sql:4:1: error DF1004: block comment is not closed
+  hint: add */; block comments nest, so every /* needs its own */

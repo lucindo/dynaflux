@@ -1,0 +1,125 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The quota-style counter example of sql.md, verbatim: no diagnostics.
+-- dynaflux/quota.sql --
+CREATE STREAM api_calls (
+    account_id String,
+    endpoint   LowCardinality(String),
+    units      UInt32,
+    request_id UUID
+)
+PRIMARY KEY (account_id)
+DEDUP BY (request_id);
+
+CREATE MATERIALIZED VIEW quota_usage
+MODE SYNC
+ORDER BY (account_id, month)
+PRIMARY KEY (account_id)
+TTL month + INTERVAL 13 MONTH
+AS SELECT
+    account_id,
+    toStartOfMonth(event_time) AS month,
+    sum(units)                 AS used_units,
+    count()                    AS calls
+FROM api_calls
+GROUP BY account_id, month;
+
+-- name: QuotaUsed :one
+SELECT used_units, calls
+FROM quota_usage
+WHERE account_id = {account_id:String}
+  AND month = toStartOfMonth({at:DateTime64(6)});
+-- want --
+-- want-catalog --
+{
+  "format": 1,
+  "catalog": {
+    "store": "analytics",
+    "regions": ["us-east-1", "us-west-2"],
+    "timeout_seconds": 60,
+    "streams": [
+      {
+        "name": "api_calls",
+        "columns": [
+          {"name": "account_id", "type": "String"},
+          {"name": "endpoint", "type": "String"},
+          {"name": "units", "type": "UInt32"},
+          {"name": "request_id", "type": "UUID"}
+        ],
+        "primary_key": ["account_id"],
+        "dedup_by": ["request_id"],
+        "log_retention": "2 DAY",
+        "accept": {"past": null, "future": "5 MINUTE"},
+        "shards": 1,
+        "archive": {"regions": ["us-east-1", "us-west-2"], "events": "all"},
+        "storage_format": 1
+      }
+    ],
+    "views": [
+      {
+        "name": "quota_usage",
+        "versions": [
+          {
+            "number": 1,
+            "state": "current",
+            "mode": "sync",
+            "stream": "api_calls",
+            "array_join": null,
+            "where": null,
+            "keys": [
+              {"name": "account_id", "expr": {"op": "column", "type": "String", "name": "account_id"}},
+              {"name": "month", "expr": {"op": "toStartOfMonth", "type": "Date", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]}}
+            ],
+            "partition_key_len": 1,
+            "ttl": {"key": "month", "plus": "13 MONTH"},
+            "split": 1,
+            "aggregates": [
+              {"name": "calls", "fn": "count", "type": "UInt64", "args": []},
+              {"name": "used_units", "fn": "sum", "type": "UInt64", "args": [
+                {"op": "column", "type": "UInt32", "name": "units"}
+              ]}
+            ],
+            "storage_format": 1
+          }
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "name": "QuotaUsed",
+        "cardinality": "one",
+        "expose_http": false,
+        "params": [
+          {"name": "account_id", "type": "String"},
+          {"name": "at", "type": "DateTime64(6)"}
+        ],
+        "source": {"kind": "view", "name": "quota_usage"},
+        "keys": {
+          "partition": [
+            {"column": "account_id", "values": [{"op": "param", "type": "String", "name": "account_id"}]}
+          ],
+          "sort_prefix": [
+            {"column": "month", "values": [{"op": "toStartOfMonth", "type": "Date", "args": [
+              {"op": "param", "type": "DateTime64(6)", "name": "at"}
+            ]}]}
+          ],
+          "range": null
+        },
+        "filter": null,
+        "aggregation": null,
+        "columns": [
+          {"name": "used_units", "expr": {"op": "column", "type": "UInt64", "name": "used_units"}},
+          {"name": "calls", "expr": {"op": "column", "type": "UInt64", "name": "calls"}}
+        ],
+        "order_by": [
+          {"expr": {"op": "column", "type": "String", "name": "account_id"}, "desc": false, "nulls_first": false},
+          {"expr": {"op": "column", "type": "Date", "name": "month"}, "desc": false, "nulls_first": false}
+        ],
+        "limit": null
+      }
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+ACCEPT needs an upper bound.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id)
+ACCEPT event_time >= now() - INTERVAL 30 DAY;
+-- want --
+dynaflux/page_views.sql:3:1: error DF2113
+-- want-text --
+dynaflux/page_views.sql:3:1: error DF2113: page_views: ACCEPT needs an upper bound on event_time
+  hint: ACCEPT event_time <= now() + INTERVAL 5 MINUTE is the default

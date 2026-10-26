@@ -1,0 +1,34 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A view that reads origin_region or ingest_time from a DEDUP BY stream gets a warning;
+one that reads event_time doesn't.
+-- dynaflux/api_calls.sql --
+CREATE STREAM api_calls (
+    account_id String,
+    request_id UUID,
+    units      UInt32
+)
+PRIMARY KEY (account_id)
+DEDUP BY (request_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW calls_by_region
+ORDER BY (account_id, region)
+AS SELECT account_id, origin_region AS region, count() AS calls
+FROM api_calls
+GROUP BY account_id, region;
+
+CREATE MATERIALIZED VIEW calls_daily
+ORDER BY (account_id, day)
+AS SELECT account_id, toDate(event_time) AS day, count() AS calls
+FROM api_calls
+GROUP BY account_id, day;
+
+CREATE MATERIALIZED VIEW calls_by_ingest_day
+ORDER BY (account_id, day)
+AS SELECT account_id, toDate(ingest_time) AS day, count() AS calls
+FROM api_calls
+GROUP BY account_id, day;
+-- want --
+dynaflux/views.sql:3:23: warning DF3504
+dynaflux/views.sql:15:30: warning DF3504

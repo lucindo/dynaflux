@@ -1,0 +1,77 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The expression rules of sql.md §4 to §6, checked in DEFAULT values, where no column,
+parameter, aggregate, now() or INTERVAL is allowed. Each column breaks one rule; c18
+also fails to compute (10 / 0 in Float64), so it gets DF2004 besides the DF5501
+warning. In c30, Int8 and UInt64 have no common type, and c31 uses a comparison as a
+value.
+-- dynaflux/defaults.sql --
+CREATE STREAM defaults (
+    user_id String,
+    c01 UInt8 DEFAULT 'a' + 1,
+    c02 String DEFAULT if(true, 'a', 1),
+    c03 UInt8 DEFAULT unknownFn(1),
+    c04 String DEFAULT concat('a'),
+    c05 String DEFAULT lower(1),
+    c06 UInt64 DEFAULT count(),
+    c07 UInt8 DEFAULT {p:UInt8},
+    c08 DateTime64(6) DEFAULT now(),
+    c09 UInt8 DEFAULT if(1 < 2 < 3, 1, 0),
+    c10 UInt8 DEFAULT if(1, 2, 3),
+    c11 Float64 DEFAULT 10 / 0,
+    c12 Date DEFAULT toDate('2024-1-1'),
+    c13 Date DEFAULT toStartOfWeek(toDate('2024-01-01'), 10),
+    c14 UInt32 DEFAULT toYYYYMM(toDate('2024-01-01'), 'UTC'),
+    c15 UInt8 DEFAULT NULL + 1,
+    c16 UInt8 DEFAULT if(1 = NULL, 1, 0),
+    c17 UInt8 DEFAULT intDiv(1.5, 1),
+    c18 Float64 DEFAULT 10 / (1 - 1),
+    c19 String DEFAULT coalesce('a', 'b'),
+    c20 UInt8 DEFAULT INTERVAL 1 DAY,
+    c21 UInt8 DEFAULT if(1 IN (1, NULL), 1, 0),
+    c22 UInt8 DEFAULT if('x' IS NULL, 1, 0),
+    c23 UInt8 DEFAULT if(1 = '1', 1, 0),
+    c24 Date DEFAULT toStartOfQuarter(toDate('2024-01-01')),
+    c25 UInt8 DEFAULT sum(DISTINCT 1),
+    c26 UInt8 DEFAULT groupArray(1),
+    c27 UInt8 DEFAULT sumOrNull(1),
+    c28 UInt8 DEFAULT toStartOfHour(toDate('2024-01-01')),
+    c29 UInt8 DEFAULT multiIf(true, 1, 2, 3, 4),
+    c30 Int64 DEFAULT if(true, -1, 18446744073709551615),
+    c31 Decimal(10, 2) DEFAULT 1 > 0.5
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/defaults.sql:3:23: error DF5312
+dynaflux/defaults.sql:4:24: error DF5308
+dynaflux/defaults.sql:5:23: error DF5201
+dynaflux/defaults.sql:6:24: error DF5202
+dynaflux/defaults.sql:7:24: error DF5203
+dynaflux/defaults.sql:8:24: error DF5204
+dynaflux/defaults.sql:9:23: error DF4403
+dynaflux/defaults.sql:10:31: error DF5405
+dynaflux/defaults.sql:11:32: error DF5304
+dynaflux/defaults.sql:12:26: error DF5302
+dynaflux/defaults.sql:13:25: error DF5313
+dynaflux/defaults.sql:14:29: error DF5401
+dynaflux/defaults.sql:15:58: error DF5211
+dynaflux/defaults.sql:16:55: error DF5210
+dynaflux/defaults.sql:17:23: error DF5314
+dynaflux/defaults.sql:18:26: error DF5305
+dynaflux/defaults.sql:19:23: error DF5312
+dynaflux/defaults.sql:20:17: error DF2004
+dynaflux/defaults.sql:20:25: warning DF5501
+dynaflux/defaults.sql:21:33: error DF5212
+dynaflux/defaults.sql:22:23: error DF5403
+dynaflux/defaults.sql:23:35: error DF5307
+dynaflux/defaults.sql:24:26: error DF5306
+dynaflux/defaults.sql:25:30: error DF5402
+dynaflux/defaults.sql:26:22: error DF5201
+dynaflux/defaults.sql:27:27: error DF5207
+dynaflux/defaults.sql:28:23: error DF5213
+dynaflux/defaults.sql:29:23: error DF5206
+dynaflux/defaults.sql:30:23: error DF5203
+dynaflux/defaults.sql:31:40: error DF5302
+dynaflux/defaults.sql:32:23: error DF5308
+dynaflux/defaults.sql:33:32: error DF5303

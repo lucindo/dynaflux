@@ -1,0 +1,9 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A byte-order mark at the start of a file is ignored, so it takes no column: the
+statement starts at 1:1.
+-- dynaflux/clicks.sql --
+﻿CREATE STREAM clicks (user_id String);
+-- want --
+dynaflux/clicks.sql:1:1: error DF2102

@@ -1,0 +1,50 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Every aggregate and its -If form in a view, with valid parameters, including quantile
+without a level and the uniqHLL12 alias, and names that match in any letter case.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_stats
+ORDER BY (page)
+AS SELECT
+    page,
+    COUNT()                                             AS views,
+    countIf(duration_ms > 1000)                         AS slow_views,
+    Sum(duration_ms)                                    AS total_ms,
+    sumIf(duration_ms, referrer IS NULL)                AS direct_ms,
+    min(duration_ms)                                    AS min_ms,
+    minIf(duration_ms, duration_ms > 0)                 AS min_positive_ms,
+    MAX(duration_ms)                                    AS max_ms,
+    maxIf(event_time, duration_ms > 1000)               AS last_slow_view,
+    avg(duration_ms)                                    AS avg_ms,
+    avgIf(duration_ms, referrer IS NOT NULL)            AS referred_avg_ms,
+    argMax(user_id, event_time)                         AS last_user,
+    argMin(user_id, event_time)                         AS first_user,
+    argMaxIf(user_id, duration_ms, duration_ms > 0)     AS longest_user,
+    argMinIf(user_id, duration_ms, duration_ms > 0)     AS shortest_user,
+    any(user_id)                                        AS some_user,
+    anyIf(user_id, referrer IS NOT NULL)                AS some_referred_user,
+    uniq(user_id)                                       AS approx_users,
+    uniqHLL12(user_id)                                  AS approx_users_hll,
+    uniqIf(user_id, duration_ms > 1000)                 AS approx_slow_users,
+    uniqExact(user_id)                                  AS users,
+    uniqExactIf(user_id, duration_ms > 1000)            AS slow_users,
+    quantile(duration_ms)                               AS median_ms,
+    quantile(0)(duration_ms)                            AS lowest_ms,
+    quantile(1)(duration_ms)                            AS highest_ms,
+    quantileIf(0.9)(duration_ms, duration_ms > 0)       AS p90_positive_ms,
+    quantileDD(0.01)(duration_ms)                       AS dd_median_ms,
+    quantileDD(0.01, 0.99)(duration_ms)                 AS dd_p99_ms,
+    quantileDDIf(0.05, 0.5)(duration_ms, duration_ms > 0) AS dd_median_positive_ms
+FROM page_views
+GROUP BY page;
+-- want --

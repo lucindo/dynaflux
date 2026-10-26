@@ -1,0 +1,10 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+go:type takes exactly one word.
+-- dynaflux/page_views.sql --
+-- go:type Page View
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:1:1: error DF1201

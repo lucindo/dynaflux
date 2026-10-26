@@ -1,0 +1,15 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A quoted identifier can't be empty.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    "" String
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:5: error DF1010
+-- want-text --
+dynaflux/page_views.sql:3:5: error DF1010: page_views: invalid quoted identifier
+  hint: a quoted name can't be empty or contain its quote character, \ or a line break

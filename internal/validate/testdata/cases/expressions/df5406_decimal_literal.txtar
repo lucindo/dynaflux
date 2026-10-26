@@ -1,0 +1,23 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A number literal compared with a Decimal must fit Decimal(38, S): 1e40 and 1e-40 need
+more than 38 digits.
+-- dynaflux/orders.sql --
+CREATE STREAM orders (
+    account_id String,
+    order_id   UUID,
+    price      Decimal(10, 2),
+    rate       Decimal(38, 20)
+)
+PRIMARY KEY (account_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW odd_orders
+ORDER BY (account_id)
+AS SELECT account_id, count() AS order_count
+FROM orders
+WHERE 1e40 > price OR 1e-40 = price
+GROUP BY account_id;
+-- want --
+dynaflux/views.sql:5:7: error DF5406
+dynaflux/views.sql:5:23: error DF5406

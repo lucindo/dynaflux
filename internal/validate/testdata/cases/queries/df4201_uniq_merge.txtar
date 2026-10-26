@@ -1,0 +1,30 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The activity-rollup query of sql.md §12.3 over a view that counts members with uniqExact:
+"the same query would be DF4201", since exact distinct sets of different days can't be
+combined, not even by uniqMerge.
+-- dynaflux/activity.sql --
+CREATE STREAM member_events (
+    workspace_id String,
+    member_id    String
+)
+PRIMARY KEY (workspace_id, member_id);
+
+CREATE MATERIALIZED VIEW workspace_daily
+ORDER BY (workspace_id, day)
+PRIMARY KEY (workspace_id)
+AS SELECT
+    workspace_id,
+    toDate(event_time)   AS day,
+    uniqExact(member_id) AS active_members
+FROM member_events
+GROUP BY workspace_id, day;
+
+-- name: WorkspaceActiveMembers :one
+SELECT uniqMerge(active_members) AS members
+FROM workspace_daily
+WHERE workspace_id = {workspace_id:String}
+  AND day BETWEEN {from:Date} AND {to:Date};
+-- want --
+dynaflux/activity.sql:18:8: error DF4201

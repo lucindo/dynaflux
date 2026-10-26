@@ -1,0 +1,19 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A 55-character store makes the projector function name 65 characters long, over
+Lambda's 64. Every other store-wide name fits, and the check stops before the SQL.
+-- dynaflux.yaml --
+store: analytics-for-a-store-whose-name-is-fifty-five-long-xyz
+regions: [us-east-1]
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:1:8: error DF6110

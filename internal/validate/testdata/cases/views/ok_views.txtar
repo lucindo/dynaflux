@@ -1,0 +1,98 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Views at the edges of the rules, with no diagnostics: ORDER BY in another order than
+GROUP BY, PRIMARY KEY equal to ORDER BY, SPLIT 2 and 16, TTL on Date, DateTime and
+DateTime64 keys, a constant key, keys without aggregates, ARRAY JOIN with WHERE on its
+alias, WHERE on a key alias, a SYNC view grouped by the stream's PRIMARY KEY, a UUID key
+in PRIMARY KEY, and a DEDUP BY stream read through event_time.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_daily
+MODE ASYNC
+ORDER BY (day, page)
+PRIMARY KEY (day, page)
+TTL day + INTERVAL 2 YEARS
+SPLIT 16
+AS SELECT
+    toStartOfDay(event_time)                   AS day,
+    page,
+    count()                                    AS views,
+    countIf(duration_ms > 1000)                AS slow_views,
+    sum(duration_ms)                           AS total_ms,
+    avg(duration_ms)                           AS avg_ms,
+    min(duration_ms)                           AS min_ms,
+    max(event_time)                            AS last_view,
+    argMax(coalesce(referrer, ''), event_time) AS last_referrer,
+    any(user_id)                               AS first_user,
+    uniq(user_id)                              AS approx_users,
+    uniqExact(user_id)                         AS users,
+    uniqIf(user_id, referrer IS NOT NULL)      AS referred_users
+FROM page_views
+WHERE page != '' AND duration_ms > 0
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW tag_hourly
+ORDER BY (tag, hour)
+PRIMARY KEY (tag)
+TTL hour + INTERVAL 30 DAY
+AS SELECT
+    tag,
+    toStartOfHour(event_time) AS hour,
+    count()                   AS views
+FROM page_views
+ARRAY JOIN tags AS tag
+WHERE tag != ''
+GROUP BY tag, hour;
+
+CREATE MATERIALIZED VIEW seen_pages
+ORDER BY (scope, page)
+PRIMARY KEY (scope)
+AS SELECT 'all' AS scope, page
+FROM page_views
+GROUP BY scope, page;
+
+CREATE MATERIALIZED VIEW user_monthly
+MODE SYNC
+ORDER BY (user_id, month)
+TTL month + INTERVAL 13 MONTH
+AS SELECT
+    user_id,
+    toStartOfMonth(event_time) AS month,
+    count()                    AS views
+FROM page_views
+GROUP BY user_id, month;
+
+CREATE MATERIALIZED VIEW user_views
+ORDER BY (user_id, at)
+PRIMARY KEY (user_id)
+SPLIT 2
+TTL at
+AS SELECT user_id, event_time AS at, count() AS views
+FROM page_views
+WHERE at >= '2024-01-01'
+GROUP BY user_id, at;
+-- dynaflux/api_calls.sql --
+CREATE STREAM api_calls (
+    account_id String,
+    request_id UUID,
+    units      UInt32
+)
+PRIMARY KEY (account_id)
+DEDUP BY (request_id);
+
+CREATE MATERIALIZED VIEW request_units
+ORDER BY (request_id, day)
+PRIMARY KEY (request_id)
+AS SELECT request_id, toDate(event_time) AS day, sum(units) AS total_units
+FROM api_calls
+GROUP BY request_id, day;
+-- want --

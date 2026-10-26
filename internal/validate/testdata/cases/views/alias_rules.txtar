@@ -1,0 +1,47 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Aliases in a view: WHERE can't use an aggregate's alias (DF5204), a SELECT item can't use
+a key's alias (DF5105), and neither a SELECT alias nor the ARRAY JOIN alias can be a
+column of the source, which includes the ARRAY JOIN alias (DF5103).
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String,
+    tags    Array(String)
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_busy
+ORDER BY (p)
+AS SELECT lower(page) AS p, count() AS views, uniqIf(user_id, p != 'home') AS visitors
+FROM page_views
+WHERE views > 10
+GROUP BY p;
+
+CREATE MATERIALIZED VIEW tag_counts
+ORDER BY (user_id)
+AS SELECT user_id, count() AS tag
+FROM page_views
+ARRAY JOIN tags AS tag
+GROUP BY user_id;
+
+CREATE MATERIALIZED VIEW page_tags
+ORDER BY (user_id)
+AS SELECT user_id, count() AS n
+FROM page_views
+ARRAY JOIN tags AS page
+GROUP BY user_id;
+-- want --
+dynaflux/views.sql:3:63: error DF5105
+dynaflux/views.sql:5:7: error DF5204
+dynaflux/views.sql:10:31: error DF5103
+dynaflux/views.sql:19:20: error DF5103
+-- want-text --
+dynaflux/views.sql:3:63: error DF5105: page_busy: alias p can't be used here
+  hint: aliases work in WHERE, GROUP BY and ORDER BY; repeat the expression
+dynaflux/views.sql:5:7: error DF5204: page_busy: aggregate count is not allowed in WHERE
+dynaflux/views.sql:10:31: error DF5103: tag_counts: alias tag is also a column of page_views
+  hint: choose another alias
+dynaflux/views.sql:19:20: error DF5103: page_tags: alias page is also a column of page_views
+  hint: choose another alias

@@ -1,0 +1,18 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A stream clause or a column option written twice is DF1105, at the second one.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id)
+SHARDS 4
+SHARDS 8;
+
+CREATE STREAM clicks (
+    user_id String,
+    page    String DEFAULT '' DEFAULT '/'
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/streams.sql:4:1: error DF1105
+dynaflux/streams.sql:8:31: error DF1105

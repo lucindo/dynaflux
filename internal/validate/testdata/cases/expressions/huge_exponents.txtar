@@ -1,0 +1,23 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Float literals with exponents too large for an int64 keep their exact value: 0e… is 0,
+which fits Int64, and 1e-… underflows to the Float64 0 but needs more than 38 digits as
+a Decimal (DF5406).
+-- dynaflux/orders.sql --
+CREATE STREAM orders (
+    account_id String,
+    price      Decimal(10, 2),
+    zero       Int64 DEFAULT 0e10000000000000000000,
+    tiny       Float64 DEFAULT 1e-10000000000000000000
+)
+PRIMARY KEY (account_id);
+
+CREATE MATERIALIZED VIEW small_orders
+ORDER BY (account_id)
+AS SELECT account_id, count() AS n
+FROM orders
+WHERE price > 1e-10000000000000000000
+GROUP BY account_id;
+-- want --
+dynaflux/orders.sql:13:15: error DF5406

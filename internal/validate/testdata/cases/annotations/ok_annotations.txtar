@@ -1,0 +1,43 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Annotation forms with no diagnostics: keys are case-sensitive, so "-- Name:" is an
+ordinary comment; ordinary comments, block comments and blank lines may sit between an
+annotation and its statement; text in /* */ is never an annotation; the blank after
+-- is optional and trailing blanks are allowed; and -- go:type resolves the collision
+between the event types of page_view and page_views.
+-- dynaflux/pages.sql --
+-- Name: an ordinary comment
+CREATE STREAM page_view (
+    user_id String,
+    page    String
+)
+PRIMARY KEY (user_id);
+
+-- go:type PageVisit
+-- page_view and page_views would both generate PageView
+CREATE STREAM page_views (
+    user_id String,
+    page    String
+)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views
+FROM page_views
+GROUP BY page, day;
+
+-- expose: http  	
+--name: PageStats :many
+
+/* -- name: Ignored :one */
+-- the daily views of one page
+SELECT day, views
+FROM page_daily
+WHERE page = {page:String};
+-- want --

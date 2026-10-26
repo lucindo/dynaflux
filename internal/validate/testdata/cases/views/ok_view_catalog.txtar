@@ -1,0 +1,134 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The compiled form of two views, worked out from sql.md: WHERE on a key alias holds the
+key's expression; aggregate result types follow §7.1 (sum of Int32 is Int64, sum of
+Decimal(10, 2) is Decimal(38, 2), min keeps Nullable, argMax is Nullable when val is);
+quantile without a level gets 0.5; a PRIMARY KEY equal to ORDER BY makes every key part
+of the partition key; and a SYNC view that groups by the stream's PRIMARY KEY under an
+alias gets no DF3501.
+-- dynaflux/orders.sql --
+CREATE STREAM orders (
+    account_id String,
+    region     String,
+    items      Array(String),
+    qty        Int32,
+    price      Decimal(10, 2),
+    score      Nullable(UInt16)
+)
+PRIMARY KEY (account_id);
+
+CREATE MATERIALIZED VIEW item_daily
+ORDER BY (account_id, item, day)
+PRIMARY KEY (account_id, item, day)
+SPLIT 4
+AS SELECT
+    account_id,
+    item,
+    toDate(event_time)         AS day,
+    sumIf(qty, item != '')     AS total_qty,
+    sum(price)                 AS revenue,
+    min(score)                 AS min_score,
+    argMax(region, score)      AS best_region,
+    quantile(qty)              AS median_qty,
+    quantileDD(0.01, 0.9)(qty) AS p90_qty
+FROM orders
+ARRAY JOIN items AS item
+WHERE day >= '2024-01-01'
+GROUP BY account_id, item, day;
+
+CREATE MATERIALIZED VIEW account_hourly
+MODE SYNC
+ORDER BY (account, hour)
+TTL hour + INTERVAL 90 DAYS
+AS SELECT account_id AS account, toStartOfHour(event_time) AS hour, count() AS n
+FROM orders
+GROUP BY account, hour;
+-- want --
+-- want-catalog --
+{
+  "format": 1,
+  "catalog": {
+    "views": [
+      {
+        "name": "account_hourly",
+        "versions": [
+          {
+            "number": 1,
+            "state": "current",
+            "mode": "sync",
+            "stream": "orders",
+            "array_join": null,
+            "where": null,
+            "keys": [
+              {"name": "account", "expr": {"op": "column", "type": "String", "name": "account_id"}},
+              {"name": "hour", "expr": {"op": "toStartOfHour", "type": "DateTime", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]}}
+            ],
+            "partition_key_len": 2,
+            "ttl": {"key": "hour", "plus": "90 DAY"},
+            "split": 1,
+            "aggregates": [
+              {"name": "n", "fn": "count", "type": "UInt64", "args": []}
+            ],
+            "storage_format": 1
+          }
+        ]
+      },
+      {
+        "name": "item_daily",
+        "versions": [
+          {
+            "number": 1,
+            "state": "current",
+            "mode": "async",
+            "stream": "orders",
+            "array_join": {"array": {"op": "column", "type": "Array(String)", "name": "items"}, "alias": "item"},
+            "where": {"op": "greaterOrEquals", "type": "Bool", "args": [
+              {"op": "toDate", "type": "Date", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]},
+              {"op": "literal", "type": "Date", "value": "2024-01-01"}
+            ]},
+            "keys": [
+              {"name": "account_id", "expr": {"op": "column", "type": "String", "name": "account_id"}},
+              {"name": "item", "expr": {"op": "column", "type": "String", "name": "item"}},
+              {"name": "day", "expr": {"op": "toDate", "type": "Date", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]}}
+            ],
+            "partition_key_len": 3,
+            "ttl": null,
+            "split": 4,
+            "aggregates": [
+              {"name": "best_region", "fn": "argMax", "type": "Nullable(String)", "args": [
+                {"op": "column", "type": "String", "name": "region"},
+                {"op": "column", "type": "Nullable(UInt16)", "name": "score"}
+              ]},
+              {"name": "median_qty", "fn": "quantile", "params": [0.5], "type": "Nullable(Float64)", "args": [
+                {"op": "column", "type": "Int32", "name": "qty"}
+              ]},
+              {"name": "min_score", "fn": "min", "type": "Nullable(UInt16)", "args": [
+                {"op": "column", "type": "Nullable(UInt16)", "name": "score"}
+              ]},
+              {"name": "p90_qty", "fn": "quantileDD", "params": [0.01, 0.9], "type": "Nullable(Float64)", "args": [
+                {"op": "column", "type": "Int32", "name": "qty"}
+              ]},
+              {"name": "revenue", "fn": "sum", "type": "Decimal(38, 2)", "args": [
+                {"op": "column", "type": "Decimal(10, 2)", "name": "price"}
+              ]},
+              {"name": "total_qty", "fn": "sum", "type": "Int64", "args": [
+                {"op": "column", "type": "Int32", "name": "qty"}
+              ], "cond": {"op": "notEquals", "type": "Bool", "args": [
+                {"op": "column", "type": "String", "name": "item"},
+                {"op": "literal", "type": "String", "value": ""}
+              ]}}
+            ],
+            "storage_format": 1
+          }
+        ]
+      }
+    ]
+  }
+}

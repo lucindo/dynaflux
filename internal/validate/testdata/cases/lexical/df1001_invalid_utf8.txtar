@@ -1,0 +1,13 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A file that isn't valid UTF-8 gets DF1001 at 1:1, with the offset of the bad byte,
+and no other diagnostic: the stream without PRIMARY KEY isn't checked.
+-- dynaflux/page_views.sql --
+-- visits to the café
+CREATE STREAM page_views (user_id String);
+-- want --
+dynaflux/page_views.sql:1:1: error DF1001
+-- want-text --
+dynaflux/page_views.sql:1:1: error DF1001: file is not valid UTF-8 (byte 20)
+  hint: save the file as UTF-8

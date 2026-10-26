@@ -1,0 +1,22 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+ARRAY JOIN needs an alias.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_tag_counts
+ORDER BY (page)
+AS SELECT page, count() AS tag_views
+FROM page_views
+ARRAY JOIN tags
+GROUP BY page;
+-- want --
+dynaflux/views.sql:5:1: error DF3201

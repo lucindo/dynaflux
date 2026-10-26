@@ -1,0 +1,23 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A stream with a limited log window and no archive gets a warning at the entry that
+turns archiving off.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+archive:
+  streams:
+    page_views:
+      enabled: false
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:6:16: warning DF6504

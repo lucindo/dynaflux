@@ -1,0 +1,17 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Nullable can't wrap an Array, a Nullable or a LowCardinality. The diagnostic points at
+the inner type.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    tags  Nullable(Array(String)),
+    label Nullable(LowCardinality(String)),
+    note  Nullable(Nullable(String))
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:20: error DF5006
+dynaflux/page_views.sql:4:20: error DF5006
+dynaflux/page_views.sql:5:20: error DF5006

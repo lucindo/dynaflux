@@ -1,0 +1,16 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+With store analytics, an archived stream's Firehose name allows 46 characters of
+stream name: 47 is over, and the diagnostic points at the name in the SQL file.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+-- dynaflux/streams.sql --
+CREATE STREAM page_views_of_a_stream_whose_name_is_long_abcde (user_id String)
+PRIMARY KEY (user_id);
+
+CREATE STREAM page_views_of_a_stream_whose_name_is_long_abcd (user_id String)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/streams.sql:1:15: error DF6110

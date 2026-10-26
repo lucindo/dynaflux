@@ -1,0 +1,27 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Contextual keywords work as names, and quoting doesn't change a name: "day" and day are
+the same column.
+-- dynaflux/events.sql --
+CREATE STREAM events (
+    `user_id` String,
+    "day"     Date,
+    mode      String,
+    order     String,
+    key       String,
+    ttl       UInt32,
+    split     UInt32,
+    shards    UInt32,
+    log       String,
+    stream    String,
+    x_1_      String
+)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW events_by_mode
+ORDER BY (mode, day)
+AS SELECT mode, "day", count() AS n
+FROM events
+GROUP BY mode, day;
+-- want --

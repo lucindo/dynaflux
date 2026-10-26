@@ -1,0 +1,19 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Regions are AWS region codes, in lowercase.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east, US-EAST-1]
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:2:11: error DF6103
+dynaflux.yaml:2:20: error DF6103

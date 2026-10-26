@@ -1,0 +1,24 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Types with the wrong number or kind of arguments. Array() is in its own stream, in case
+its empty argument list ends the statement.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page  String(10),
+    label Nullable(String, String),
+    price Decimal(10, 2, 3)
+)
+PRIMARY KEY (user_id);
+-- dynaflux/clicks.sql --
+CREATE STREAM clicks (
+    user_id String,
+    tags    Array()
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/clicks.sql:3:13: error DF5009
+dynaflux/page_views.sql:3:11: error DF5009
+dynaflux/page_views.sql:4:11: error DF5009
+dynaflux/page_views.sql:5:11: error DF5009

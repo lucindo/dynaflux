@@ -1,0 +1,24 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+An autoscaling min must be at most its max. The diagnostic points at min, which the
+message and hint name.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+defaults:
+  capacity: provisioned
+  autoscaling:
+    read: {min: 10, max: 5}
+    write: {min: 5, max: 100}
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:6:17: error DF6406

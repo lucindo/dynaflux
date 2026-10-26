@@ -1,0 +1,13 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A character that is no token, outside strings, quoted identifiers and comments, is
+DF1002.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String DEFAULT 'home' @
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:35: error DF1002

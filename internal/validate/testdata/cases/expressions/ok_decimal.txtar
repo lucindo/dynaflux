@@ -1,0 +1,26 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Decimal forms with no diagnostics: literals of 38 digits, float literals compared with
+a Decimal, and scaling by integers.
+-- dynaflux/orders.sql --
+CREATE STREAM orders (
+    account_id String,
+    order_id   UUID,
+    price      Decimal(10, 2),
+    rate       Decimal(38, 20)
+)
+PRIMARY KEY (account_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW account_totals
+ORDER BY (account_id)
+AS SELECT
+    account_id,
+    sum(price)          AS total,
+    sum(price * 11)     AS total_times_11,
+    max(rate + rate)    AS max_double_rate,
+    count()             AS order_count
+FROM orders
+WHERE 1e37 > price AND 1e-38 != price AND price >= 0.01
+GROUP BY account_id;
+-- want --

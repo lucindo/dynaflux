@@ -1,0 +1,21 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+tables keys name a stream or a view.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+tables:
+  page_view:
+    capacity: on_demand
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:4:3: error DF6407

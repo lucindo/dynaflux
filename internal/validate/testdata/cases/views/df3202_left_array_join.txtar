@@ -1,0 +1,25 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+LEFT ARRAY JOIN isn't in v1.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW tag_counts
+ORDER BY (tag)
+AS SELECT tag, count() AS views
+FROM page_views
+LEFT ARRAY JOIN tags AS tag
+GROUP BY tag;
+-- want --
+dynaflux/views.sql:5:1: error DF3202
+-- want-text --
+dynaflux/views.sql:5:1: error DF3202: tag_counts: LEFT ARRAY JOIN is not supported in v1
+  hint: use ARRAY JOIN, which skips events with empty arrays

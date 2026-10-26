@@ -1,0 +1,16 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+# and // comments are DF1005. The error ends the statement, so each stream is skipped.
+-- dynaflux/clicks.sql --
+CREATE STREAM clicks (
+    user_id String // who clicked
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_views.sql --
+# page views
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/clicks.sql:2:20: error DF1005
+dynaflux/page_views.sql:1:1: error DF1005

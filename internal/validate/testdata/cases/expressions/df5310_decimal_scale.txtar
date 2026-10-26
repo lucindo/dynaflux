@@ -1,0 +1,20 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Decimal(38, 20) times Decimal(38, 20) has scale 40, above its precision class of 38.
+-- dynaflux/orders.sql --
+CREATE STREAM orders (
+    account_id String,
+    order_id   UUID,
+    price      Decimal(10, 2),
+    rate       Decimal(38, 20)
+)
+PRIMARY KEY (account_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW account_rates
+ORDER BY (account_id)
+AS SELECT account_id, sum(rate * rate) AS rate_squares
+FROM orders
+GROUP BY account_id;
+-- want --
+dynaflux/views.sql:3:27: error DF5310

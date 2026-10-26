@@ -1,0 +1,15 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Key columns must be declared columns, in PRIMARY KEY and in DEDUP BY: implicit columns
+and unknown names are DF2103.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id, event_time);
+
+CREATE STREAM clicks (user_id String)
+PRIMARY KEY (user_id)
+DEDUP BY (click_id);
+-- want --
+dynaflux/streams.sql:2:23: error DF2103
+dynaflux/streams.sql:6:11: error DF2103

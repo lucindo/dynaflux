@@ -1,0 +1,11 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The same key twice on one statement is DF1205, at the second annotation.
+-- dynaflux/page_views.sql --
+-- go:type PageView
+-- go:type PageVisit
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:2:1: error DF1205

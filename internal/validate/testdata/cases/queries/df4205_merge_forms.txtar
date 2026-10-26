@@ -1,0 +1,70 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+-Merge needs a view column defined by the same function, with the same parameters except
+level (sql.md §7.4): sumMerge of a sumIf column (the hint names sumIfMerge), a
+quantileDDMerge with another rel_acc, a merge of a key, and any merge in a stream query,
+which has no states. -State has no place in a query either (DF5206).
+-- dynaflux/clicks.sql --
+CREATE STREAM clicks (
+    site String,
+    page String,
+    ms   UInt32
+)
+PRIMARY KEY (site);
+
+CREATE MATERIALIZED VIEW site_daily
+ORDER BY (site, day)
+PRIMARY KEY (site)
+AS SELECT
+    site,
+    toDate(event_time)    AS day,
+    sumIf(ms, page != '') AS page_ms,
+    quantileDD(0.01)(ms)  AS dd_ms
+FROM clicks
+GROUP BY site, day;
+
+-- name: PageTotal :one
+SELECT sumMerge(page_ms) AS total
+FROM site_daily
+WHERE site = {site:String};
+
+-- name: CoarseQuantile :one
+SELECT quantileDDMerge(0.02)(dd_ms) AS p50
+FROM site_daily
+WHERE site = {site:String};
+
+-- name: KeyMerge :one
+SELECT maxMerge(day) AS last_day
+FROM site_daily
+WHERE site = {site:String};
+
+-- name: StreamMerge :one
+SELECT sumMerge(ms) AS total
+FROM clicks
+WHERE site = {site:String};
+
+-- name: StreamState :one
+SELECT sumState(ms) AS total
+FROM clicks
+WHERE site = {site:String};
+-- want --
+dynaflux/clicks.sql:20:8: error DF4205
+dynaflux/clicks.sql:25:8: error DF4205
+dynaflux/clicks.sql:30:8: error DF4205
+dynaflux/clicks.sql:35:8: error DF4205
+dynaflux/clicks.sql:36:6: warning DF4501
+dynaflux/clicks.sql:40:8: error DF5206
+dynaflux/clicks.sql:41:6: warning DF4501
+-- want-text --
+dynaflux/clicks.sql:20:8: error DF4205: PageTotal: sumMerge(page_ms) needs a sum column of a view; page_ms is a sumIf column
+  hint: for a sumIf column, use sumIfMerge(page_ms)
+dynaflux/clicks.sql:25:8: error DF4205: CoarseQuantile: quantileDDMerge(dd_ms) needs a quantileDD column of a view; dd_ms is a quantileDD column with rel_acc 0.01
+dynaflux/clicks.sql:30:8: error DF4205: KeyMerge: maxMerge(day) needs a max column of a view; day is a key of site_daily
+dynaflux/clicks.sql:35:8: error DF4205: StreamMerge: sumMerge(ms) needs a sum column of a view; ms is a column of stream clicks
+dynaflux/clicks.sql:36:6: warning DF4501: StreamMerge: reads stream clicks, which keeps events for 2 DAY after ingestion (LOG RETENTION). Older events are only in the archive.
+  hint: query older events with Athena, or aggregate them in a view
+dynaflux/clicks.sql:40:8: error DF5206: StreamState: combinator -State is not supported
+  hint: use -If, or -Merge in a query over a view
+dynaflux/clicks.sql:41:6: warning DF4501: StreamState: reads stream clicks, which keeps events for 2 DAY after ingestion (LOG RETENTION). Older events are only in the archive.
+  hint: query older events with Athena, or aggregate them in a view

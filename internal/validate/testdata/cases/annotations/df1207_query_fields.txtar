@@ -1,0 +1,36 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The fields of a query's <Name>Params and <Name>Row types must be unique too: output
+columns views_1 and views1 both become the field Views1 of PageDaysRow, and parameters
+page_1 and page1 both become the field Page1 of PageDaysParams. Each diagnostic points at
+the later name.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toDate(event_time) AS day,
+    count()            AS views
+FROM page_views
+GROUP BY page, day;
+-- dynaflux/queries.sql --
+-- name: PageDays :many
+SELECT day, views AS views_1, views AS views1
+FROM page_daily
+WHERE page IN ({page_1:String}, {page1:String});
+-- want --
+dynaflux/queries.sql:2:40: error DF1207
+dynaflux/queries.sql:4:33: error DF1207
+-- want-text --
+dynaflux/queries.sql:2:40: error DF1207: PageDays: generated Go name Views1 for the field of column views1 of query PageDays collides with the field of column views_1 of query PageDays at dynaflux/queries.sql:2
+  hint: rename one of them, or set -- go:type on the stream
+dynaflux/queries.sql:4:33: error DF1207: PageDays: generated Go name Page1 for the field of parameter page1 of query PageDays collides with the field of parameter page_1 of query PageDays at dynaflux/queries.sql:4
+  hint: rename one of them, or set -- go:type on the stream

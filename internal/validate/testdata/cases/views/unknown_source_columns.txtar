@@ -1,0 +1,30 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+When FROM names no stream, or a stream whose statement has a syntax error, the view's
+columns can't be checked, so only the stream's error and DF3001 are reported.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String @,
+    page    String
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page)
+AS SELECT page, uniq(user_id) AS users, sum(no_such_column) AS total
+FROM page_views
+GROUP BY page;
+
+CREATE MATERIALIZED VIEW page_counts
+ORDER BY (page)
+AS SELECT page, sum(no_such_column) AS total
+FROM page_view
+GROUP BY page;
+-- want --
+dynaflux/page_views.sql:2:20: error DF1002
+dynaflux/views.sql:10:6: error DF3001
+-- want-text --
+dynaflux/page_views.sql:2:20: error DF1002: page_views: unexpected character @
+dynaflux/views.sql:10:6: error DF3001: page_counts: page_view is not a stream
+  hint: did you mean page_views?

@@ -1,0 +1,16 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A column reference in DEFAULT is DF2003. The message is about the DEFAULT, so it points
+there.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String DEFAULT user_id
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:20: error DF2003
+-- want-text --
+dynaflux/page_views.sql:3:20: error DF2003: page_views: DEFAULT must be a constant expression
+  hint: write the value, such as DEFAULT '' or DEFAULT 0

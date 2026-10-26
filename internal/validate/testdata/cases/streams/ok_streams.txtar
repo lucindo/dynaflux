@@ -1,0 +1,73 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Streams at the edges of the rules, with no diagnostics: every key type, LowCardinality
+keys, DEDUP BY, SHARDS 2 and 64, every LOG RETENTION bound with singular and plural
+units, and ACCEPT bounds equal to now().
+-- dynaflux/ledger.sql --
+CREATE STREAM ledger (
+    account   String,
+    seq       UInt64,
+    delta     Int32,
+    amount    Decimal(18, 2),
+    settled   Bool,
+    entry_id  UUID,
+    day       Date,
+    booked_at DateTime64(3),
+    note      LowCardinality(String)
+)
+PRIMARY KEY (account, seq, delta, amount, settled, entry_id, day, booked_at, note)
+DEDUP BY (entry_id, note)
+SHARDS 64
+LOG RETENTION 36525 DAYS
+ACCEPT event_time BETWEEN now() - INTERVAL 100 YEAR AND now();
+
+CREATE STREAM page_dedups (user_id String)
+PRIMARY KEY (user_id)
+SHARDS 2
+ACCEPT event_time <= now();
+
+CREATE STREAM clicks (user_id String)
+PRIMARY KEY user_id
+ACCEPT event_time BETWEEN now() AND now() + INTERVAL 5 MINUTES;
+-- dynaflux/retention.sql --
+CREATE STREAM keep_24_hours (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 24 HOUR;
+
+CREATE STREAM keep_36_hours (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 36 HOURS;
+
+CREATE STREAM keep_876600_hours (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 876600 HOURS;
+
+CREATE STREAM keep_1_day (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 1 DAY;
+
+CREATE STREAM keep_1_week (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 1 WEEK;
+
+CREATE STREAM keep_5217_weeks (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 5217 WEEKS;
+
+CREATE STREAM keep_1_month (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 1 MONTH;
+
+CREATE STREAM keep_1200_months (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 1200 MONTHS;
+
+CREATE STREAM keep_1_year (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 1 YEAR;
+
+CREATE STREAM keep_100_years (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 100 YEARS;
+-- want --

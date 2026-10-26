@@ -1,0 +1,70 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Every interval unit at its 100-year bound, singular and plural.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW ttl_years
+ORDER BY (page, day)
+TTL day + INTERVAL 100 YEAR
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_quarters
+ORDER BY (page, day)
+TTL day + INTERVAL 400 QUARTERS
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_months
+ORDER BY (page, day)
+TTL day + INTERVAL 1200 MONTH
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_weeks
+ORDER BY (page, day)
+TTL day + INTERVAL 5217 WEEKS
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_days
+ORDER BY (page, day)
+TTL day + INTERVAL 36525 DAY
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_hours
+ORDER BY (page, day)
+TTL day + INTERVAL 876600 HOURS
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_minutes
+ORDER BY (page, day)
+TTL day + INTERVAL 52596000 MINUTE
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_seconds
+ORDER BY (page, day)
+TTL day + INTERVAL 3155760000 SECONDS
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+-- want --

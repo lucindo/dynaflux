@@ -1,0 +1,22 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A UUID key must be in PRIMARY KEY. The diagnostic points at the SELECT item that defines
+the key.
+-- dynaflux/api_calls.sql --
+CREATE STREAM api_calls (
+    account_id String,
+    request_id UUID,
+    units      UInt32
+)
+PRIMARY KEY (account_id)
+DEDUP BY (request_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW request_units
+ORDER BY (account_id, request_id)
+PRIMARY KEY (account_id)
+AS SELECT account_id, request_id, sum(units) AS total_units
+FROM api_calls
+GROUP BY account_id, request_id;
+-- want --
+dynaflux/views.sql:4:23: error DF3106

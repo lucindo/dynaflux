@@ -1,0 +1,28 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Parameters appear only in named queries.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views
+FROM page_views
+WHERE page != {skip:String}
+GROUP BY page, day;
+-- want --
+dynaflux/page_daily.sql:9:15: error DF4403
+-- want-text --
+dynaflux/page_daily.sql:9:15: error DF4403: page_daily: parameters are only allowed in named queries

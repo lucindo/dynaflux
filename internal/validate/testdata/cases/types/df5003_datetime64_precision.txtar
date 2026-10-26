@@ -1,0 +1,14 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+DateTime64 needs precision 3 or 6, written out.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    at      DateTime64,
+    precise DateTime64(9)
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:13: error DF5003
+dynaflux/page_views.sql:4:13: error DF5003

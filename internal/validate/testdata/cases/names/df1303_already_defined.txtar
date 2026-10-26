@@ -1,0 +1,32 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Two views with one name, and a view and a stream with one name: streams and views share
+one namespace. Each diagnostic points at the later definition, by path.
+-- dynaflux/a.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+-- dynaflux/b.sql --
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page)
+AS SELECT page, uniq(user_id) AS visitors
+FROM page_views
+GROUP BY page;
+-- dynaflux/c.sql --
+CREATE MATERIALIZED VIEW clicks
+ORDER BY (page)
+AS SELECT page, count() AS n
+FROM page_views
+GROUP BY page;
+-- dynaflux/d.sql --
+CREATE STREAM clicks (user_id String)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/b.sql:1:26: error DF1303
+dynaflux/d.sql:1:15: error DF1303

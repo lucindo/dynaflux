@@ -1,0 +1,12 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A 54-character store and a one-character stream name fill the projector and Firehose
+names to exactly 64 characters.
+-- dynaflux.yaml --
+store: analytics-for-a-store-whose-name-is-fifty-five-long-xy
+regions: [us-east-1]
+-- dynaflux/e.sql --
+CREATE STREAM e (user_id String)
+PRIMARY KEY (user_id);
+-- want --

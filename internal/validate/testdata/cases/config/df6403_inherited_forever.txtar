@@ -1,0 +1,25 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A stream without LOG RETENTION inherits forever and gets a warning at the setting; the
+stream with its own LOG RETENTION isn't affected.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+defaults:
+  log_retention: forever
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/clicks.sql --
+CREATE STREAM clicks (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION 2 DAY;
+-- want --
+dynaflux.yaml:4:18: warning DF6403

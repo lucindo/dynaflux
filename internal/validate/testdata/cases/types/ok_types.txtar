@@ -1,0 +1,33 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Every type a column can have, with the letter-case rules: Date, DateTime64, Decimal and
+Bool match in any case.
+-- dynaflux/all_types.sql --
+CREATE STREAM all_types (
+    s    String,
+    u8   UInt8,
+    u16  UInt16,
+    u32  UInt32,
+    u64  UInt64,
+    i8   Int8,
+    i16  Int16,
+    i32  Int32,
+    i64  Int64,
+    f    Float64,
+    d1   Decimal(1),
+    d38  Decimal(38, 38),
+    dlow decimal(10, 2),
+    b    BOOL,
+    id   UUID,
+    day  date,
+    ms   DATETIME64(3),
+    us   DateTime64(6, 'UTC'),
+    lc   LowCardinality(String),
+    lcn  LowCardinality(Nullable(String)),
+    n    Nullable(Int64),
+    arr  Array(LowCardinality(String)),
+    nums Array(Decimal(10, 2))
+)
+PRIMARY KEY (s);
+-- want --

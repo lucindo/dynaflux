@@ -1,0 +1,27 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+MODE SYNC can't be used with ARRAY JOIN. The view groups by the stream's PRIMARY KEY, so
+DF3501 doesn't apply.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW user_tags
+MODE SYNC
+ORDER BY (user_id, tag)
+AS SELECT user_id, tag, count() AS views
+FROM page_views
+ARRAY JOIN tags AS tag
+GROUP BY user_id, tag;
+-- want --
+dynaflux/views.sql:2:1: error DF3303
+-- want-text --
+dynaflux/views.sql:2:1: error DF3303: user_tags: MODE SYNC can't be used with ARRAY JOIN
+  hint: use MODE ASYNC

@@ -1,0 +1,23 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+UUIDs can't be ordered, so max of a UUID is an error.
+-- dynaflux/orders.sql --
+CREATE STREAM orders (
+    account_id String,
+    order_id   UUID,
+    price      Decimal(10, 2),
+    rate       Decimal(38, 20)
+)
+PRIMARY KEY (account_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW account_orders
+ORDER BY (account_id)
+AS SELECT account_id, max(order_id) AS last_order
+FROM orders
+GROUP BY account_id;
+-- want --
+dynaflux/views.sql:3:23: error DF5311
+-- want-text --
+dynaflux/views.sql:3:23: error DF5311: account_orders: UUID values can't be ordered
+  hint: compare UUIDs with = or IN

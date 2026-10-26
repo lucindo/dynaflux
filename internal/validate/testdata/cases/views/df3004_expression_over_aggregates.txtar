@@ -1,0 +1,24 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A view's SELECT items are keys or single aggregate calls; expressions over aggregates
+belong in queries.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_spread
+ORDER BY (page)
+AS SELECT
+    page,
+    max(duration_ms) - min(duration_ms) AS spread_ms
+FROM page_views
+GROUP BY page;
+-- want --
+dynaflux/views.sql:5:5: error DF3004

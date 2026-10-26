@@ -1,0 +1,25 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+MODE SYNC can't be used with SPLIT.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW user_daily
+MODE SYNC
+ORDER BY (user_id, day)
+SPLIT 4
+AS SELECT user_id, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY user_id, day;
+-- want --
+dynaflux/views.sql:2:1: error DF3304
+-- want-text --
+dynaflux/views.sql:2:1: error DF3304: user_daily: MODE SYNC can't be used with SPLIT in v1

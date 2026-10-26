@@ -1,0 +1,22 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Hexadecimal, a trailing underscore, a point without a digit before it, and a float too
+large for Float64 are DF1008.
+-- dynaflux/numbers.sql --
+CREATE STREAM hex (user_id String, n UInt32 DEFAULT 0x1F)
+PRIMARY KEY (user_id);
+
+CREATE STREAM underscore (user_id String, n UInt32 DEFAULT 1_)
+PRIMARY KEY (user_id);
+
+CREATE STREAM point (user_id String, f Float64 DEFAULT .5)
+PRIMARY KEY (user_id);
+
+CREATE STREAM huge (user_id String, f Float64 DEFAULT 1e400)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/numbers.sql:1:53: error DF1008
+dynaflux/numbers.sql:4:60: error DF1008
+dynaflux/numbers.sql:7:56: error DF1008
+dynaflux/numbers.sql:10:55: error DF1008

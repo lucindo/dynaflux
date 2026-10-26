@@ -1,0 +1,22 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+An Array can't be a view key. The diagnostic points at the SELECT item that defines the
+key.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW tag_set_totals
+ORDER BY (tags)
+AS SELECT tags, count() AS views
+FROM page_views
+GROUP BY tags;
+-- want --
+dynaflux/views.sql:3:11: error DF3104

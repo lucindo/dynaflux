@@ -1,0 +1,16 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A string that isn't valid UTF-8 after its escapes are applied is DF1007, at the opening
+quote.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String DEFAULT 'caf\xe9'
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:28: error DF1007
+-- want-text --
+dynaflux/page_views.sql:3:28: error DF1007: page_views: string literal is not valid UTF-8
+  hint: check the \xHH escapes

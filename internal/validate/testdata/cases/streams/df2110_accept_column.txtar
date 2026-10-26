@@ -1,0 +1,13 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+ACCEPT must constrain event_time.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id)
+ACCEPT ingest_time <= now() + INTERVAL 5 MINUTE;
+-- want --
+dynaflux/page_views.sql:3:1: error DF2110
+-- want-text --
+dynaflux/page_views.sql:3:1: error DF2110: page_views: ACCEPT must constrain event_time
+  hint: ACCEPT event_time BETWEEN now() - INTERVAL 30 DAY AND now() + INTERVAL 5 MINUTE

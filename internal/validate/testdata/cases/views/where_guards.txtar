@@ -1,0 +1,38 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+WHERE runs before the keys and the aggregates, so its clicks != 0 guards the divisions in
+both (sql.md §5.6, §5.8), as does the -If condition for its aggregate's arguments. The
+one unguarded division gets DF5501.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    duration_ms UInt32,
+    clicks      UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_rates
+ORDER BY (page, bucket)
+AS SELECT
+    page,
+    intDiv(duration_ms, clicks)      AS bucket,
+    sum(intDiv(duration_ms, clicks)) AS rate_total
+FROM page_views
+WHERE clicks != 0
+GROUP BY page, bucket;
+
+CREATE MATERIALIZED VIEW page_guarded
+ORDER BY (page)
+AS SELECT
+    page,
+    sumIf(intDiv(duration_ms, clicks), clicks > 0) AS guarded_total,
+    sum(intDiv(duration_ms, clicks))               AS unguarded_total
+FROM page_views
+GROUP BY page;
+-- want --
+dynaflux/views.sql:16:9: warning DF5501
+-- want-text --
+dynaflux/views.sql:16:9: warning DF5501: page_guarded: division by clicks fails when it is 0
+  hint: if(clicks = 0, NULL, duration_ms / clicks), or if(clicks = 0, 0, intDiv(duration_ms, clicks))

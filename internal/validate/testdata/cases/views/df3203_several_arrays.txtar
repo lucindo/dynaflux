@@ -1,0 +1,23 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+ARRAY JOIN takes one array. The message names the clause, so it points at ARRAY.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id    String,
+    tags       Array(String),
+    categories Array(String)
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW tag_counts
+ORDER BY (tag)
+AS SELECT tag, count() AS views
+FROM page_views
+ARRAY JOIN tags AS tag, categories AS category
+GROUP BY tag;
+-- want --
+dynaflux/views.sql:5:1: error DF3203
+-- want-text --
+dynaflux/views.sql:5:1: error DF3203: tag_counts: ARRAY JOIN takes one array in v1
+  hint: use one view per array

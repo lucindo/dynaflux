@@ -1,0 +1,17 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A line break inside a string is DF1003, at the opening quote. For recovery the string
+ends at its line end, and the parser skips to the next ;. The next statement is
+checked: its missing PRIMARY KEY is reported.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String DEFAULT 'home
+)
+PRIMARY KEY (user_id);
+
+CREATE STREAM clicks (user_id String);
+-- want --
+dynaflux/page_views.sql:3:28: error DF1003
+dynaflux/page_views.sql:7:1: error DF2102

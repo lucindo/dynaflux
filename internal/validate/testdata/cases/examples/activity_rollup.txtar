@@ -1,0 +1,231 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The activity-rollup example of sql.md, verbatim: no diagnostics. WorkspaceSummary lists
+its aggregates in order of first appearance, as parameters are.
+-- dynaflux/activity.sql --
+CREATE STREAM member_events (
+    workspace_id String,
+    member_id    String,
+    action       LowCardinality(String),
+    duration_ms  UInt32
+)
+PRIMARY KEY (workspace_id, member_id);
+
+CREATE MATERIALIZED VIEW member_latest
+ORDER BY (workspace_id, member_id)
+PRIMARY KEY (workspace_id)
+AS SELECT
+    workspace_id,
+    member_id,
+    argMax(action, event_time) AS last_action,
+    max(event_time)            AS last_seen,
+    count()                    AS actions
+FROM member_events
+GROUP BY workspace_id, member_id;
+
+CREATE MATERIALIZED VIEW workspace_daily
+ORDER BY (workspace_id, day)
+PRIMARY KEY (workspace_id)
+TTL day + INTERVAL 400 DAY
+AS SELECT
+    workspace_id,
+    toDate(event_time)        AS day,
+    uniq(member_id)           AS active_members,
+    countIf(action = 'login') AS logins,
+    avg(duration_ms)          AS avg_duration_ms
+FROM member_events
+GROUP BY workspace_id, day;
+
+-- name: WorkspaceSummary :one
+SELECT
+    count()                                     AS members,
+    countIf(last_seen >= {since:DateTime64(6)}) AS recently_active,
+    countIf(last_action = 'logout')             AS logged_out
+FROM member_latest
+WHERE workspace_id = {workspace_id:String};
+
+-- name: WorkspaceActiveMembers :one
+SELECT uniqMerge(active_members) AS members
+FROM workspace_daily
+WHERE workspace_id = {workspace_id:String}
+  AND day BETWEEN {from:Date} AND {to:Date};
+-- want --
+-- want-catalog --
+{
+  "format": 1,
+  "catalog": {
+    "store": "analytics",
+    "regions": ["us-east-1", "us-west-2"],
+    "timeout_seconds": 60,
+    "streams": [
+      {
+        "name": "member_events",
+        "columns": [
+          {"name": "workspace_id", "type": "String"},
+          {"name": "member_id", "type": "String"},
+          {"name": "action", "type": "String"},
+          {"name": "duration_ms", "type": "UInt32"}
+        ],
+        "primary_key": ["workspace_id", "member_id"],
+        "dedup_by": [],
+        "log_retention": "2 DAY",
+        "accept": {"past": null, "future": "5 MINUTE"},
+        "shards": 1,
+        "archive": {"regions": ["us-east-1", "us-west-2"], "events": "all"},
+        "storage_format": 1
+      }
+    ],
+    "views": [
+      {
+        "name": "member_latest",
+        "versions": [
+          {
+            "number": 1,
+            "state": "current",
+            "mode": "async",
+            "stream": "member_events",
+            "array_join": null,
+            "where": null,
+            "keys": [
+              {"name": "workspace_id", "expr": {"op": "column", "type": "String", "name": "workspace_id"}},
+              {"name": "member_id", "expr": {"op": "column", "type": "String", "name": "member_id"}}
+            ],
+            "partition_key_len": 1,
+            "ttl": null,
+            "split": 1,
+            "aggregates": [
+              {"name": "actions", "fn": "count", "type": "UInt64", "args": []},
+              {"name": "last_action", "fn": "argMax", "type": "String", "args": [
+                {"op": "column", "type": "String", "name": "action"},
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]},
+              {"name": "last_seen", "fn": "max", "type": "DateTime64(6)", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]}
+            ],
+            "storage_format": 1
+          }
+        ]
+      },
+      {
+        "name": "workspace_daily",
+        "versions": [
+          {
+            "number": 1,
+            "state": "current",
+            "mode": "async",
+            "stream": "member_events",
+            "array_join": null,
+            "where": null,
+            "keys": [
+              {"name": "workspace_id", "expr": {"op": "column", "type": "String", "name": "workspace_id"}},
+              {"name": "day", "expr": {"op": "toDate", "type": "Date", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]}}
+            ],
+            "partition_key_len": 1,
+            "ttl": {"key": "day", "plus": "400 DAY"},
+            "split": 1,
+            "aggregates": [
+              {"name": "active_members", "fn": "uniq", "type": "UInt64", "cond": null, "args": [
+                {"op": "column", "type": "String", "name": "member_id"}
+              ]},
+              {"name": "avg_duration_ms", "fn": "avg", "type": "Nullable(Float64)", "cond": null, "args": [
+                {"op": "column", "type": "UInt32", "name": "duration_ms"}
+              ]},
+              {"name": "logins", "fn": "count", "type": "UInt64", "args": [], "cond":
+                {"op": "equals", "type": "Bool", "args": [
+                  {"op": "column", "type": "String", "name": "action"},
+                  {"op": "literal", "type": "String", "value": "login"}
+                ]}
+              }
+            ],
+            "storage_format": 1
+          }
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "name": "WorkspaceActiveMembers",
+        "cardinality": "one",
+        "expose_http": false,
+        "params": [
+          {"name": "workspace_id", "type": "String"},
+          {"name": "from", "type": "Date"},
+          {"name": "to", "type": "Date"}
+        ],
+        "source": {"kind": "view", "name": "workspace_daily"},
+        "keys": {
+          "partition": [
+            {"column": "workspace_id", "values": [{"op": "param", "type": "String", "name": "workspace_id"}]}
+          ],
+          "sort_prefix": [],
+          "range": {
+            "column": "day",
+            "lower": {"value": {"op": "param", "type": "Date", "name": "from"}, "inclusive": true},
+            "upper": {"value": {"op": "param", "type": "Date", "name": "to"}, "inclusive": true}
+          }
+        },
+        "filter": null,
+        "aggregation": {
+          "group_by": [],
+          "aggregates": [
+            {"fn": "uniq", "type": "UInt64", "merge": true, "cond": null, "args": [
+              {"op": "column", "type": "UInt64", "name": "active_members"}
+            ]}
+          ]
+        },
+        "columns": [
+          {"name": "members", "expr": {"op": "aggregate", "type": "UInt64", "index": 0}}
+        ],
+        "order_by": [],
+        "limit": null
+      },
+      {
+        "name": "WorkspaceSummary",
+        "cardinality": "one",
+        "expose_http": false,
+        "params": [
+          {"name": "since", "type": "DateTime64(6)"},
+          {"name": "workspace_id", "type": "String"}
+        ],
+        "source": {"kind": "view", "name": "member_latest"},
+        "keys": {
+          "partition": [
+            {"column": "workspace_id", "values": [{"op": "param", "type": "String", "name": "workspace_id"}]}
+          ],
+          "sort_prefix": [],
+          "range": null
+        },
+        "filter": null,
+        "aggregation": {
+          "group_by": [],
+          "aggregates": [
+            {"fn": "count", "type": "UInt64", "merge": false, "args": [], "cond": null},
+            {"fn": "count", "type": "UInt64", "merge": false, "args": [], "cond":
+              {"op": "greaterOrEquals", "type": "Bool", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "last_seen"},
+                {"op": "param", "type": "DateTime64(6)", "name": "since"}
+              ]}
+            },
+            {"fn": "count", "type": "UInt64", "merge": false, "args": [], "cond":
+              {"op": "equals", "type": "Bool", "args": [
+                {"op": "column", "type": "String", "name": "last_action"},
+                {"op": "literal", "type": "String", "value": "logout"}
+              ]}
+            }
+          ]
+        },
+        "columns": [
+          {"name": "members", "expr": {"op": "aggregate", "type": "UInt64", "index": 0}},
+          {"name": "recently_active", "expr": {"op": "aggregate", "type": "UInt64", "index": 1}},
+          {"name": "logged_out", "expr": {"op": "aggregate", "type": "UInt64", "index": 2}}
+        ],
+        "order_by": [],
+        "limit": null
+      }
+    ]
+  }
+}

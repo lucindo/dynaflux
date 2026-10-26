@@ -1,0 +1,15 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A DEFAULT must fit the column type exactly: 256 isn't a UInt8, and 1.234 has more
+fractional digits than Decimal(5, 2) holds.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    hops    UInt8 DEFAULT 256,
+    price   Decimal(5, 2) DEFAULT 1.234
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:19: error DF2004
+dynaflux/page_views.sql:4:27: error DF2004

@@ -1,0 +1,256 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The compiled form of four queries, worked out from sql.md §10:
+- HourRange: an alias stands for its column, so s = binds the partition key site; = on day
+  extends the sort prefix; two bounds on hour make the range; the term on clicks is the
+  residual filter; ORDER BY a source column is followed by the view key as tie-breaker.
+- MonthlyClicks: a GROUP BY alias groups by its expression, which Columns and ORDER BY see
+  by name; aggregates are numbered in order of appearance, -IfMerge merges a sumIf column,
+  quantileMerge may change the level, and an expression over an aggregate is an output.
+- ClickAt: event_time = v reads the one instant v, IS NOT NULL is residual, and LIMIT 1
+  allows :one.
+- PageClicks: page = v fixes the only GROUP BY key, so :one is allowed although page isn't
+  a key of the stream.
+The stream queries get DF4501.
+-- dynaflux/clicks.sql --
+CREATE STREAM clicks (
+    site     String,
+    page     String,
+    referrer Nullable(String),
+    ms       UInt32
+)
+PRIMARY KEY (site);
+-- dynaflux/site_hourly.sql --
+CREATE MATERIALIZED VIEW site_hourly
+ORDER BY (site, day, hour)
+PRIMARY KEY (site)
+AS SELECT
+    site,
+    toDate(event_time)        AS day,
+    toStartOfHour(event_time) AS hour,
+    count()                   AS clicks,
+    sumIf(ms, page != '')     AS page_ms,
+    quantile(0.9)(ms)         AS p90_ms
+FROM clicks
+GROUP BY site, day, hour;
+-- dynaflux/queries.sql --
+-- name: HourRange :many
+SELECT site AS s, hour, clicks
+FROM site_hourly
+WHERE s = {site:String}
+  AND day = {day:Date}
+  AND hour > {after:DateTime64(6)}
+  AND hour <= {until:DateTime64(6)}
+  AND clicks >= 10
+ORDER BY page_ms DESC NULLS FIRST
+LIMIT 5;
+
+-- name: MonthlyClicks :many
+SELECT
+    toStartOfMonth(day)                   AS month,
+    sum(clicks)                           AS total,
+    sumIfMerge(page_ms)                   AS ms,
+    quantileMerge(0.5)(p90_ms)            AS median_p90,
+    if(sum(clicks) > 1000, 'hot', 'cold') AS heat
+FROM site_hourly
+WHERE site = {site:String}
+GROUP BY month
+ORDER BY month DESC;
+
+-- name: ClickAt :one
+SELECT page, referrer
+FROM clicks
+WHERE site = {site:String}
+  AND event_time = {at:DateTime64(6)}
+  AND referrer IS NOT NULL
+LIMIT 1;
+
+-- name: PageClicks :one
+SELECT page, count() AS n
+FROM clicks
+WHERE site = {site:String}
+  AND page = {page:String}
+GROUP BY page;
+-- want --
+dynaflux/queries.sql:26:6: warning DF4501
+dynaflux/queries.sql:34:6: warning DF4501
+-- want-text --
+dynaflux/queries.sql:26:6: warning DF4501: ClickAt: reads stream clicks, which keeps events for 2 DAY after ingestion (LOG RETENTION). Older events are only in the archive.
+  hint: query older events with Athena, or aggregate them in a view
+dynaflux/queries.sql:34:6: warning DF4501: PageClicks: reads stream clicks, which keeps events for 2 DAY after ingestion (LOG RETENTION). Older events are only in the archive.
+  hint: query older events with Athena, or aggregate them in a view
+-- want-catalog --
+{
+  "catalog": {
+    "queries": [
+      {
+        "name": "ClickAt",
+        "cardinality": "one",
+        "params": [
+          {"name": "site", "type": "String"},
+          {"name": "at", "type": "DateTime64(6)"}
+        ],
+        "source": {"kind": "stream", "name": "clicks"},
+        "keys": {
+          "partition": [
+            {"column": "site", "values": [{"op": "param", "type": "String", "name": "site"}]}
+          ],
+          "sort_prefix": [],
+          "range": {
+            "column": "event_time",
+            "lower": {"value": {"op": "param", "type": "DateTime64(6)", "name": "at"}, "inclusive": true},
+            "upper": {"value": {"op": "param", "type": "DateTime64(6)", "name": "at"}, "inclusive": true}
+          }
+        },
+        "filter": {"op": "not", "type": "Bool", "args": [
+          {"op": "isNull", "type": "Bool", "args": [
+            {"op": "column", "type": "Nullable(String)", "name": "referrer"}
+          ]}
+        ]},
+        "aggregation": null,
+        "columns": [
+          {"name": "page", "expr": {"op": "column", "type": "String", "name": "page"}},
+          {"name": "referrer", "expr": {"op": "column", "type": "Nullable(String)", "name": "referrer"}}
+        ],
+        "order_by": [
+          {"expr": {"op": "column", "type": "DateTime64(6)", "name": "event_time"}},
+          {"expr": {"op": "column", "type": "String", "name": "event_id"}}
+        ],
+        "limit": {"op": "literal", "type": "UInt8", "value": "1"}
+      },
+      {
+        "name": "HourRange",
+        "cardinality": "many",
+        "params": [
+          {"name": "site", "type": "String"},
+          {"name": "day", "type": "Date"},
+          {"name": "after", "type": "DateTime64(6)"},
+          {"name": "until", "type": "DateTime64(6)"}
+        ],
+        "source": {"kind": "view", "name": "site_hourly"},
+        "keys": {
+          "partition": [
+            {"column": "site", "values": [{"op": "param", "type": "String", "name": "site"}]}
+          ],
+          "sort_prefix": [
+            {"column": "day", "values": [{"op": "param", "type": "Date", "name": "day"}]}
+          ],
+          "range": {
+            "column": "hour",
+            "lower": {"value": {"op": "param", "type": "DateTime64(6)", "name": "after"}, "inclusive": false},
+            "upper": {"value": {"op": "param", "type": "DateTime64(6)", "name": "until"}, "inclusive": true}
+          }
+        },
+        "filter": {"op": "greaterOrEquals", "type": "Bool", "args": [
+          {"op": "column", "type": "UInt64", "name": "clicks"},
+          {"op": "literal", "type": "UInt8", "value": "10"}
+        ]},
+        "aggregation": null,
+        "columns": [
+          {"name": "s", "expr": {"op": "column", "type": "String", "name": "site"}},
+          {"name": "hour", "expr": {"op": "column", "type": "DateTime", "name": "hour"}},
+          {"name": "clicks", "expr": {"op": "column", "type": "UInt64", "name": "clicks"}}
+        ],
+        "order_by": [
+          {"expr": {"op": "column", "type": "UInt64", "name": "page_ms"}, "desc": true, "nulls_first": true},
+          {"expr": {"op": "column", "type": "String", "name": "site"}},
+          {"expr": {"op": "column", "type": "Date", "name": "day"}},
+          {"expr": {"op": "column", "type": "DateTime", "name": "hour"}}
+        ],
+        "limit": {"op": "literal", "type": "UInt8", "value": "5"}
+      },
+      {
+        "name": "MonthlyClicks",
+        "cardinality": "many",
+        "params": [
+          {"name": "site", "type": "String"}
+        ],
+        "source": {"kind": "view", "name": "site_hourly"},
+        "keys": {
+          "partition": [
+            {"column": "site", "values": [{"op": "param", "type": "String", "name": "site"}]}
+          ],
+          "sort_prefix": [],
+          "range": null
+        },
+        "filter": null,
+        "aggregation": {
+          "group_by": [
+            {"name": "month", "expr": {"op": "toStartOfMonth", "type": "Date", "args": [
+              {"op": "column", "type": "Date", "name": "day"}
+            ]}}
+          ],
+          "aggregates": [
+            {"fn": "sum", "type": "UInt64", "merge": false, "args": [
+              {"op": "column", "type": "UInt64", "name": "clicks"}
+            ]},
+            {"fn": "sum", "type": "UInt64", "merge": true, "args": [
+              {"op": "column", "type": "UInt64", "name": "page_ms"}
+            ]},
+            {"fn": "quantile", "params": [0.5], "type": "Nullable(Float64)", "merge": true, "args": [
+              {"op": "column", "type": "Nullable(Float64)", "name": "p90_ms"}
+            ]},
+            {"fn": "sum", "type": "UInt64", "merge": false, "args": [
+              {"op": "column", "type": "UInt64", "name": "clicks"}
+            ]}
+          ]
+        },
+        "columns": [
+          {"name": "month", "expr": {"op": "column", "type": "Date", "name": "month"}},
+          {"name": "total", "expr": {"op": "aggregate", "type": "UInt64", "index": 0}},
+          {"name": "ms", "expr": {"op": "aggregate", "type": "UInt64", "index": 1}},
+          {"name": "median_p90", "expr": {"op": "aggregate", "type": "Nullable(Float64)", "index": 2}},
+          {"name": "heat", "expr": {"op": "if", "type": "String", "args": [
+            {"op": "greater", "type": "Bool", "args": [
+              {"op": "aggregate", "type": "UInt64", "index": 3},
+              {"op": "literal", "type": "UInt16", "value": "1000"}
+            ]},
+            {"op": "literal", "type": "String", "value": "hot"},
+            {"op": "literal", "type": "String", "value": "cold"}
+          ]}}
+        ],
+        "order_by": [
+          {"expr": {"op": "column", "type": "Date", "name": "month"}, "desc": true}
+        ],
+        "limit": null
+      },
+      {
+        "name": "PageClicks",
+        "cardinality": "one",
+        "params": [
+          {"name": "site", "type": "String"},
+          {"name": "page", "type": "String"}
+        ],
+        "source": {"kind": "stream", "name": "clicks"},
+        "keys": {
+          "partition": [
+            {"column": "site", "values": [{"op": "param", "type": "String", "name": "site"}]}
+          ],
+          "sort_prefix": [],
+          "range": null
+        },
+        "filter": {"op": "equals", "type": "Bool", "args": [
+          {"op": "column", "type": "String", "name": "page"},
+          {"op": "param", "type": "String", "name": "page"}
+        ]},
+        "aggregation": {
+          "group_by": [
+            {"name": "page", "expr": {"op": "column", "type": "String", "name": "page"}}
+          ],
+          "aggregates": [
+            {"fn": "count", "type": "UInt64", "merge": false, "args": []}
+          ]
+        },
+        "columns": [
+          {"name": "page", "expr": {"op": "column", "type": "String", "name": "page"}},
+          {"name": "n", "expr": {"op": "aggregate", "type": "UInt64", "index": 0}}
+        ],
+        "order_by": [
+          {"expr": {"op": "column", "type": "String", "name": "page"}}
+        ],
+        "limit": null
+      }
+    ]
+  }
+}

@@ -1,0 +1,43 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+LIMIT is a whole number of at least 1, or an unsigned integer parameter.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux/queries.sql --
+-- name: NoDays :many
+SELECT day, views
+FROM page_daily
+WHERE page = {page:String}
+LIMIT 0;
+
+-- name: SignedLimit :many
+SELECT day, views
+FROM page_daily
+WHERE page = {page:String}
+LIMIT {n:Int32};
+-- want --
+dynaflux/queries.sql:5:1: error DF4303
+dynaflux/queries.sql:11:1: error DF4303
+-- want-text --
+dynaflux/queries.sql:5:1: error DF4303: NoDays: LIMIT must be a whole number of at least 1, or an unsigned integer parameter
+dynaflux/queries.sql:11:1: error DF4303: SignedLimit: LIMIT must be a whole number of at least 1, or an unsigned integer parameter

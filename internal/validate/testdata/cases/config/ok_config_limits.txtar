@@ -1,0 +1,48 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Config values at the edges of their rules, with no diagnostics.
+-- dynaflux.yaml --
+store: analytics
+prefix: staging-
+regions: [us-east-1, ap-northeast-1]
+sql: ["./dynaflux/**/*.sql"]
+go:
+  package: flux2
+  out: internal/gen/flux
+runtime:
+  out: cmd/runtime
+  arch: x86_64
+  timeout_seconds: 900
+  memory_mb: 10240
+  batching_window_seconds: 0
+  split: stream
+infra:
+  out: deploy/infra
+defaults:
+  capacity: provisioned
+  autoscaling:
+    read: {min: 1, max: 1, target_percent: 20}
+    write: {min: 1, max: 40000, target_percent: 90}
+  view_mode: async
+  log_retention: 24h
+tables:
+  page_views:
+    capacity: on_demand
+archive:
+  catalog: s3tables
+  regions: [us-east-1]
+  events: all
+http:
+  frontend: rest_api
+  auth: cognito
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --

@@ -1,0 +1,29 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+ClickHouse types that aren't in v1, including SQL aliases and DateTime as a declared
+type.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    score   Float32,
+    seen_at DateTime,
+    born_on Date32,
+    big     Int128,
+    price   Decimal64(2),
+    code    FixedString(2),
+    attrs   Map(String, String),
+    ip      IPv4,
+    name    VARCHAR
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:13: error DF5002
+dynaflux/page_views.sql:4:13: error DF5002
+dynaflux/page_views.sql:5:13: error DF5002
+dynaflux/page_views.sql:6:13: error DF5002
+dynaflux/page_views.sql:7:13: error DF5002
+dynaflux/page_views.sql:8:13: error DF5002
+dynaflux/page_views.sql:9:13: error DF5002
+dynaflux/page_views.sql:10:13: error DF5002
+dynaflux/page_views.sql:11:13: error DF5002

@@ -1,0 +1,24 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Aggregates can't appear in WHERE.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_stats
+ORDER BY (page)
+AS SELECT
+    page,
+    count() AS views
+FROM page_views
+WHERE max(duration_ms) > 0
+GROUP BY page;
+-- want --
+dynaflux/views.sql:7:7: error DF5204

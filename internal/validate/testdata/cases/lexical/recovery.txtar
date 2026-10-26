@@ -1,0 +1,46 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Recovery across statements. The lexical error ends the stream statement, and the skip to
+the next ; passes over the ; in the string and the one in the comment. page_views still
+counts as defined, so the view that reads it and the tables entry that names it add no
+errors. Checks still run on the query with an annotation error.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+tables:
+  page_views: {capacity: on_demand}
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String @ DEFAULT 'a;b' /* ; */
+)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+-- dynaflux/clicks.sql --
+CREATE STREAM clicks (
+    user_id String,
+    target  String
+)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW click_totals
+ORDER BY (target)
+AS SELECT target, count() AS views
+FROM clicks
+GROUP BY target;
+
+-- name: ClickTotals :many
+-- expose: grpc
+SELECT target, veiws
+FROM click_totals
+WHERE target = {target:String};
+-- want --
+dynaflux/clicks.sql:14:1: error DF1202
+dynaflux/clicks.sql:15:16: error DF5101
+dynaflux/page_views.sql:3:20: error DF1002

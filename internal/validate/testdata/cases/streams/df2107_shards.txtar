@@ -1,0 +1,20 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+SHARDS is from 2 to 64.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id)
+SHARDS 1;
+
+CREATE STREAM clicks (user_id String)
+PRIMARY KEY (user_id)
+SHARDS 65;
+-- want --
+dynaflux/streams.sql:3:1: error DF2107
+dynaflux/streams.sql:7:1: error DF2107
+-- want-text --
+dynaflux/streams.sql:3:1: error DF2107: page_views: SHARDS must be between 2 and 64
+  hint: omit SHARDS for one shard
+dynaflux/streams.sql:7:1: error DF2107: clicks: SHARDS must be between 2 and 64
+  hint: omit SHARDS for one shard

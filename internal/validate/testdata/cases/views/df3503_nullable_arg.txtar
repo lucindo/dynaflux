@@ -1,0 +1,24 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+argMax with a Nullable arg gets a warning; with coalesce as a sentinel it doesn't.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW user_latest
+ORDER BY (user_id)
+AS SELECT
+    user_id,
+    argMax(referrer, event_time) AS last_referrer,
+    argMax(coalesce(referrer, ''), event_time) AS last_referrer_or_empty
+FROM page_views
+GROUP BY user_id;
+-- want --
+dynaflux/views.sql:5:5: warning DF3503

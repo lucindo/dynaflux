@@ -1,0 +1,14 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+One more than the largest UInt64, and one less than the smallest Int64, are DF1009. The
+negative literal starts at its minus sign.
+-- dynaflux/numbers.sql --
+CREATE STREAM too_big (user_id String, n UInt64 DEFAULT 18446744073709551616)
+PRIMARY KEY (user_id);
+
+CREATE STREAM too_small (user_id String, n Int64 DEFAULT -9223372036854775809)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/numbers.sql:1:57: error DF1009
+dynaflux/numbers.sql:4:58: error DF1009

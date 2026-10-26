@@ -1,0 +1,26 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+countDistinct and DISTINCT inside an aggregate are DF5207. The second diagnostic points
+at DISTINCT.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_stats
+ORDER BY (page)
+AS SELECT
+    page,
+    countDistinct(user_id) AS users,
+    sum(DISTINCT duration_ms) AS distinct_ms
+FROM page_views
+GROUP BY page;
+-- want --
+dynaflux/views.sql:5:5: error DF5207
+dynaflux/views.sql:6:9: error DF5207

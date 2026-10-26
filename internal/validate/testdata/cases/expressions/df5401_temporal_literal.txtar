@@ -1,0 +1,48 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Strings compared with temporal values are parsed strictly: no impossible dates, no
+missing zeros, and no fraction for a DateTime.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux/queries.sql --
+-- name: SinceImpossible :many
+SELECT day, views
+FROM page_daily
+WHERE page = {page:String}
+  AND '2024-02-30' <= day;
+
+-- name: SinceUnpadded :many
+SELECT day, views
+FROM page_daily
+WHERE page = {page:String}
+  AND '2024-1-1' <= day;
+
+-- name: SinceFraction :many
+SELECT day, views
+FROM page_daily
+WHERE page = {page:String}
+  AND '2024-05-31 10:00:00.5' <= day;
+-- want --
+dynaflux/queries.sql:5:7: error DF5401
+dynaflux/queries.sql:11:7: error DF5401
+dynaflux/queries.sql:17:7: error DF5401

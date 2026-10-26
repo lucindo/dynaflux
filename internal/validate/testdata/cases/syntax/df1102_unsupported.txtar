@@ -1,0 +1,46 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Each statement uses one feature of the unsupported-SQL table, and gets DF1102 at the
+feature's first token. A syntax error skips the rest of the statement, so the other
+statements are still parsed.
+-- dynaflux/queries.sql --
+-- name: BusyPages :many
+SELECT page, sum(views) AS total
+FROM page_daily
+WHERE page IN {pages:Array(String)}
+GROUP BY page
+HAVING total > 10;
+
+-- name: PageKinds :many
+SELECT page, CASE WHEN views > 10 THEN 'busy' ELSE 'quiet' END AS kind
+FROM page_daily
+WHERE page = {page:String};
+
+-- name: HomePages :many
+SELECT day, views
+FROM page_daily
+WHERE page = {page:String} AND page LIKE '/home%';
+
+-- name: PageLabels :many
+SELECT page || '!' AS label
+FROM page_daily
+WHERE page = {page:String};
+
+-- name: PageRest :many
+SELECT day, views
+FROM page_daily
+WHERE page = {page:String}
+LIMIT 10 OFFSET 20;
+
+WITH '/home' AS home
+SELECT day, views
+FROM page_daily
+WHERE page = home;
+-- want --
+dynaflux/queries.sql:6:1: error DF1102
+dynaflux/queries.sql:9:14: error DF1102
+dynaflux/queries.sql:16:37: error DF1102
+dynaflux/queries.sql:19:13: error DF1102
+dynaflux/queries.sql:27:10: error DF1102
+dynaflux/queries.sql:29:1: error DF1102

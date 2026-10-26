@@ -1,0 +1,20 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+With archiving off for the store, the warning points at the stream's name. A stream
+that keeps its events forever loses none and gets DF2501 instead.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+archive:
+  enabled: false
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id);
+
+CREATE STREAM audit_events (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION FOREVER;
+-- want --
+dynaflux/streams.sql:1:15: warning DF6504
+dynaflux/streams.sql:6:1: warning DF2501

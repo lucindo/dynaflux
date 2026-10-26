@@ -1,0 +1,21 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A missing required key points at the mapping that should hold it; a null tables entry
+points at its key.
+-- dynaflux.yaml --
+regions: [us-east-1, us-west-2]
+tables:
+  page_views:
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:1:1: error DF6008
+dynaflux.yaml:3:3: error DF6008

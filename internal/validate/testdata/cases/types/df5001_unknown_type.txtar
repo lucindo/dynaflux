@@ -1,0 +1,12 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Type names such as String are case-sensitive, so string is an unknown type.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page string
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:10: error DF5001

@@ -1,0 +1,32 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Temporal values don't take part in arithmetic.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux/queries.sql --
+-- name: NextDays :many
+SELECT day + 1 AS next_day
+FROM page_daily
+WHERE page = {page:String};
+-- want --
+dynaflux/queries.sql:2:8: error DF5312

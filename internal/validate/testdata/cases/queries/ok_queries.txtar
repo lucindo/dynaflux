@@ -1,0 +1,124 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Queries at the edges of the rules, with no diagnostics: every form of :one, exactly 100
+key combinations (a repeated value counts once), residual filters, ORDER BY a source
+column, NULLS FIRST, LIMIT parameters, -Merge over each kind of column, plain aggregates
+over finalized values, function names in any letter case, and divisions that a guard
+keeps from warning.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms,
+    uniq(user_id)              AS approx_visitors,
+    avg(duration_ms)           AS avg_ms,
+    quantile(0.9)(duration_ms) AS p90_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux/queries.sql --
+-- name: PageDays :many
+SELECT day, views, visitors
+FROM page_daily
+WHERE page = {page:String}
+  AND day BETWEEN {from:Date} AND {to:Date}
+ORDER BY day DESC NULLS FIRST;
+
+-- name: PageDay :one
+SELECT views
+FROM page_daily
+WHERE page = {page:String}
+  AND day = {day:DateTime64(6)};
+
+-- name: PageTotal :one
+SELECT SUM(views) AS total, COUNT() AS days
+FROM page_daily
+WHERE page = {page:String};
+
+-- name: PageLatest :one
+SELECT day, views
+FROM page_daily
+WHERE page = {page:String}
+ORDER BY day DESC
+LIMIT 1;
+
+-- name: PageGrouped :one
+SELECT page, sum(views) AS total
+FROM page_daily
+WHERE page = {page:String}
+GROUP BY page;
+
+-- name: PagesAtLimit :many
+SELECT page, day, views
+FROM page_daily
+WHERE page IN ('/a', '/b', '/c', '/d', '/e', '/f', '/g', '/h', '/i', '/j')
+  AND day IN ('2024-05-01', '2024-05-02', '2024-05-03', '2024-05-04', '2024-05-05', '2024-05-06', '2024-05-07', '2024-05-08', '2024-05-09', '2024-05-10');
+
+-- name: PagesRepeated :many
+SELECT page, day, views
+FROM page_daily
+WHERE page IN ('/a', '/b', '/c', '/d', '/e', '/f', '/g', '/h', '/i', '/j', '/a')
+  AND day IN ('2024-05-01', '2024-05-02', '2024-05-03', '2024-05-04', '2024-05-05', '2024-05-06', '2024-05-07', '2024-05-08', '2024-05-09', '2024-05-10');
+
+-- name: TopPages :many
+SELECT page, views
+FROM page_daily
+WHERE page IN {pages:Array(String)}
+  AND views > 10
+  AND day NOT IN ('2024-12-25')
+ORDER BY total_ms DESC
+LIMIT {n:UInt32};
+
+-- name: PageMerges :many
+SELECT
+    page,
+    sum(visitors)              AS visitor_days,
+    uniqMerge(approx_visitors) AS approx_unique,
+    avgMerge(avg_ms)           AS mean_ms,
+    quantileMerge(0.5)(p90_ms) AS median_of_p90,
+    countMerge(views)          AS total_views,
+    sumMerge(total_ms)         AS all_ms
+FROM page_daily
+WHERE page IN {pages:Array(String)}
+GROUP BY page;
+
+-- name: PageRatios :many
+SELECT
+    day,
+    if(views = 0, NULL, total_ms / views)      AS ms_per_view,
+    if(views > 0, total_ms / views, 0)         AS ms_per_view_or_zero,
+    multiIf(views != 0, total_ms / views, -1)  AS ms_per_view_or_minus_one
+FROM page_daily
+WHERE page = {page:String};
+
+-- name: SlowDays :many
+SELECT day, total_ms / views AS ms_per_view
+FROM page_daily
+WHERE page = {page:String}
+  AND views != 0;
+
+-- name: SlowDaysGuarded :many
+SELECT day
+FROM page_daily
+WHERE page = {page:String}
+  AND (0 < views AND total_ms / views > 1000);
+
+-- name: RatioSum :one
+SELECT sumIf(total_ms / views, views > 0) AS ratio_sum
+FROM page_daily
+WHERE page = {page:String};
+-- want --

@@ -1,0 +1,18 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The event type of stream clients is Client, which the generated package already
+declares, and columns user_id and user_i_d both become the field UserID of event type
+Visit. The second diagnostic points at the later column.
+-- dynaflux/streams.sql --
+CREATE STREAM clients (account_id String)
+PRIMARY KEY (account_id);
+
+CREATE STREAM visits (
+    user_id  String,
+    user_i_d String
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/streams.sql:1:15: error DF1207
+dynaflux/streams.sql:6:5: error DF1207

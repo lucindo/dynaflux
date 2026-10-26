@@ -1,0 +1,94 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+An interval is a positive whole number and a unit written in full, at most 100 years.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW ttl_abbreviation
+ORDER BY (page, day)
+TTL day + INTERVAL 1 M
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_fraction
+ORDER BY (page, day)
+TTL day + INTERVAL 1.5 DAY
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_negative
+ORDER BY (page, day)
+TTL day + INTERVAL -1 DAY
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_zero
+ORDER BY (page, day)
+TTL day + INTERVAL 0 DAY
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_string
+ORDER BY (page, day)
+TTL day + INTERVAL '2 days'
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_range
+ORDER BY (page, day)
+TTL day + INTERVAL 1 DAY TO HOUR
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_years
+ORDER BY (page, day)
+TTL day + INTERVAL 101 YEAR
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_quarters
+ORDER BY (page, day)
+TTL day + INTERVAL 401 QUARTER
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_weeks
+ORDER BY (page, day)
+TTL day + INTERVAL 5218 WEEK
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW ttl_seconds
+ORDER BY (page, day)
+TTL day + INTERVAL 3155760001 SECOND
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+-- want --
+dynaflux/views.sql:3:11: error DF5404
+dynaflux/views.sql:10:11: error DF5404
+dynaflux/views.sql:17:11: error DF5404
+dynaflux/views.sql:24:11: error DF5404
+dynaflux/views.sql:31:11: error DF5404
+dynaflux/views.sql:38:11: error DF5404
+dynaflux/views.sql:45:11: error DF5404
+dynaflux/views.sql:52:11: error DF5404
+dynaflux/views.sql:59:11: error DF5404
+dynaflux/views.sql:66:11: error DF5404

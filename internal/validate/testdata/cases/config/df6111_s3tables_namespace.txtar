@@ -1,0 +1,20 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+S3 Tables reserves namespaces that start with aws.
+-- dynaflux.yaml --
+store: aws-events
+regions: [us-east-1]
+archive:
+  catalog: s3tables
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:1:8: error DF6111

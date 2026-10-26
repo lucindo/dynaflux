@@ -1,0 +1,12 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A backslash sequence outside the escape list is DF1006, at the backslash.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String DEFAULT 'a\qb'
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:30: error DF1006

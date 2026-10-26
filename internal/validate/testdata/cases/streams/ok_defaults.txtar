@@ -1,0 +1,26 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+DEFAULT values that fit exactly, at the edges of their types, with no diagnostics.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id  String,
+    tiny     UInt8 DEFAULT 255,
+    neg      Int8 DEFAULT -128,
+    price    Decimal(5, 2) DEFAULT 999.99,
+    whole    Decimal(10) DEFAULT 1234567890,
+    ratio    Float64 DEFAULT 1e6,
+    label    String DEFAULT '',
+    day      Date DEFAULT '2024-05-31',
+    at       DateTime64(3) DEFAULT '2024-05-31 13:45:00.250',
+    since    DateTime64(6, 'UTC') DEFAULT '2024-05-31',
+    request  UUID DEFAULT '61F0C404-5CB3-11E7-907B-A6006AD3DBA0',
+    flag     Bool DEFAULT false,
+    tags     Array(String) DEFAULT [],
+    langs    Array(LowCardinality(String)) DEFAULT ['en', 'pt'],
+    referrer Nullable(String) DEFAULT NULL,
+    total    UInt32 DEFAULT 1 + 2,
+    first    Date DEFAULT toDate('2024-01-01')
+)
+PRIMARY KEY (user_id);
+-- want --

@@ -1,0 +1,14 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A Nullable column's DEFAULT can only be NULL. The message names the column first, so it
+points at the column.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id  String,
+    referrer Nullable(String) DEFAULT '',
+    source   Nullable(String) DEFAULT NULL
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:5: error DF2006

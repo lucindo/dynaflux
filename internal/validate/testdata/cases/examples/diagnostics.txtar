@@ -1,0 +1,61 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The diagnostics example of sql.md, verbatim, over the page_views stream and page_daily
+view of the page-views example. The want-text is the output the spec shows.
+-- dynaflux/streams/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32,
+    country     LowCardinality(String) DEFAULT ''
+)
+PRIMARY KEY (user_id)
+LOG RETENTION 2 DAY
+ACCEPT event_time BETWEEN now() - INTERVAL 30 DAY AND now() + INTERVAL 5 MINUTE;
+-- dynaflux/views/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+MODE ASYNC
+ORDER BY (page, day)
+PRIMARY KEY (page)
+TTL day + INTERVAL 2 YEAR
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms,
+    max(event_time)          AS last_view
+FROM page_views
+WHERE page != ''
+GROUP BY page, day;
+-- dynaflux/queries/mistakes.sql --
+-- name: PageStatsAnyPage :many
+SELECT day, views
+FROM page_daily
+WHERE day >= {from:Date};
+
+-- name: TopPagesByVisitors :many
+SELECT page, uniqExact(visitors) AS unique_visitors
+FROM page_daily
+WHERE page IN {pages:Array(String)}
+GROUP BY page;
+-- dynaflux/views/user_pages.sql --
+CREATE MATERIALIZED VIEW user_pages
+ORDER BY (user_id)
+AS SELECT user_id, groupArray(page) AS pages
+FROM page_views
+GROUP BY user_id;
+-- want --
+dynaflux/queries/mistakes.sql:4:1: error DF4101
+dynaflux/queries/mistakes.sql:7:14: error DF4201
+dynaflux/views/user_pages.sql:3:20: error DF5213
+-- want-text --
+dynaflux/queries/mistakes.sql:4:1: error DF4101: PageStatsAnyPage: view page_daily is partitioned by (page), but WHERE does not bind "page" with = or IN. Every query must fix the partition key.
+  hint: add page = {page:String} to WHERE, or declare a view whose PRIMARY KEY matches this query
+dynaflux/queries/mistakes.sql:7:14: error DF4201: TopPagesByVisitors: uniqExact(visitors) cannot be combined across rows (the query groups by (page) but page_daily rows are (page, day)).
+  hint: declare a view grouped by (page), or make visitors a uniq() column and use uniqMerge(visitors) for an approximate count
+dynaflux/views/user_pages.sql:3:20: error DF5213: user_pages: groupArray(page) has unbounded state.
+  hint: use uniq(page) or uniqExact(page) to count values, or argMax(page, event_time) for the latest one

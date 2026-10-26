@@ -1,0 +1,136 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The transaction of an append counts every SYNC view of the stream: the event (1), a row
+of user_pages with 97 uniqExact markers (98), and a row of user_flags with one
+uniqExactIf marker (2) make 101 items. An ASYNC view adds none.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW user_pages
+MODE SYNC
+ORDER BY (user_id)
+AS SELECT
+    user_id,
+    uniqExact(page) AS pages_01,
+    uniqExact(page) AS pages_02,
+    uniqExact(page) AS pages_03,
+    uniqExact(page) AS pages_04,
+    uniqExact(page) AS pages_05,
+    uniqExact(page) AS pages_06,
+    uniqExact(page) AS pages_07,
+    uniqExact(page) AS pages_08,
+    uniqExact(page) AS pages_09,
+    uniqExact(page) AS pages_10,
+    uniqExact(page) AS pages_11,
+    uniqExact(page) AS pages_12,
+    uniqExact(page) AS pages_13,
+    uniqExact(page) AS pages_14,
+    uniqExact(page) AS pages_15,
+    uniqExact(page) AS pages_16,
+    uniqExact(page) AS pages_17,
+    uniqExact(page) AS pages_18,
+    uniqExact(page) AS pages_19,
+    uniqExact(page) AS pages_20,
+    uniqExact(page) AS pages_21,
+    uniqExact(page) AS pages_22,
+    uniqExact(page) AS pages_23,
+    uniqExact(page) AS pages_24,
+    uniqExact(page) AS pages_25,
+    uniqExact(page) AS pages_26,
+    uniqExact(page) AS pages_27,
+    uniqExact(page) AS pages_28,
+    uniqExact(page) AS pages_29,
+    uniqExact(page) AS pages_30,
+    uniqExact(page) AS pages_31,
+    uniqExact(page) AS pages_32,
+    uniqExact(page) AS pages_33,
+    uniqExact(page) AS pages_34,
+    uniqExact(page) AS pages_35,
+    uniqExact(page) AS pages_36,
+    uniqExact(page) AS pages_37,
+    uniqExact(page) AS pages_38,
+    uniqExact(page) AS pages_39,
+    uniqExact(page) AS pages_40,
+    uniqExact(page) AS pages_41,
+    uniqExact(page) AS pages_42,
+    uniqExact(page) AS pages_43,
+    uniqExact(page) AS pages_44,
+    uniqExact(page) AS pages_45,
+    uniqExact(page) AS pages_46,
+    uniqExact(page) AS pages_47,
+    uniqExact(page) AS pages_48,
+    uniqExact(page) AS pages_49,
+    uniqExact(page) AS pages_50,
+    uniqExact(page) AS pages_51,
+    uniqExact(page) AS pages_52,
+    uniqExact(page) AS pages_53,
+    uniqExact(page) AS pages_54,
+    uniqExact(page) AS pages_55,
+    uniqExact(page) AS pages_56,
+    uniqExact(page) AS pages_57,
+    uniqExact(page) AS pages_58,
+    uniqExact(page) AS pages_59,
+    uniqExact(page) AS pages_60,
+    uniqExact(page) AS pages_61,
+    uniqExact(page) AS pages_62,
+    uniqExact(page) AS pages_63,
+    uniqExact(page) AS pages_64,
+    uniqExact(page) AS pages_65,
+    uniqExact(page) AS pages_66,
+    uniqExact(page) AS pages_67,
+    uniqExact(page) AS pages_68,
+    uniqExact(page) AS pages_69,
+    uniqExact(page) AS pages_70,
+    uniqExact(page) AS pages_71,
+    uniqExact(page) AS pages_72,
+    uniqExact(page) AS pages_73,
+    uniqExact(page) AS pages_74,
+    uniqExact(page) AS pages_75,
+    uniqExact(page) AS pages_76,
+    uniqExact(page) AS pages_77,
+    uniqExact(page) AS pages_78,
+    uniqExact(page) AS pages_79,
+    uniqExact(page) AS pages_80,
+    uniqExact(page) AS pages_81,
+    uniqExact(page) AS pages_82,
+    uniqExact(page) AS pages_83,
+    uniqExact(page) AS pages_84,
+    uniqExact(page) AS pages_85,
+    uniqExact(page) AS pages_86,
+    uniqExact(page) AS pages_87,
+    uniqExact(page) AS pages_88,
+    uniqExact(page) AS pages_89,
+    uniqExact(page) AS pages_90,
+    uniqExact(page) AS pages_91,
+    uniqExact(page) AS pages_92,
+    uniqExact(page) AS pages_93,
+    uniqExact(page) AS pages_94,
+    uniqExact(page) AS pages_95,
+    uniqExact(page) AS pages_96,
+    uniqExact(page) AS pages_97
+FROM page_views
+GROUP BY user_id;
+
+CREATE MATERIALIZED VIEW user_flags
+MODE SYNC
+ORDER BY (user_id)
+AS SELECT user_id, uniqExactIf(page, page != 'home') AS other_pages
+FROM page_views
+GROUP BY user_id;
+
+CREATE MATERIALIZED VIEW user_async
+MODE ASYNC
+ORDER BY (user_id)
+AS SELECT user_id, uniqExact(page) AS pages
+FROM page_views
+GROUP BY user_id;
+-- want --
+dynaflux/page_views.sql:1:15: error DF3305
+-- want-text --
+dynaflux/page_views.sql:1:15: error DF3305: page_views: an append to page_views writes 101 items in one transaction; DynamoDB allows 100
+  hint: make some views ASYNC, use fewer uniqExact aggregates in SYNC views, or retire old versions

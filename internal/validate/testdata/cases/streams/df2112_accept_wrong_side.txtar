@@ -1,0 +1,16 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The upper bound must be now() or later, and the lower bound now() or earlier. The
+diagnostic points at the bound.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id)
+ACCEPT event_time <= now() - INTERVAL 1 DAY;
+
+CREATE STREAM clicks (user_id String)
+PRIMARY KEY (user_id)
+ACCEPT event_time BETWEEN now() + INTERVAL 1 DAY AND now() + INTERVAL 2 DAY;
+-- want --
+dynaflux/streams.sql:3:22: error DF2112
+dynaflux/streams.sql:7:27: error DF2112

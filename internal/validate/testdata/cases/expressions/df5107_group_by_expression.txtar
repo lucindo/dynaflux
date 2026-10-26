@@ -1,0 +1,36 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+GROUP BY items are names.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux/queries.sql --
+-- name: MonthlyTotals :many
+SELECT sum(views) AS total
+FROM page_daily
+WHERE page = {page:String}
+GROUP BY toStartOfMonth(day);
+-- want --
+dynaflux/queries.sql:5:10: error DF5107
+-- want-text --
+dynaflux/queries.sql:5:10: error DF5107: MonthlyTotals: GROUP BY item must be a name
+  hint: give the expression an alias in SELECT and group by the alias

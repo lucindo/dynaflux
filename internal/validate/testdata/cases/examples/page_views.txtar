@@ -1,0 +1,288 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The page-views example of sql.md, verbatim. RecentPageViews reads the stream, so it
+gets the warning the example shows. TagTotals lists its aggregates in order of first
+appearance, as parameters are.
+-- dynaflux/streams/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32,
+    country     LowCardinality(String) DEFAULT ''
+)
+PRIMARY KEY (user_id)
+LOG RETENTION 2 DAY
+ACCEPT event_time BETWEEN now() - INTERVAL 30 DAY AND now() + INTERVAL 5 MINUTE;
+-- dynaflux/views/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+MODE ASYNC
+ORDER BY (page, day)
+PRIMARY KEY (page)
+TTL day + INTERVAL 2 YEAR
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms,
+    max(event_time)          AS last_view
+FROM page_views
+WHERE page != ''
+GROUP BY page, day;
+-- dynaflux/views/tag_hourly.sql --
+CREATE MATERIALIZED VIEW tag_hourly
+ORDER BY (tag, hour)
+PRIMARY KEY (tag)
+TTL hour + INTERVAL 30 DAY
+AS SELECT
+    tag,
+    toStartOfHour(event_time) AS hour,
+    count()                   AS views,
+    uniq(user_id)             AS users
+FROM page_views
+ARRAY JOIN tags AS tag
+GROUP BY tag, hour;
+-- dynaflux/queries/pages.sql --
+-- name: PageStats :many
+SELECT day, views, visitors
+FROM page_daily
+WHERE page = {page:String}
+  AND day BETWEEN {from:Date} AND {to:Date}
+ORDER BY day;
+
+-- name: TagTotals :many
+-- expose: http
+SELECT tag, sum(views) AS total_views, uniqMerge(users) AS total_users
+FROM tag_hourly
+WHERE tag IN {tags:Array(String)}
+  AND hour >= {since:DateTime64(6)}
+GROUP BY tag
+ORDER BY total_views DESC
+LIMIT 10;
+
+-- name: RecentPageViews :many
+SELECT event_time, page, duration_ms
+FROM page_views
+WHERE user_id = {user:String}
+  AND event_time >= {since:DateTime64(6)}
+ORDER BY event_time DESC
+LIMIT {n:UInt32};
+-- want --
+dynaflux/queries/pages.sql:20:6: warning DF4501
+-- want-text --
+dynaflux/queries/pages.sql:20:6: warning DF4501: RecentPageViews: reads stream page_views, which keeps events for 2 DAY after ingestion (LOG RETENTION). Older events are only in the archive.
+  hint: query older events with Athena, or aggregate them in a view
+-- want-catalog --
+{
+  "format": 1,
+  "catalog": {
+    "store": "analytics",
+    "regions": ["us-east-1", "us-west-2"],
+    "timeout_seconds": 60,
+    "streams": [
+      {
+        "name": "page_views",
+        "columns": [
+          {"name": "user_id", "type": "String"},
+          {"name": "page", "type": "String"},
+          {"name": "referrer", "type": "Nullable(String)"},
+          {"name": "tags", "type": "Array(String)"},
+          {"name": "duration_ms", "type": "UInt32"},
+          {"name": "country", "type": "String", "default": {"op": "literal", "type": "String", "value": ""}}
+        ],
+        "primary_key": ["user_id"],
+        "dedup_by": [],
+        "log_retention": "2 DAY",
+        "accept": {"past": "30 DAY", "future": "5 MINUTE"},
+        "shards": 1,
+        "archive": {"regions": ["us-east-1", "us-west-2"], "events": "all"},
+        "storage_format": 1
+      }
+    ],
+    "views": [
+      {
+        "name": "page_daily",
+        "versions": [
+          {
+            "number": 1,
+            "state": "current",
+            "mode": "async",
+            "stream": "page_views",
+            "array_join": null,
+            "where": {"op": "notEquals", "type": "Bool", "args": [
+              {"op": "column", "type": "String", "name": "page"},
+              {"op": "literal", "type": "String", "value": ""}
+            ]},
+            "keys": [
+              {"name": "page", "expr": {"op": "column", "type": "String", "name": "page"}},
+              {"name": "day", "expr": {"op": "toStartOfDay", "type": "DateTime", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]}}
+            ],
+            "partition_key_len": 1,
+            "ttl": {"key": "day", "plus": "2 YEAR"},
+            "split": 1,
+            "aggregates": [
+              {"name": "last_view", "fn": "max", "type": "DateTime64(6)", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]},
+              {"name": "total_ms", "fn": "sum", "type": "UInt64", "args": [
+                {"op": "column", "type": "UInt32", "name": "duration_ms"}
+              ]},
+              {"name": "views", "fn": "count", "type": "UInt64", "args": []},
+              {"name": "visitors", "fn": "uniqExact", "type": "UInt64", "args": [
+                {"op": "column", "type": "String", "name": "user_id"}
+              ]}
+            ],
+            "storage_format": 1
+          }
+        ]
+      },
+      {
+        "name": "tag_hourly",
+        "versions": [
+          {
+            "number": 1,
+            "state": "current",
+            "mode": "async",
+            "stream": "page_views",
+            "array_join": {"array": {"op": "column", "type": "Array(String)", "name": "tags"}, "alias": "tag"},
+            "where": null,
+            "keys": [
+              {"name": "tag", "expr": {"op": "column", "type": "String", "name": "tag"}},
+              {"name": "hour", "expr": {"op": "toStartOfHour", "type": "DateTime", "args": [
+                {"op": "column", "type": "DateTime64(6)", "name": "event_time"}
+              ]}}
+            ],
+            "partition_key_len": 1,
+            "ttl": {"key": "hour", "plus": "30 DAY"},
+            "split": 1,
+            "aggregates": [
+              {"name": "users", "fn": "uniq", "type": "UInt64", "args": [
+                {"op": "column", "type": "String", "name": "user_id"}
+              ]},
+              {"name": "views", "fn": "count", "type": "UInt64", "args": []}
+            ],
+            "storage_format": 1
+          }
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "name": "PageStats",
+        "cardinality": "many",
+        "expose_http": false,
+        "params": [
+          {"name": "page", "type": "String"},
+          {"name": "from", "type": "Date"},
+          {"name": "to", "type": "Date"}
+        ],
+        "source": {"kind": "view", "name": "page_daily"},
+        "keys": {
+          "partition": [
+            {"column": "page", "values": [{"op": "param", "type": "String", "name": "page"}]}
+          ],
+          "sort_prefix": [],
+          "range": {
+            "column": "day",
+            "lower": {"value": {"op": "param", "type": "Date", "name": "from"}, "inclusive": true},
+            "upper": {"value": {"op": "param", "type": "Date", "name": "to"}, "inclusive": true}
+          }
+        },
+        "filter": null,
+        "aggregation": null,
+        "columns": [
+          {"name": "day", "expr": {"op": "column", "type": "DateTime", "name": "day"}},
+          {"name": "views", "expr": {"op": "column", "type": "UInt64", "name": "views"}},
+          {"name": "visitors", "expr": {"op": "column", "type": "UInt64", "name": "visitors"}}
+        ],
+        "order_by": [
+          {"expr": {"op": "column", "type": "DateTime", "name": "day"}, "desc": false, "nulls_first": false},
+          {"expr": {"op": "column", "type": "String", "name": "page"}, "desc": false, "nulls_first": false}
+        ],
+        "limit": null
+      },
+      {
+        "name": "RecentPageViews",
+        "cardinality": "many",
+        "expose_http": false,
+        "params": [
+          {"name": "user", "type": "String"},
+          {"name": "since", "type": "DateTime64(6)"},
+          {"name": "n", "type": "UInt32"}
+        ],
+        "source": {"kind": "stream", "name": "page_views"},
+        "keys": {
+          "partition": [
+            {"column": "user_id", "values": [{"op": "param", "type": "String", "name": "user"}]}
+          ],
+          "sort_prefix": [],
+          "range": {
+            "column": "event_time",
+            "lower": {"value": {"op": "param", "type": "DateTime64(6)", "name": "since"}, "inclusive": true},
+            "upper": null
+          }
+        },
+        "filter": null,
+        "aggregation": null,
+        "columns": [
+          {"name": "event_time", "expr": {"op": "column", "type": "DateTime64(6)", "name": "event_time"}},
+          {"name": "page", "expr": {"op": "column", "type": "String", "name": "page"}},
+          {"name": "duration_ms", "expr": {"op": "column", "type": "UInt32", "name": "duration_ms"}}
+        ],
+        "order_by": [
+          {"expr": {"op": "column", "type": "DateTime64(6)", "name": "event_time"}, "desc": true, "nulls_first": false},
+          {"expr": {"op": "column", "type": "String", "name": "event_id"}, "desc": false, "nulls_first": false}
+        ],
+        "limit": {"op": "param", "type": "UInt32", "name": "n"}
+      },
+      {
+        "name": "TagTotals",
+        "cardinality": "many",
+        "expose_http": true,
+        "params": [
+          {"name": "tags", "type": "Array(String)"},
+          {"name": "since", "type": "DateTime64(6)"}
+        ],
+        "source": {"kind": "view", "name": "tag_hourly"},
+        "keys": {
+          "partition": [
+            {"column": "tag", "values": [{"op": "param", "type": "Array(String)", "name": "tags"}]}
+          ],
+          "sort_prefix": [],
+          "range": {
+            "column": "hour",
+            "lower": {"value": {"op": "param", "type": "DateTime64(6)", "name": "since"}, "inclusive": true},
+            "upper": null
+          }
+        },
+        "filter": null,
+        "aggregation": {
+          "group_by": [{"name": "tag", "expr": {"op": "column", "type": "String", "name": "tag"}}],
+          "aggregates": [
+            {"fn": "sum", "type": "UInt64", "merge": false, "cond": null, "args": [
+              {"op": "column", "type": "UInt64", "name": "views"}
+            ]},
+            {"fn": "uniq", "type": "UInt64", "merge": true, "cond": null, "args": [
+              {"op": "column", "type": "UInt64", "name": "users"}
+            ]}
+          ]
+        },
+        "columns": [
+          {"name": "tag", "expr": {"op": "column", "type": "String", "name": "tag"}},
+          {"name": "total_views", "expr": {"op": "aggregate", "type": "UInt64", "index": 0}},
+          {"name": "total_users", "expr": {"op": "aggregate", "type": "UInt64", "index": 1}}
+        ],
+        "order_by": [
+          {"expr": {"op": "aggregate", "type": "UInt64", "index": 0}, "desc": true, "nulls_first": false},
+          {"expr": {"op": "column", "type": "String", "name": "tag"}, "desc": false, "nulls_first": false}
+        ],
+        "limit": {"op": "literal", "type": "UInt8", "value": "10"}
+      }
+    ]
+  }
+}

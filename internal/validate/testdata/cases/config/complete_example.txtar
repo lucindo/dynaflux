@@ -1,0 +1,81 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The complete example of config.md, over SQL that declares the streams page_views and
+debug_events and the view page_daily. Its debug_events entry turns archiving off, which
+the example says is a warning.
+-- dynaflux.yaml --
+store: analytics
+prefix: prod-                         # not default (default: no prefix)
+regions: [us-east-1, us-west-2, ap-northeast-1]
+sql: ["dynaflux/**/*.sql"]
+
+go:
+  package: flux
+  out: internal/flux
+
+runtime:
+  out: cmd/dynaflux-runtime
+  arch: arm64                         # arm64 | x86_64
+  timeout_seconds: 60
+  memory_mb: 1024
+  batching_window_seconds: 1
+  split: store                        # store | stream
+
+infra:
+  format: sam
+  out: infra/dynaflux
+
+defaults:
+  capacity: on_demand                 # on_demand | provisioned
+  view_mode: async                    # async | sync
+  log_retention: 2d                   # <n>h | <n>d | <n>w | forever
+
+tables:                               # not default (default: no overrides)
+  page_daily:                         # a view: applies to the table of every version
+    capacity: provisioned
+    autoscaling:
+      read:  {min: 5, max: 500}       # target_percent defaults to 70
+      write: {min: 5, max: 1000, target_percent: 60}
+
+archive:
+  enabled: true
+  catalog: glue                       # glue | s3tables
+  regions: all                        # all | a list of entries from regions
+  events: all                         # all | local
+  streams:                            # not default (default: no overrides)
+    debug_events: {enabled: false}    # validate warns (DF6504)
+
+http:
+  frontend: http_api                  # not default (default: function_url)
+  auth: iam                           # allowed values depend on frontend
+  allow_public: false
+  domain:                             # not default (default: none)
+    name: flux.example.com
+    routing: latency
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/page_daily.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    sum(duration_ms)         AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- dynaflux/debug_events.sql --
+CREATE STREAM debug_events (host String, message String)
+PRIMARY KEY (host);
+-- want --
+dynaflux.yaml:40:29: warning DF6504

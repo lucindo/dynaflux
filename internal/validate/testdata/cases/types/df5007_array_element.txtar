@@ -1,0 +1,14 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Array elements are non-Nullable scalars. The diagnostic points at the element type.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    tags   Array(Nullable(String)),
+    matrix Array(Array(String))
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux/page_views.sql:3:18: error DF5007
+dynaflux/page_views.sql:4:18: error DF5007
