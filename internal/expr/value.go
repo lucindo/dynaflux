@@ -7,6 +7,8 @@ package expr
 import (
 	"math"
 	"math/big"
+
+	"github.com/lucindo/dynaflux/internal/catalog"
 )
 
 // Value is one SQL value. It holds a representation only, which [Value.Kind] names: the
@@ -82,6 +84,29 @@ func Array(vs []Value) Value { return Value{kind: KindArray, a: vs} }
 
 // Kind returns v's representation.
 func (v Value) Kind() Kind { return v.kind }
+
+// KindOf returns the representation of the non-NULL scalar values of k.
+func KindOf(k catalog.Kind) Kind {
+	switch k {
+	case catalog.KindString:
+		return KindString
+	case catalog.KindUInt8, catalog.KindUInt16, catalog.KindUInt32, catalog.KindUInt64:
+		return KindUint
+	case catalog.KindInt8, catalog.KindInt16, catalog.KindInt32, catalog.KindInt64:
+		return KindInt
+	case catalog.KindFloat64:
+		return KindFloat
+	case catalog.KindDecimal:
+		return KindDecimal
+	case catalog.KindBool:
+		return KindBool
+	case catalog.KindUUID:
+		return KindUUID
+	case catalog.KindDate, catalog.KindDateTime, catalog.KindDateTime64:
+		return KindMicros
+	}
+	return KindNull
+}
 
 // IsNull reports whether v is NULL.
 func (v Value) IsNull() bool { return v.kind == KindNull }

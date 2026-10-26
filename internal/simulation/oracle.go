@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lucindo/dynaflux/internal/agg"
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -248,6 +249,25 @@ func (o *Oracle) result() Rows {
 		rows[c.row][c.col] = sketchText(s)
 	}
 	return rows
+}
+
+// FormatValue formats a value of type t as the oracle does; a time as RFC 3339 in UTC.
+func FormatValue(v expr.Value, t catalog.Type) string {
+	switch v.Kind() { //nolint:exhaustive // the kinds of the fixture's keys and columns
+	case expr.KindUint:
+		return strconv.FormatUint(v.AsUint(), 10)
+	case expr.KindDecimal:
+		return new(big.Rat).SetFrac(v.AsDecimal(), expr.Pow10(t.Scale)).RatString()
+	case expr.KindMicros:
+		return time.UnixMicro(v.AsMicros()).UTC().Format(time.RFC3339Nano)
+	case expr.KindString:
+		return v.AsString()
+	case expr.KindFloat:
+		return FormatFloat(v.AsFloat())
+	case expr.KindNull:
+		return "NULL"
+	}
+	return fmt.Sprintf("a value of kind %d", v.Kind())
 }
 
 // FormatFloat formats a Float64 value as the oracle does.

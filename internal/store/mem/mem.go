@@ -144,6 +144,28 @@ func (m *Mem) Put(ctx context.Context, table string, it store.Item, c store.Cond
 	return nil
 }
 
+// Delete removes the item with key k, if there is one. It isn't part of [store.Backend]:
+// only the simulation's TTL deletes use it.
+func (m *Mem) Delete(ctx context.Context, table string, k store.Key) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("mem: delete: %w", err)
+	}
+	if err := checkKey(k); err != nil {
+		return fmt.Errorf("mem: delete: %w", err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.tables[table][k.PK]
+	if p == nil {
+		return nil
+	}
+	if i, found := slices.BinarySearch(p.sks, k.SK); found {
+		p.sks = slices.Delete(p.sks, i, i+1)
+		delete(p.items, k.SK)
+	}
+	return nil
+}
+
 func holds(c store.Cond, cur store.Item) bool {
 	if c.Absent() {
 		return cur == nil

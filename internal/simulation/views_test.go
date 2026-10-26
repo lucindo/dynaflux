@@ -5,8 +5,10 @@ package simulation_test
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"math/rand/v2"
 	"slices"
@@ -26,123 +28,10 @@ import (
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-// pageViewsSQL is the store the real core projects: every aggregate, -If, ARRAY JOIN,
-// TTL and SPLIT. A run ends long before any TTL, so no row expires. Each named query reads
-// every row of one view, its keys first.
-const pageViewsSQL = `
-CREATE STREAM page_views (
-    site    String,
-    page    String,
-    user_id String,
-    ms      UInt32,
-    price   Decimal(10, 2),
-    score   Float64,
-    label   String,
-    tags    Array(String)
-)
-PRIMARY KEY (page);
-
--- Every additive aggregate. Its rows outlive a run.
-CREATE MATERIALIZED VIEW page_hourly
-ORDER BY (page, hour)
-PRIMARY KEY (page)
-TTL hour + INTERVAL 7 DAY
-AS SELECT page, toStartOfHour(event_time) AS hour, count() AS views, sum(ms) AS total_ms,
-    sum(price) AS revenue, sum(score) AS total_score, avg(ms) AS avg_ms, min(ms) AS fastest,
-    max(ms) AS slowest, uniqExact(user_id) AS users, quantile(0.9)(ms) AS p90_ms,
-    quantileDD(0.01, 0.99)(ms) AS p99_ms, sumIf(ms, ms > 2500) AS slow_ms
-FROM page_views
-GROUP BY page, hour;
-
-CREATE MATERIALIZED VIEW page_users
-ORDER BY (page, user_id)
-PRIMARY KEY (page)
-AS SELECT page, user_id
-FROM page_views
-GROUP BY page, user_id;
-
--- No event is that slow, so each row holds a count of 0.
-CREATE MATERIALIZED VIEW slow_pages
-ORDER BY (page)
-AS SELECT page, countIf(ms > 60000) AS slow
-FROM page_views
-GROUP BY page;
-
--- Few sites: every unit writes each row.
-CREATE MATERIALIZED VIEW site_totals
-ORDER BY (site)
-AS SELECT site, count() AS views, uniqExact(user_id) AS users
-FROM page_views
-GROUP BY site;
-
--- The same hot rows, each stored as 4 items.
-CREATE MATERIALIZED VIEW site_daily
-ORDER BY (site, day)
-PRIMARY KEY (site)
-SPLIT 4
-AS SELECT site, toDate(event_time) AS day, count() AS views, uniqExact(user_id) AS users,
-    sum(price) AS revenue
-FROM page_views
-GROUP BY site, day;
-
--- Ties in ms go by event. A poison event's label, over 4 KB, fails the evaluation though it
--- is never the largest.
-CREATE MATERIALIZED VIEW user_latest
-ORDER BY (user_id)
-AS SELECT user_id, argMax(page, ms) AS slowest_page, argMin(page, ms) AS fastest_page,
-    any(page) AS first_page, max(label) AS top_label
-FROM page_views
-GROUP BY user_id;
-
--- An event's tags repeat: uniqExact counts a tag once per record and row.
-CREATE MATERIALIZED VIEW page_tags
-ORDER BY (page)
-AS SELECT page, count() AS tag_rows, uniqExact(tag) AS distinct_tags, uniq(tag) AS approx_tags
-FROM page_views
-ARRAY JOIN tags AS tag
-GROUP BY page;
-
--- A poison event, whose ms is 0, fails the evaluation.
-CREATE MATERIALIZED VIEW page_rates
-ORDER BY (page)
-AS SELECT page, sum(intDiv(1000, ms)) AS rate
-FROM page_views
-GROUP BY page;
-
--- name: PageHourly :many
-SELECT page, hour, views, total_ms, revenue, total_score, avg_ms, fastest, slowest, users, p90_ms,
-    p99_ms, slow_ms
-FROM page_hourly
-WHERE page IN {pages:Array(String)};
-
--- name: PageUsers :many
-SELECT page, user_id FROM page_users
-WHERE page IN {pages:Array(String)};
-
--- name: SlowPages :many
-SELECT page, slow FROM slow_pages
-WHERE page IN {pages:Array(String)};
-
--- name: SiteTotals :many
-SELECT site, views, users FROM site_totals
-WHERE site IN {sites:Array(String)};
-
--- name: SiteDaily :many
-SELECT site, day, views, users, revenue FROM site_daily
-WHERE site IN {sites:Array(String)};
-
--- name: UserLatest :many
-SELECT user_id, slowest_page, fastest_page, first_page, top_label FROM user_latest
-WHERE user_id IN {users:Array(String)};
-
--- name: PageTags :many
-SELECT page, tag_rows, distinct_tags, approx_tags FROM page_tags
-WHERE page IN {pages:Array(String)};
-
--- name: PageRates :many
-SELECT page, rate FROM page_rates
-WHERE page IN {pages:Array(String)};
-`
+// fixture is the store the real core projects: testdata/sim, which every scenario runs.
+//
+//go:embed testdata/sim
+var fixture embed.FS
 
 const (
 	storeName = "sim"
@@ -157,37 +46,84 @@ const (
 	slowMS    = 60000
 	maxCents  = 10000
 	maxScore  = 100
+	accounts  = 3
+	maxUnits  = 100
+	customers = 16
+	quotaEach = 4             // every quotaEach-th event is a quota request or a charge, in turn
 	spread    = 3 * time.Hour // how far back event times go
 )
 
 func metaTable() string { return catalog.Naming{Store: storeName}.MetaTable() }
 
-// The view versions of pageViewsSQL.
+// The view versions of the fixture.
 const (
-	pageHourly = "page_hourly@v1"
-	pageUsers  = "page_users@v1"
-	slowPages  = "slow_pages@v1"
-	siteTotals = "site_totals@v1"
-	siteDaily  = "site_daily@v1"
-	userLatest = "user_latest@v1"
-	pageTags   = "page_tags@v1"
-	pageRates  = "page_rates@v1"
+	pageHourlyV1   = "page_hourly@v1" // retained, by dynaflux.lock
+	pageHourly     = "page_hourly@v2"
+	pageUsers      = "page_users@v1"
+	slowPages      = "slow_pages@v1"
+	siteTotals     = "site_totals@v1"
+	siteDaily      = "site_daily@v1"
+	userLatest     = "user_latest@v1"
+	pageTags       = "page_tags@v1"
+	pageRates      = "page_rates@v1"
+	quotaByAccount = "quota_by_account@v1"
+	quotaByOrigin  = "quota_by_origin@v1"
+	chargeTotals   = "charge_totals@v1"
 )
 
 // compile returns the catalog of a store whose one SQL file holds sql.
 func compile(t *testing.T, sql string) *engine.Catalog {
 	t.Helper()
-	cat, err := engine.Compile(catalogtest.Marshal(t, storeName, sql))
+	return compileData(t, catalogtest.Marshal(t, storeName, sql), 0)
+}
+
+// window is pageViews' prune window W: the least that the scenarios' longest timeout, 2
+// minutes, allows.
+const window = 3 * time.Minute
+
+// compileWindow returns compile's catalog with prune window w, as the harness's config
+// controls edit it.
+func compileWindow(t *testing.T, sql string, w time.Duration) *engine.Catalog {
+	t.Helper()
+	return compileData(t, catalogtest.Marshal(t, storeName, sql), w)
+}
+
+// fixtureWindow returns the fixture's catalog with prune window w.
+func fixtureWindow(t *testing.T, w time.Duration) *engine.Catalog {
+	t.Helper()
+	root, err := fs.Sub(fixture, "testdata/sim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compileData(t, catalogtest.MarshalFS(t, root), w)
+}
+
+// compileData compiles a marshaled catalog, with prune window w unless w is 0.
+func compileData(t *testing.T, data []byte, w time.Duration) *engine.Catalog {
+	t.Helper()
+	if w != 0 {
+		def, err := catalog.Unmarshal(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		def.PruneWindowSeconds = int(w / time.Second)
+		if data, err = catalog.Marshal(def); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cat, err := engine.Compile(data)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return cat
 }
 
-// pageViews is pageViewsSQL's store, projected by the real core. Seeds may share it.
+// pageViews is the fixture's store, projected by the real core. Seeds may share it.
 type pageViews struct {
-	cat    *engine.Catalog
-	stream *projector.Stream
+	cat *engine.Catalog
+	// core is the catalog the cores run: cat, or for a config control, cat with another W.
+	core                   *engine.Catalog
+	stream, quota, charges *projector.Stream
 	// p90, p99 and uniq make the oracle's sketches of page_hourly's p90_ms and p99_ms and
 	// page_tags's approx_tags.
 	p90, p99, uniq *agg.Func
@@ -195,12 +131,24 @@ type pageViews struct {
 
 func newPageViews(t *testing.T) *pageViews {
 	t.Helper()
-	s := &pageViews{cat: compile(t, pageViewsSQL)}
+	cat := fixtureWindow(t, window)
+	s := &pageViews{cat: cat, core: cat}
 	s.stream, _ = s.cat.Projector().Stream("page_views")
+	s.quota, _ = s.cat.Projector().Stream("quota_events")
+	s.charges, _ = s.cat.Projector().Stream("charges")
 	s.p90 = aggregateFunc(t, s.cat.Catalog(), "page_hourly", "p90_ms")
 	s.p99 = aggregateFunc(t, s.cat.Catalog(), "page_hourly", "p99_ms")
 	s.uniq = aggregateFunc(t, s.cat.Catalog(), "page_tags", "approx_tags")
 	return s
+}
+
+// withCoreWindow returns s with cores that prune with w, while the harness checks P4
+// against the catalog's W.
+func (s *pageViews) withCoreWindow(t *testing.T, w time.Duration) *pageViews {
+	t.Helper()
+	c := *s
+	c.core = fixtureWindow(t, w)
+	return &c
 }
 
 // aggregateFunc returns the Func of the aggregate column col of view.
@@ -220,8 +168,17 @@ func aggregateFunc(t *testing.T, cat *catalog.Catalog, view, col string) *agg.Fu
 	return f
 }
 
+// Config backfills idempotent-only versions and fenced ones: page_hourly's version 2 while
+// version 1 runs, page_rates and user_latest, which break on poison events, site_daily,
+// which has SPLIT, and the views of cross-region duplicates. The others are live from the
+// start.
 func (s *pageViews) Config() simulation.Config {
-	return simulation.Config{Catalog: s.cat, Naming: catalog.Naming{Store: storeName}}
+	return simulation.Config{
+		Catalog: s.cat,
+		Naming:  catalog.Naming{Store: storeName},
+		Backfill: []string{pageHourly, pageUsers, siteDaily, userLatest, pageTags, pageRates, quotaByAccount,
+			chargeTotals},
+	}
 }
 
 // value returns the i-th value of a String column whose values start with prefix.
@@ -236,8 +193,34 @@ func every(prefix string, n int) expr.Value {
 	return expr.Array(vals)
 }
 
-// Event returns a page view. A poison event fails page_rates or user_latest.
-func (*pageViews) Event(r *rand.Rand, _ int, poison bool) (string, []expr.Value) {
+// Event returns a page view, or every quotaEach-th a quota request or a charge, in turn.
+// Half the charges are retried with another amount. A poison event is a page view that fails
+// page_rates or user_latest.
+func (*pageViews) Event(r *rand.Rand, n int, poison bool) simulation.Event {
+	// A run draws its events when it starts, so event times go back from then.
+	at := time.Now().Add(-time.Duration(r.Int64N(int64(spread))))
+	switch {
+	case poison || n%quotaEach != quotaEach-1:
+	case n/quotaEach%2 == 0:
+		return simulation.Event{Stream: "quota_events", Vals: []expr.Value{
+			value("a", r.IntN(accounts)),
+			value("q", n),
+			expr.Uint(1 + r.Uint64N(maxUnits)),
+			expr.Micros(at.UnixMicro()),
+		}}
+	default:
+		ev := simulation.Event{Stream: "charges", Vals: []expr.Value{
+			value("c", r.IntN(customers)),
+			value("k", n),
+			expr.Uint(1 + r.Uint64N(maxCents)),
+			expr.Micros(at.UnixMicro()),
+		}}
+		if r.IntN(2) == 0 {
+			ev.Divergent = slices.Clone(ev.Vals)
+			ev.Divergent[2] = expr.Uint(ev.Vals[2].AsUint() + 1 + r.Uint64N(maxCents))
+		}
+		return ev
+	}
 	ms, label := 1+r.Uint64N(maxMS), value("l", r.IntN(labels))
 	if poison && r.IntN(2) == 0 {
 		ms = 0
@@ -249,9 +232,7 @@ func (*pageViews) Event(r *rand.Rand, _ int, poison bool) (string, []expr.Value)
 	for i := range tagVals {
 		tagVals[i] = value("t", r.IntN(tags))
 	}
-	// A run draws its events when it starts, so event times go back from then.
-	at := time.Now().Add(-time.Duration(r.Int64N(int64(spread))))
-	return "page_views", []expr.Value{
+	return simulation.Event{Stream: "page_views", Vals: []expr.Value{
 		value("s", r.IntN(sites)),
 		value("p", r.IntN(pages)),
 		value("u", r.IntN(users)),
@@ -261,11 +242,11 @@ func (*pageViews) Event(r *rand.Rand, _ int, poison bool) (string, []expr.Value)
 		label,
 		expr.Array(tagVals),
 		expr.Micros(at.UnixMicro()),
-	}
+	}}
 }
 
-func (s *pageViews) NewCore(b store.Backend, _ simulation.Archiver) simulation.Core {
-	return projector.New(s.cat.Projector(), b, projector.Config{Naming: s.Config().Naming})
+func (s *pageViews) NewCore(b store.Backend, a simulation.Archiver) simulation.Core {
+	return projector.New(s.core.Projector(), b, a, projector.Config{Naming: s.Config().Naming})
 }
 
 // pageView is a decoded event of page_views.
@@ -300,34 +281,24 @@ func (s *pageViews) decode(rec projector.Record) (pageView, error) {
 	return ev, nil
 }
 
-func (s *pageViews) Expect(o *simulation.Oracle, unit string, rec projector.Record) error {
+func (s *pageViews) Expect(o *simulation.Oracle, stream, unit string, rec projector.Record) error {
+	switch stream {
+	case "quota_events":
+		return s.expectQuota(o, rec)
+	case "charges":
+		return s.expectCharge(o, rec)
+	}
 	ev, err := s.decode(rec)
 	if err != nil {
 		return err
 	}
 	id := simulation.RecordID{Unit: unit, Seq: rec.Seq}
 	at := time.UnixMicro(ev.tie.Time).UTC()
-	hour := simulation.RowID{View: pageHourly, Key: ev.page + " " + rfc3339(at.Truncate(time.Hour))}
-	o.Count(hour, "views", 1)
-	o.Sum(hour, "total_ms", ev.ms)
-	o.Sum(hour, "revenue", ev.price)
-	o.SumFloat(hour, "total_score", ev.score)
-	o.Avg(hour, "avg_ms", ev.ms)
-	o.Min(hour, "fastest", ev.ms)
-	o.Max(hour, "slowest", ev.ms)
-	o.UniqExact(hour, "users", ev.user)
-	ms := expr.Uint(ev.ms.Num().Uint64())
-	if err = o.Sketch(hour, "p90_ms", s.p90, ms); err != nil {
-		return err
+	for _, version := range []string{pageHourlyV1, pageHourly} {
+		if err = s.expectHour(o, version, ev, at); err != nil {
+			return err
+		}
 	}
-	if err = o.Sketch(hour, "p99_ms", s.p99, ms); err != nil {
-		return err
-	}
-	slowSum := new(big.Rat)
-	if ev.ms.Cmp(big.NewRat(slowSumMS, 1)) > 0 {
-		slowSum = ev.ms
-	}
-	o.Sum(hour, "slow_ms", slowSum)
 	o.Reach(simulation.RowID{View: pageUsers, Key: ev.page + " " + ev.user})
 	slow := int64(0)
 	if ev.ms.Cmp(big.NewRat(slowMS, 1)) > 0 {
@@ -345,6 +316,63 @@ func (s *pageViews) Expect(o *simulation.Oracle, unit string, rec projector.Reco
 	}
 	rate := new(big.Int).Quo(big.NewInt(1000), ev.ms.Num())
 	o.Sum(simulation.RowID{View: pageRates, Key: ev.page}, "rate", new(big.Rat).SetInt(rate))
+	return nil
+}
+
+// expectHour adds a page view to its row of a version of page_hourly. Version 1 has no
+// slow_ms.
+func (s *pageViews) expectHour(o *simulation.Oracle, version string, ev pageView, at time.Time) error {
+	hour := simulation.RowID{View: version, Key: ev.page + " " + rfc3339(at.Truncate(time.Hour))}
+	o.Count(hour, "views", 1)
+	o.Sum(hour, "total_ms", ev.ms)
+	o.Sum(hour, "revenue", ev.price)
+	o.SumFloat(hour, "total_score", ev.score)
+	o.Avg(hour, "avg_ms", ev.ms)
+	o.Min(hour, "fastest", ev.ms)
+	o.Max(hour, "slowest", ev.ms)
+	o.UniqExact(hour, "users", ev.user)
+	ms := expr.Uint(ev.ms.Num().Uint64())
+	if err := o.Sketch(hour, "p90_ms", s.p90, ms); err != nil {
+		return err
+	}
+	if err := o.Sketch(hour, "p99_ms", s.p99, ms); err != nil {
+		return err
+	}
+	if version == pageHourly {
+		slowSum := new(big.Rat)
+		if ev.ms.Cmp(big.NewRat(slowSumMS, 1)) > 0 {
+			slowSum = ev.ms
+		}
+		o.Sum(hour, "slow_ms", slowSum)
+	}
+	return nil
+}
+
+// originRegion is where origin_region is in a decoded event: the fourth of the implicit
+// columns that follow the declared ones.
+const originRegion = 3
+
+func (s *pageViews) expectQuota(o *simulation.Oracle, rec projector.Record) error {
+	vals, bad := s.quota.Decode(rec.New)
+	if err := errors.Join(bad...); err != nil {
+		return fmt.Errorf("record %s: %w", rec.Seq, err)
+	}
+	account, origin := vals[0].AsString(), vals[len(s.quota.Columns)+originRegion].AsString()
+	for _, row := range []simulation.RowID{{View: quotaByAccount, Key: account}, {View: quotaByOrigin, Key: account + " " + origin}} {
+		o.Count(row, "requests", 1)
+		o.Sum(row, "used", new(big.Rat).SetUint64(vals[2].AsUint()))
+	}
+	return nil
+}
+
+func (s *pageViews) expectCharge(o *simulation.Oracle, rec projector.Record) error {
+	vals, bad := s.charges.Decode(rec.New)
+	if err := errors.Join(bad...); err != nil {
+		return fmt.Errorf("record %s: %w", rec.Seq, err)
+	}
+	row := simulation.RowID{View: chargeTotals, Key: vals[0].AsString()}
+	o.Count(row, "charges", 1)
+	o.Sum(row, "total_cents", new(big.Rat).SetUint64(vals[2].AsUint()))
 	return nil
 }
 
@@ -368,6 +396,7 @@ func expectUser(o *simulation.Oracle, ev pageView, id simulation.RecordID) {
 	o.Pick(row, "fastest_page", catalog.AggArgMin, ev.page, ev.ms, ev.tie)
 	o.Pick(row, "first_page", catalog.AggAny, ev.page, nil, ev.tie)
 	o.MaxString(row, "top_label", ev.label)
+	o.UniqExact(row, "pages", ev.page)
 }
 
 // expectTags adds one source row per element of the event's tags.
@@ -397,7 +426,13 @@ func (s *pageViews) Read(ctx context.Context, b store.Backend) (simulation.State
 		}
 	}
 	e := engine.New(b, engine.Options{})
-	all := map[string]expr.Value{"sites": every("s", sites), "pages": every("p", pages), "users": every("u", users)}
+	all := map[string]expr.Value{
+		"sites":     every("s", sites),
+		"pages":     every("p", pages),
+		"users":     every("u", users),
+		"accounts":  every("a", accounts),
+		"customers": every("c", customers),
+	}
 	for i := range s.cat.Catalog().Queries {
 		if err = s.readView(ctx, e, &s.cat.Catalog().Queries[i], all, st.Rows); err != nil {
 			return st, err
@@ -406,47 +441,59 @@ func (s *pageViews) Read(ctx context.Context, b store.Backend) (simulation.State
 	return st, nil
 }
 
-// readView adds the rows that q reads to rows. q's one parameter, from all, holds every
-// value of a partition key column.
+// readView adds the rows that q reads to rows, and those of the view's retained versions at
+// the same keys, which a query can't read. q's one parameter, from all, holds every value
+// of a partition key column.
 func (s *pageViews) readView(ctx context.Context, e *engine.Engine, q *catalog.Query, all map[string]expr.Value, rows simulation.Rows) error {
 	v, _ := s.cat.Catalog().View(q.Source.Name)
-	vv, _ := v.Current()
+	cur, _ := v.Current()
 	got, err := e.Query(ctx, s.cat, q.Name, []expr.Value{all[q.Params[0].Name]})
 	if err != nil {
 		return fmt.Errorf("%s: %w", q.Name, err)
 	}
 	for _, vals := range got {
-		key := make([]string, len(vv.Keys))
-		row := simulation.Row{}
-		for i, val := range vals {
-			if i < len(key) {
-				key[i] = text(val, q.Columns[i].Expr.Type)
-			} else {
-				row[q.Columns[i].Name] = text(val, q.Columns[i].Expr.Type)
+		addRow(rows, catalog.VersionID(v.Name, cur.Number), len(cur.Keys), q.Columns, vals)
+		for i := range v.Versions {
+			vv := &v.Versions[i]
+			if vv.Number == cur.Number {
+				continue
+			}
+			id := catalog.VersionID(v.Name, vv.Number)
+			old, ok, rerr := e.ReadRow(ctx, s.cat, id, vals[:len(cur.Keys)])
+			if rerr != nil {
+				return fmt.Errorf("%s: %w", id, rerr)
+			}
+			if ok {
+				addRow(rows, id, len(vv.Keys), versionColumns(vv), old)
 			}
 		}
-		rows[simulation.RowID{View: catalog.VersionID(v.Name, vv.Number), Key: strings.Join(key, " ")}] = row
 	}
 	return nil
 }
 
-// text formats a value of type t as the oracle does.
-func text(v expr.Value, t catalog.Type) string {
-	switch v.Kind() { //nolint:exhaustive // the kinds of pageViewsSQL's columns
-	case expr.KindUint:
-		return strconv.FormatUint(v.AsUint(), 10)
-	case expr.KindDecimal:
-		return new(big.Rat).SetFrac(v.AsDecimal(), new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(t.Scale)), nil)).RatString()
-	case expr.KindMicros:
-		return rfc3339(time.UnixMicro(v.AsMicros()))
-	case expr.KindString:
-		return v.AsString()
-	case expr.KindFloat:
-		return simulation.FormatFloat(v.AsFloat())
-	case expr.KindNull:
-		return "NULL"
+// versionColumns returns a view version's columns as ReadRow returns them: the keys, then
+// the aggregates.
+func versionColumns(vv *catalog.ViewVersion) []catalog.NamedExpr {
+	cols := slices.Clone(vv.Keys)
+	for _, a := range vv.Aggregates {
+		cols = append(cols, catalog.NamedExpr{Name: a.Name, Expr: catalog.Expr{Type: a.Type}})
 	}
-	return fmt.Sprintf("a value of kind %d", v.Kind())
+	return cols
+}
+
+// addRow adds a row of view version id to rows: vals, the values of cols, whose first n are
+// its keys.
+func addRow(rows simulation.Rows, id string, n int, cols []catalog.NamedExpr, vals []expr.Value) {
+	key := make([]string, n)
+	row := simulation.Row{}
+	for i, val := range vals {
+		if i < n {
+			key[i] = simulation.FormatValue(val, cols[i].Expr.Type)
+		} else {
+			row[cols[i].Name] = simulation.FormatValue(val, cols[i].Expr.Type)
+		}
+	}
+	rows[simulation.RowID{View: id, Key: strings.Join(key, " ")}] = row
 }
 
 func rfc3339(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }

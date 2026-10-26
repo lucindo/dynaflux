@@ -1,0 +1,167 @@
+{
+  "format": 1,
+  "views": {
+    "page_hourly": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "b56e7c959e5443be3e42dbe66c00d19f07d3ed86d07dad04230abf89cb29aff7",
+        "mode": "async",
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "hour",
+            "expr": {
+              "op": "toStartOfHour",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "ttl": {
+          "key": "hour",
+          "plus": "7 DAY"
+        },
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "avg",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "ms"
+              }
+            ],
+            "type": "Nullable(Float64)",
+            "name": "avg_ms"
+          },
+          {
+            "fn": "min",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "ms"
+              }
+            ],
+            "type": "UInt32",
+            "name": "fastest"
+          },
+          {
+            "fn": "quantile",
+            "params": [
+              0.9
+            ],
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "ms"
+              }
+            ],
+            "type": "Nullable(Float64)",
+            "name": "p90_ms"
+          },
+          {
+            "fn": "quantileDD",
+            "params": [
+              0.01,
+              0.99
+            ],
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "ms"
+              }
+            ],
+            "type": "Nullable(Float64)",
+            "name": "p99_ms"
+          },
+          {
+            "fn": "sum",
+            "args": [
+              {
+                "op": "column",
+                "type": "Decimal(10, 2)",
+                "name": "price"
+              }
+            ],
+            "type": "Decimal(38, 2)",
+            "name": "revenue"
+          },
+          {
+            "fn": "max",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "ms"
+              }
+            ],
+            "type": "UInt32",
+            "name": "slowest"
+          },
+          {
+            "fn": "sum",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "ms"
+              }
+            ],
+            "type": "UInt64",
+            "name": "total_ms"
+          },
+          {
+            "fn": "sum",
+            "args": [
+              {
+                "op": "column",
+                "type": "Float64",
+                "name": "score"
+              }
+            ],
+            "type": "Float64",
+            "name": "total_score"
+          },
+          {
+            "fn": "uniqExact",
+            "args": [
+              {
+                "op": "column",
+                "type": "String",
+                "name": "user_id"
+              }
+            ],
+            "type": "UInt64",
+            "name": "users"
+          },
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}

@@ -62,7 +62,7 @@ func (m *Meta) Unit(ctx context.Context, stream, unitID string) (Unit, error) {
 
 // Units reads the items of a stream's units by unit key, leaving out units without one.
 // Pruning reads eventually consistent: progress only rises, so a stale item still proves what
-// it shows. The backfill reads its fences consistently.
+// it shows. The backfill reads its fences consistently, after it read the archive.
 func (m *Meta) Units(ctx context.Context, stream string, unitKeys []string, consistent bool) (map[string]Unit, error) {
 	out := make(map[string]Unit, len(unitKeys))
 	for chunk := range slices.Chunk(unitKeys, store.MaxBatchGetKeys) {
@@ -146,20 +146,24 @@ func (m *Meta) Advance(ctx context.Context, u Unit, upTo string, at time.Time, c
 // activation, waiting if needed: by then every projector knows the version is activating, so
 // a unit missing from the listing gets its fence from its first batch. Fences already made
 // are kept, so a failed call can be repeated.
-func (m *Meta) FenceUnits(ctx context.Context, stream, version string, list func(context.Context) ([]string, error)) error {
+//
+// It returns the backfill's cut, read after the last fence was written: every record at or
+// below a fence was archived before the fence, so an archive that holds every record put
+// before the cut holds them all.
+func (m *Meta) FenceUnits(ctx context.Context, stream, version string, list func(context.Context) ([]string, error)) (time.Time, error) {
 	vs, _, err := m.viewState(ctx, version)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	if vs.State != Activating {
-		return fmt.Errorf("meta: fence units of %s for %s: the version is %s: %w", stream, version, vs.State, ErrNotActivating)
+		return time.Time{}, fmt.Errorf("meta: fence units of %s for %s: the version is %s: %w", stream, version, vs.State, ErrNotActivating)
 	}
 	if err = waitUntil(ctx, vs.ActivatedAt.Add(ListingDelay)); err != nil {
-		return fmt.Errorf("meta: fence units of %s for %s: %w", stream, version, err)
+		return time.Time{}, fmt.Errorf("meta: fence units of %s for %s: %w", stream, version, err)
 	}
 	unitIDs, err := list(ctx)
 	if err != nil {
-		return fmt.Errorf("meta: fence units of %s for %s: list the units: %w", stream, version, err)
+		return time.Time{}, fmt.Errorf("meta: fence units of %s for %s: list the units: %w", stream, version, err)
 	}
 	for _, id := range unitIDs {
 		u, uerr := m.Unit(ctx, stream, id)
@@ -167,10 +171,10 @@ func (m *Meta) FenceUnits(ctx context.Context, stream, version string, list func
 			_, uerr = m.EnsureFence(ctx, u, version)
 		}
 		if uerr != nil {
-			return uerr
+			return time.Time{}, uerr
 		}
 	}
-	return nil
+	return time.Now(), nil
 }
 
 // waitUntil returns once the clock reads t, or ctx's error when ctx ends first. It reads the

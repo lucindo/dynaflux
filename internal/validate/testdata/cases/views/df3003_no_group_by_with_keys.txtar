@@ -1,0 +1,20 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A view without GROUP BY has no keys, even with an ORDER BY and a PRIMARY KEY that name a
+column. DF3003 is its only diagnostic: the row size check (DF3307) skips a view whose keys
+are unknown.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page)
+PRIMARY KEY (page)
+AS SELECT count() AS views
+FROM page_views;
+-- want --
+dynaflux/views.sql:1:1: error DF3003

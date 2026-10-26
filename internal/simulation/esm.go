@@ -54,6 +54,10 @@ func (m *mapping) poll(l *lane) {
 		if l.acked == len(l.recs) {
 			return
 		}
+		if quiet := time.Until(l.unit.quiet); quiet > 0 {
+			time.Sleep(quiet)
+			continue
+		}
 		time.Sleep(between(rng, 0, r.sc.ESM.Window))
 		r.sched.gate(l.id, "take")
 		if r.stopped() {
@@ -63,6 +67,10 @@ func (m *mapping) poll(l *lane) {
 		if n := m.deliver(l, rng, l.recs[l.acked:end]); n > 0 {
 			r.sched.gate(l.id, "ack")
 			l.ack(n)
+			if topo := r.sc.Topology; !l.unit.closed && chance(rng, topo.Idle) {
+				r.count(&r.stats.Idle)
+				l.unit.quiet = time.Now().Add(between(rng, 0, topo.IdleFor))
+			}
 			continue
 		}
 		time.Sleep(retryBackoff)
@@ -112,33 +120,63 @@ type outcome struct {
 	err error
 }
 
-// call is one Handle in flight; out is set before finished closes.
+// call is one invocation in flight; out is set before finished closes.
 type call struct {
 	finished chan struct{}
 	out      outcome
 }
 
-// invoke runs one invocation on a warm container and waits for its result or its
-// deadline, whichever comes first.
+// invoke delivers a batch in one invocation. A Handle that returned without error
+// evaluated its records: P3 checks the breakers.
 func (m *mapping) invoke(l *lane, id string, rng *rand.Rand, recs []projector.Record) outcome {
-	rg := m.rg
-	r := rg.run
-	e := r.sc.ESM
-	core := rg.acquire(id, rng)
-	inv := &invocation{id: id, deadline: time.Now().Add(e.Timeout), empty: len(recs) == 0, stallAt: -1}
-	if len(recs) > 0 && chance(rng, e.Slow) {
-		inv.stallAt = rng.IntN(stallSpread * len(recs))
-		inv.stall = between(rng, -time.Millisecond, e.Timeout/stallFraction)
-	}
+	r := m.rg.run
 	b := projector.Batch{Stream: l.unit.s.name, Unit: l.unit.id, Records: make([]projector.Record, len(recs))}
 	for i, rec := range recs {
 		b.Records[i] = cloneRecord(rec)
+	}
+	o := m.rg.invoke(id, rng, len(recs), func(ctx context.Context, core Core) (projector.Result, error) {
+		return core.Handle(ctx, b)
+	})
+	if o.err == nil {
+		r.checkBreakers(m.rg, b, o.res)
+		r.checkReported(id, b, o.res)
+	}
+	return o
+}
+
+// checkReported counts the divergent MODIFY records a Handle reported, which are at most
+// those of its batch.
+func (r *run) checkReported(id string, b projector.Batch, res projector.Result) {
+	table, held := r.cfg.Naming.StreamTable(b.Stream), 0
+	for _, rec := range b.Records {
+		if rec.Op == projector.Modify && r.isDivergent(tableKey{table, keyOf(rec.New)}) {
+			held++
+		}
+	}
+	if res.Stats.Divergent > held {
+		r.violatef("Stats: %s reported %d divergent MODIFY records; its batch holds %d", id, res.Stats.Divergent, held)
+	}
+	r.mu.Lock()
+	r.stats.Reported += int64(res.Stats.Divergent)
+	r.mu.Unlock()
+}
+
+// invoke runs f, which handles n records, as one invocation on a warm container, and
+// waits for its result or its deadline, whichever comes first.
+func (rg *region) invoke(id string, rng *rand.Rand, n int, f func(context.Context, Core) (projector.Result, error)) outcome {
+	r := rg.run
+	e := r.sc.ESM
+	core := rg.acquire(id, rng)
+	inv := &invocation{id: id, deadline: time.Now().Add(e.Timeout), empty: n == 0, stallAt: -1}
+	if n > 0 && chance(rng, e.Slow) {
+		inv.stallAt = rng.IntN(stallSpread * n)
+		inv.stall = between(rng, -time.Millisecond, e.Timeout/stallFraction)
 	}
 	ctx, cancel := context.WithDeadline(withInvocation(context.Background(), inv), inv.deadline)
 	defer cancel()
 	c := &call{finished: make(chan struct{})}
 	r.count(&r.stats.Invocations)
-	r.sched.goActor(func() { r.handle(ctx, inv, core, b, c) })
+	r.sched.goActor(func() { r.handle(inv, c, func() (projector.Result, error) { return f(ctx, core) }) })
 	timer := time.NewTimer(time.Until(inv.deadline))
 	defer timer.Stop()
 	select {
@@ -156,18 +194,15 @@ func (m *mapping) invoke(l *lane, id string, rng *rand.Rand, recs []projector.Re
 	if !errors.Is(c.out.err, errCrashed) {
 		rg.pool = append(rg.pool, core)
 	}
-	if c.out.err == nil {
-		r.checkBreakers(rg, b)
-	}
 	return c.out
 }
 
-// handle runs Handle as one invocation. A crash, a kill or a panic leaves errCrashed; a
-// panic is also a bug (P8). A crash or a kill on a goroutine Handle started ends only that
-// goroutine, so Handle may still return; the invocation died all the same.
-func (r *run) handle(ctx context.Context, inv *invocation, core Core, b projector.Batch, c *call) {
+// handle runs f, a call of the core, as one invocation. A crash, a kill or a panic leaves
+// errCrashed; a panic is also a bug (P8). A crash or a kill on a goroutine the core started
+// ends only that goroutine, so f may still return; the invocation died all the same.
+func (r *run) handle(inv *invocation, c *call, f func() (projector.Result, error)) {
 	c.out.err = errCrashed
-	killed := true // until Handle returns or panics: the gates ended its goroutine
+	killed := true // until f returns or panics: the gates ended its goroutine
 	defer func() {
 		if p := recover(); p != nil {
 			killed = false
@@ -181,7 +216,7 @@ func (r *run) handle(ctx context.Context, inv *invocation, core Core, b projecto
 		}
 		close(c.finished)
 	}()
-	res, err := core.Handle(ctx, b)
+	res, err := f()
 	killed = false
 	if !inv.isDead() {
 		c.out = outcome{res: res, err: err}

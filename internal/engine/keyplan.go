@@ -212,7 +212,7 @@ func (kt keyType) convertNumber(v expr.Value, vt catalog.Type, dir int) converte
 	case c.under || c.over:
 	case kt.Kind == catalog.KindDecimal:
 		c.v = expr.Decimal(n)
-	case kindOf(kt.Kind) == expr.KindInt:
+	case expr.KindOf(kt.Kind) == expr.KindInt:
 		c.v = expr.Int(n.Int64())
 	default:
 		c.v = expr.Uint(n.Uint64())

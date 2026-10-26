@@ -1,0 +1,2 @@
+go test fuzz v1
+string("CREATE STREAM page_views(A A);CREATE MATERIALIZED VIEW A ORDER BY(page)PRIMARY KEY(page)AS SELECT 0 FROM page_views")

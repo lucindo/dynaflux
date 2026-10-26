@@ -48,11 +48,12 @@ Dynaflux is in early development, at milestone M2: the runtime core. What works:
 - `dynaflux generate` writes the typed Go client package of a project and numbers its view
   versions in `dynaflux.lock`, a file you commit.
 - The generated client appends events and runs queries against an in-memory store from
-  `fluxtest`, with the projector keeping views current, as in
-  [examples/analytics](examples/analytics).
+  `fluxtest`, with the projector keeping views current.
+  [examples/analytics](examples/analytics) compiles and passes its tests this way.
 
-Nothing runs on AWS yet: the DynamoDB store, the infrastructure templates and the operations
-commands, such as `status` and `backfill`, are not built. Until v1.0, the dialect, the
+Nothing runs on AWS yet. That needs the AWS runtime, with the DynamoDB store and the
+projector Lambda (milestone M3), and the infrastructure templates (M4). The operations
+commands, such as `status` and `backfill`, come after them. Until v1.0, the dialect, the
 configuration and the commands may change.
 
 ## Install
@@ -196,18 +197,25 @@ dynaflux/top_pages.sql:4:1: error DF4101: TopPages: view page_daily is partition
 
 - [docs/spec/sql.md](docs/spec/sql.md): the SQL dialect, with every diagnostic code.
 - [docs/spec/config.md](docs/spec/config.md): the `dynaflux.yaml` reference.
+- [docs/spec/encoding.md](docs/spec/encoding.md): how Dynaflux stores data in DynamoDB.
 - [docs/decisions](docs/decisions/README.md): architecture decision records.
 - [docs/README.md](docs/README.md): an index of all the docs.
 
 ## Development
 
-`make help` lists the development targets, and `make verify` runs the formatters,
-`go mod tidy`, the linters, the vulnerability check and the tests. `Float64` results must be
-the same on every CPU, so `make cross-arch` runs the cross-architecture tests as amd64:
-natively on an amd64 machine, and through Rosetta on Apple silicon. It isn't part of
-`make verify`. A test fails when `dynaflux generate` would change the code generated in
-[examples/analytics](examples/analytics); after changing the templates, run
-`go run ../../cmd/dynaflux generate` in that directory.
+- `make help` lists the development targets. `make verify` runs the formatters,
+  `go mod tidy`, the linters, the vulnerability check and the tests. If the linter reports an
+  unknown linter, your `golangci-lint` is older than `.golangci.yml`: run
+  `make tools-update`.
+- `Float64` results must be the same on every CPU, so `make cross-arch` runs the
+  cross-architecture tests as amd64: natively on an amd64 machine, and through Rosetta on
+  Apple silicon. It isn't part of `make verify`.
+- A test fails when `dynaflux generate` would change the code generated in
+  [examples/analytics](examples/analytics). After changing the templates, run
+  `go run ../../cmd/dynaflux generate` in that directory.
+- `make test` runs a smoke tier of the simulation harness. `make sim` and `make sim-controls`
+  run its full tier and its negative controls, as
+  [docs/runbooks/simulation.md](docs/runbooks/simulation.md) describes.
 
 ## License
 

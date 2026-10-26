@@ -209,7 +209,7 @@ func newQueryStore(t *testing.T, sql string) *queryStore {
 		cat:   cat,
 		mem:   m,
 		e:     engine.New(reads, engine.Options{Region: "us-east-1", Entropy: rand.NewChaCha8([32]byte{})}),
-		core:  projector.New(cat.Projector(), m, projector.Config{Naming: naming}),
+		core:  projector.New(cat.Projector(), m, nil, projector.Config{Naming: naming}),
 		reads: reads,
 		units: splitUnits(4),
 	}
@@ -516,11 +516,16 @@ func TestQueryErrors(t *testing.T) {
 		query  string
 		params []expr.Value
 		want   error
+		msg    string
 	}{
-		{"101 key combinations", "LatestHours", []expr.Value{strs(sites(101)...), expr.Uint(1)}, engine.ErrTooManyKeys},
-		{":one without a row", "UserViews", []expr.Value{expr.String("a"), expr.String("u9")}, engine.ErrNotFound},
-		{"division by zero", "PerView", []expr.Value{expr.Uint(0), expr.String("a")}, engine.ErrEvaluation},
-		{"invalid parameter", "UserViews", []expr.Value{expr.String("a"), expr.String("\xff")}, engine.ErrInvalidValue},
+		{"101 key combinations", "LatestHours", []expr.Value{strs(sites(101)...), expr.Uint(1)}, engine.ErrTooManyKeys,
+			"dynaflux: query LatestHours: too many key combinations: more than 100"},
+		{":one without a row", "UserViews", []expr.Value{expr.String("a"), expr.String("u9")}, engine.ErrNotFound,
+			"dynaflux: no row found"},
+		{"division by zero", "PerView", []expr.Value{expr.Uint(0), expr.String("a")}, engine.ErrEvaluation,
+			"dynaflux: query PerView: evaluation error in intDiv: division by zero"},
+		{"invalid parameter", "UserViews", []expr.Value{expr.String("a"), expr.String("\xff")}, engine.ErrInvalidValue,
+			"dynaflux: user: invalid value: not valid UTF-8"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -528,8 +533,8 @@ func TestQueryErrors(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				s := newQueryStore(t, queries)
 				s.visit(t, "a", "u1", 10, expr.Null(), start.Add(-time.Hour))
-				if _, err := s.query(t, tt.query, tt.params...); !errors.Is(err, tt.want) {
-					t.Errorf("got %v, want %v", err, tt.want)
+				if _, err := s.query(t, tt.query, tt.params...); !errors.Is(err, tt.want) || err.Error() != tt.msg {
+					t.Errorf("got %v, want %q matching %v", err, tt.msg, tt.want)
 				}
 			})
 		})

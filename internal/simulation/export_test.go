@@ -39,27 +39,27 @@ func (m *ArchiveModel) Arrived(now time.Time) ([]string, int) {
 
 func (m *ArchiveModel) CompleteThrough(t, now time.Time) bool { return m.a.completeThrough(t, now) }
 
-// CheckChangeStream checks P0 on one region whose change stream holds records, one per
-// item, against the appends applied.
-func CheckChangeStream(applied, records []store.Item) []string {
-	r := &run{applied: map[tableKey]bool{}}
+// CheckChangeStream checks P0 on one region whose change stream holds records, against
+// the appends applied, one per region that applied it, and the items some region deleted.
+func CheckChangeStream(applied, deleted []store.Item, records []projector.Record) []string {
+	r := &run{applied: map[tableKey]int{}, expired: map[tableKey]bool{}}
 	for _, it := range applied {
-		r.applied[tableKey{"t", keyOf(it)}] = true
+		r.applied[tableKey{"t", keyOf(it)}]++
 	}
-	u := &unit{}
-	for _, it := range records {
-		u.recs = append(u.recs, projector.Record{Op: projector.Insert, New: it})
+	for _, it := range deleted {
+		r.expired[tableKey{"t", keyOf(it)}] = true
 	}
-	r.checkStream(&region{name: "r0", order: []*stream{{table: "t", units: []*unit{u}}}})
+	r.checkStream(&region{name: "r0", order: []*stream{{table: "t", units: []*unit{{recs: records}}}}})
 	return r.violations
 }
 
 func NewOracle() *Oracle { return newOracle() }
 
-// CheckViews checks P1 and P3 on region r0, whose oracle is o, and P2 between r0 and r1.
-func CheckViews(o *Oracle, r0, r1 State) []string {
+// CheckViews checks P1 and P3 on region r0, whose oracle is o, and P2 between r0 and r1,
+// but for the rows in skip.
+func CheckViews(o *Oracle, r0, r1 State, skip map[RowID]bool) []string {
 	r := &run{}
 	r.checkRegion("r0", o, r0)
-	r.checkConvergence("r0 vs r1", r0, r1)
+	r.checkConvergence("r0 vs r1", r0, r1, skip)
 	return r.violations
 }

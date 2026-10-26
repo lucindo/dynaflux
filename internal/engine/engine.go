@@ -23,13 +23,14 @@ import (
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-// Errors that callers branch on; package dynaflux exports them.
+// Errors that callers branch on; package dynaflux exports them. An error's text starts with
+// "dynaflux: " once, so only the sentinels that start one carry it.
 var (
 	ErrDuplicate     = errors.New("dynaflux: duplicate event")
 	ErrOutsideWindow = errors.New("dynaflux: event_time outside the ACCEPT window")
-	ErrInvalidValue  = errors.New("dynaflux: invalid value")
+	ErrInvalidValue  = errors.New("invalid value")
 	ErrNotFound      = errors.New("dynaflux: no row found")
-	ErrTooManyKeys   = errors.New("dynaflux: too many key combinations")
+	ErrTooManyKeys   = errors.New("too many key combinations")
 	// ErrEvaluation is expr.ErrEval: a query's evaluation errors are those of sql.md §5.8.
 	ErrEvaluation = expr.ErrEval
 )
@@ -42,7 +43,7 @@ type ValueError struct {
 	Err  error
 }
 
-func (e *ValueError) Error() string { return e.Name + ": " + e.Err.Error() }
+func (e *ValueError) Error() string { return "dynaflux: " + e.Name + ": " + e.Err.Error() }
 
 func (e *ValueError) Unwrap() error { return e.Err }
 

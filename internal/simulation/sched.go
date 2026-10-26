@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing/synctest"
+	"time"
 )
 
 // RNG streams. Actors draw from streams of their own, keyed by their names, so adding an
@@ -151,4 +152,47 @@ func isClosed(c <-chan struct{}) bool {
 	default:
 		return false
 	}
+}
+
+// dueQueue holds an actor's jobs in due order, each after those due at the same time, and
+// wakes the actor on each add. Only gated code adds.
+type dueQueue[T interface{ dueAt() time.Time }] struct {
+	jobs []T
+	wake chan struct{}
+}
+
+func newDueQueue[T interface{ dueAt() time.Time }]() dueQueue[T] {
+	return dueQueue[T]{wake: make(chan struct{}, 1)}
+}
+
+func (q *dueQueue[T]) add(job T) {
+	i, _ := slices.BinarySearchFunc(q.jobs, job.dueAt(), func(j T, t time.Time) int {
+		if j.dueAt().After(t) {
+			return 1
+		}
+		return -1
+	})
+	q.jobs = slices.Insert(q.jobs, i, job)
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// wait returns at at or on the next add, whichever comes first, since an added job may be
+// due sooner; with a zero at, only on an add. It reports false when stop closes first.
+func (q *dueQueue[T]) wait(at time.Time, stop <-chan struct{}) bool {
+	var due <-chan time.Time
+	if !at.IsZero() {
+		timer := time.NewTimer(time.Until(at))
+		defer timer.Stop()
+		due = timer.C
+	}
+	select {
+	case <-due:
+	case <-q.wake:
+	case <-stop:
+		return false
+	}
+	return true
 }

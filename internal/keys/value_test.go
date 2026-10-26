@@ -91,6 +91,35 @@ func TestEncodeValueRejectsWhatNoAttributeHolds(t *testing.T) {
 	}
 }
 
+// Another type's accessor reads garbage from a value, such as 0 from AsUint of an Int, so
+// the encoders reject it instead of storing that.
+func TestEncodersRejectTheWrongRepresentation(t *testing.T) {
+	t.Parallel()
+	value := func(typ catalog.Type, v expr.Value) error { _, _, err := keys.EncodeValue(typ, v); return err }
+	field := func(typ catalog.Type, v expr.Value) error { _, err := keys.AppendField(nil, typ, v); return err }
+	tests := []struct {
+		name   string
+		encode func(catalog.Type, expr.Value) error
+		typ    catalog.Type
+		v      expr.Value
+		want   string
+	}{
+		{"attribute: UInt64 from an Int", value, tUInt64, expr.Int(5), "wrong representation for UInt64"},
+		{"attribute: Date from an Int", value, tDate, expr.Int(0), "wrong representation for Date"},
+		{"attribute: Array from a String", value, catalog.Type{Kind: catalog.KindString, Array: true}, expr.String("a"),
+			"wrong representation for Array(String)"},
+		{"attribute: Array element from an Int", value, catalog.Type{Kind: catalog.KindUInt8, Array: true},
+			expr.Array([]expr.Value{expr.Uint(1), expr.Int(2)}), "element 2: wrong representation for UInt8"},
+		{"key: Int64 from a UInt", field, tInt64, expr.Uint(1), "wrong representation for Int64"},
+		{"key: UUID from a String", field, tUUID, expr.String(strings.Repeat("x", 16)), "wrong representation for UUID"},
+	}
+	for _, tt := range tests {
+		if err := tt.encode(tt.typ, tt.v); err == nil || err.Error() != tt.want {
+			t.Errorf("%s: got %v, want %q", tt.name, err, tt.want)
+		}
+	}
+}
+
 // Readers take numbers in any form DynamoDB returns and convert them exactly (encoding.md
 // §5.1).
 func TestDecodeValue(t *testing.T) {

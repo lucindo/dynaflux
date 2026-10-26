@@ -4,7 +4,6 @@
 package simulation
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -15,15 +14,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/engine"
 	"github.com/lucindo/dynaflux/internal/expr"
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-const (
-	writeGap   = 200 * time.Millisecond // most time between a writer's appends
-	writeRetry = 50 * time.Millisecond  // a writer's wait before it retries an append
-)
+const writeRetry = 50 * time.Millisecond // a writer's wait before it retries an append
 
 // run is one seed: every region, actor and record of it.
 type run struct {
@@ -38,21 +35,24 @@ type run struct {
 	topo    *rand.Rand // drawn only right after a gate
 	arch    *rand.Rand // drawn only right after a gate
 	regions []*region
-	events  []event
-	counts  map[string]int // events by stream
-	stop    chan struct{}  // closed at quiescence, or when the budget runs out
-	quiet   chan struct{}  // closed when nothing is left to deliver
+	events  []Event
+	counts  map[string]int    // events by stream
+	dedup   map[string]bool   // the streams with DEDUP BY
+	fenced  map[string]bool   // the view versions that need the fenced handoff
+	sources map[string]string // the stream table of each view version's table, for P4
+	views   map[string]string // the view version of each view table, for P2
+	stop    chan struct{}     // closed at quiescence, or when the budget runs out
+	quiet   chan struct{}     // closed when nothing is left to deliver
 
 	mu         sync.Mutex
 	stats      Stats
 	violations []string
-	pending    int // writers, shipments and lane records not yet acknowledged
-	applied    map[tableKey]bool
-}
-
-type event struct {
-	stream string
-	vals   []expr.Value
+	// pending counts writers, shipments, lane records, deletes and backfills not yet done.
+	pending   int
+	applied   map[tableKey]int  // the regions whose own append wrote each stream item
+	expired   map[tableKey]bool // the stream items a region deleted, for P0
+	divergent map[tableKey]bool // the events appended with two payloads, for P2
+	maxHWM    int
 }
 
 type tableKey struct {
@@ -66,22 +66,37 @@ func newRun(ctx context.Context, sc Scenario, sys System, seed uint64) (*run, er
 		return nil, fmt.Errorf("the system needs a catalog, and tables named for its store: got %+v", cfg.Naming)
 	}
 	r := &run{
-		sc:      sc,
-		sys:     sys,
-		cfg:     cfg,
-		meta:    cfg.Naming.MetaTable(),
-		window:  cmp.Or(sc.Window, time.Duration(cfg.Catalog.Catalog().PruneWindowSeconds)*time.Second),
-		seed:    seed,
-		faults:  newRand(seed, streamFaults),
-		topo:    newRand(seed, streamTopology),
-		arch:    newRand(seed, streamArchive),
-		counts:  map[string]int{},
-		stop:    make(chan struct{}),
-		quiet:   make(chan struct{}),
-		applied: map[tableKey]bool{},
+		sc:        sc,
+		sys:       sys,
+		cfg:       cfg,
+		meta:      cfg.Naming.MetaTable(),
+		window:    time.Duration(cfg.Catalog.Catalog().PruneWindowSeconds) * time.Second,
+		seed:      seed,
+		faults:    newRand(seed, streamFaults),
+		topo:      newRand(seed, streamTopology),
+		arch:      newRand(seed, streamArchive),
+		counts:    map[string]int{},
+		dedup:     map[string]bool{},
+		fenced:    map[string]bool{},
+		sources:   map[string]string{},
+		views:     map[string]string{},
+		stop:      make(chan struct{}),
+		quiet:     make(chan struct{}),
+		applied:   map[tableKey]int{},
+		expired:   map[tableKey]bool{},
+		divergent: map[tableKey]bool{},
 	}
-	if r.window <= 0 {
-		return nil, fmt.Errorf("the prune window is %v", r.window)
+	for _, st := range cfg.Catalog.Catalog().Streams {
+		r.dedup[st.Name] = len(st.DedupBy) > 0
+	}
+	for _, v := range cfg.Catalog.Catalog().Views {
+		for i := range v.Versions {
+			vv := &v.Versions[i]
+			id, table := catalog.VersionID(v.Name, vv.Number), cfg.Naming.ViewTable(v.Name, vv.Number)
+			r.fenced[id] = vv.FencedHandoff()
+			r.sources[table] = cfg.Naming.StreamTable(vv.Stream)
+			r.views[table] = id
+		}
 	}
 	r.sched = newSched(seed, r.violatef)
 	if err := r.generate(); err != nil {
@@ -101,7 +116,38 @@ func newRun(ctx context.Context, sc Scenario, sys System, seed uint64) (*run, er
 			}
 		}
 	}
+	r.isolate()
 	return r, nil
+}
+
+// The links a cut pauses.
+const (
+	cutBoth = iota
+	cutOut
+	cutIn
+	cutWays
+)
+
+// isolate draws the cuts: each region, with chance Share, loses its links both ways, only
+// its outgoing ones, or only its incoming ones, for a while.
+func (r *run) isolate() {
+	iso := r.sc.Isolation
+	for _, rg := range r.regions {
+		if !chance(r.topo, iso.Share) {
+			continue
+		}
+		r.stats.Cuts++
+		from := time.Now().Add(between(r.topo, 0, iso.Within))
+		c := cut{from: from, to: from.Add(between(r.topo, 1, iso.Max))}
+		way := r.topo.IntN(cutWays)
+		for _, other := range r.regions {
+			for _, l := range other.links {
+				if l.to == rg && way != cutOut || l.from == rg && way != cutIn {
+					l.cuts = append(l.cuts, c)
+				}
+			}
+		}
+	}
 }
 
 func (r *run) generate() error {
@@ -111,25 +157,33 @@ func (r *run) generate() error {
 		if poison {
 			r.count(&r.stats.Poison)
 		}
-		name, vals := r.sys.Event(rng, n, poison)
-		if _, ok := r.cfg.Catalog.Catalog().Stream(name); !ok {
-			return fmt.Errorf("event %d is on stream %q, which the catalog doesn't have", n, name)
+		ev := r.sys.Event(rng, n, poison)
+		if _, ok := r.cfg.Catalog.Catalog().Stream(ev.Stream); !ok {
+			return fmt.Errorf("event %d is on stream %q, which the catalog doesn't have", n, ev.Stream)
 		}
-		r.events = append(r.events, event{name, vals})
-		r.counts[name]++
+		r.events = append(r.events, ev)
+		r.counts[ev.Stream]++
 	}
 	return nil
 }
 
-// start opens every region's units and starts the writers and the coordinator.
+// start opens every region's units and starts the writers, the backfills and the actor
+// that stops the run.
 func (r *run) start() {
+	r.pending = r.sc.Writers
 	for _, rg := range r.regions {
 		rg.open()
 		for _, l := range rg.links {
 			r.sched.goActor(l.run)
 		}
+		if r.sc.Sweep != (Sweep{}) {
+			r.sched.goActor(rg.sweeper.run)
+		}
+		for _, c := range rg.coordinators() {
+			r.pending++
+			r.sched.goActor(c.run)
+		}
 	}
-	r.pending = r.sc.Writers
 	for w := range r.sc.Writers {
 		r.sched.goActor(func() { r.write(w) })
 	}
@@ -138,7 +192,9 @@ func (r *run) start() {
 
 // write appends every Writers-th event, each to a random home region, retrying until
 // the append is acknowledged. A retry gets a new event_id, so an append that applied
-// before its caller saw a timeout stays as an event of its own.
+// before its caller saw a timeout stays as an event of its own; on a DEDUP BY stream, the
+// retry finds the event stored. An event of a DEDUP BY stream may be appended in a second
+// region too, with its divergent payload if it has one.
 func (r *run) write(w int) {
 	id := "w" + strconv.Itoa(w)
 	rng := r.actorRNG(id)
@@ -150,28 +206,54 @@ func (r *run) write(w int) {
 		engines[i] = engine.New(rg.store, engine.Options{Region: rg.name, Prefix: r.cfg.Naming.Prefix, Entropy: entropy})
 	}
 	for n := w; n < len(r.events); n += r.sc.Writers {
-		time.Sleep(time.Duration(rng.Int64N(int64(writeGap))))
-		r.append(ctx, engines[rng.IntN(len(engines))], r.events[n])
+		time.Sleep(between(rng, 0, r.sc.WriteGap))
+		ev, home := r.events[n], rng.IntN(len(engines))
+		k := r.append(ctx, engines[home], ev.Stream, ev.Vals)
+		if r.dedup[ev.Stream] && len(engines) > 1 && chance(rng, r.sc.Duplicate) {
+			r.count(&r.stats.Duplicates)
+			vals := ev.Vals
+			if ev.Divergent != nil {
+				vals = ev.Divergent
+				r.mu.Lock()
+				r.divergent[tableKey{r.cfg.Naming.StreamTable(ev.Stream), k}] = true
+				r.mu.Unlock()
+			}
+			r.append(ctx, engines[(home+1+rng.IntN(len(engines)-1))%len(engines)], ev.Stream, vals)
+		}
 	}
 	r.sched.gate(id, "done")
 	r.settle(1)
 }
 
-func (r *run) append(ctx context.Context, e *engine.Engine, ev event) {
+// append appends an event until it is acknowledged, and returns its key. On a DEDUP BY
+// stream, a duplicate is acknowledged: the retry of an attempt that applied, or the
+// event appended in another region. An append is a duplicate exactly when its write found
+// another call's event: the SDK's retry of the call's own write succeeds.
+func (r *run) append(ctx context.Context, e *engine.Engine, stream string, vals []expr.Value) store.Key {
+	inv := invocationOf(ctx)
 	for !r.stopped() {
-		res, err := e.Append(ctx, r.cfg.Catalog, ev.stream, [][]expr.Value{ev.vals}, engine.AppendMode{})
+		inv.taken = false
+		res, err := e.Append(ctx, r.cfg.Catalog, stream, [][]expr.Value{vals}, engine.AppendMode{})
 		if err == nil {
 			err = res[0].Err
 		}
+		dup := errors.Is(err, engine.ErrDuplicate)
 		switch {
-		case err == nil:
-			return
+		case err == nil && inv.taken:
+			r.violatef("events: append to %s succeeded, but its write found another call's event", stream)
+		case dup && !inv.taken:
+			r.violatef("events: append to %s: %v, but its write found no other call's event", stream, err)
+		}
+		switch {
+		case err == nil, r.dedup[stream] && dup:
+			return res[0].Key
 		case !errors.Is(err, errTransient) && !errors.Is(err, errAmbiguous):
-			r.violatef("events: append to %s: %v", ev.stream, err)
-			return
+			r.violatef("events: append to %s: %v", stream, err)
+			return store.Key{}
 		}
 		time.Sleep(writeRetry)
 	}
+	return store.Key{}
 }
 
 // coordinate stops the run at quiescence, or when the budget runs out (P6).
@@ -197,6 +279,13 @@ func (r *run) settle(n int) {
 }
 
 func (r *run) stopped() bool { return isClosed(r.stop) }
+
+// isDivergent reports whether an event was appended with two payloads.
+func (r *run) isDivergent(k tableKey) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.divergent[k]
+}
 
 func (r *run) count(field *int64) {
 	r.mu.Lock()
@@ -233,5 +322,6 @@ func (r *run) outcome(ctx context.Context, took time.Duration) Outcome {
 		Time:       took,
 		Stats:      r.stats,
 		Violations: r.violations,
+		MaxHWM:     r.maxHWM,
 	}
 }

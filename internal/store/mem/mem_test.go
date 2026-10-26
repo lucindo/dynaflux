@@ -96,6 +96,35 @@ func TestTablesAreSeparate(t *testing.T) {
 	}
 }
 
+func TestDeleteRemovesTheItemFromReadsAndConditions(t *testing.T) {
+	t.Parallel()
+	m := mem.New()
+	for _, sk := range []string{"a", "b"} {
+		if err := m.Put(t.Context(), "t", item(sk, nil), store.IfAbsent()); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	if err := m.Delete(t.Context(), "t", store.Key{PK: "p", SK: "a"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := m.Delete(t.Context(), "t", store.Key{PK: "p", SK: "a"}); err != nil {
+		t.Errorf("Delete of an absent item: %v", err)
+	}
+	var sks []string
+	for it, err := range m.Query(t.Context(), "t", store.Query{PK: "p"}) {
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		sks = append(sks, it[catalog.AttrSK].Str)
+	}
+	if len(sks) != 1 || sks[0] != "b" {
+		t.Errorf("Query after deleting a read %q, want [b]", sks)
+	}
+	if err := m.Put(t.Context(), "t", item("a", nil), store.IfAbsent()); err != nil {
+		t.Errorf("IfAbsent Put of a deleted key: %v", err)
+	}
+}
+
 // Without a PageSize, a page ends at the item that brings it to 1 MB.
 func TestQueryPagesOfOneMegabyte(t *testing.T) {
 	t.Parallel()

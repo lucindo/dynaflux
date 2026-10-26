@@ -62,7 +62,7 @@ func NewStore(tb testing.TB, cat *dynaflux.Catalog) *dynaflux.Store {
 		Backend: b,
 		tb:      tb,
 		meta:    m,
-		core:    projector.New(c.Projector(), b, projector.Config{Naming: naming}),
+		core:    projector.New(c.Projector(), b, nil, projector.Config{Naming: naming}),
 		// The longest invocation the prune window allows.
 		timeout: time.Duration(c.Catalog().PruneWindowSeconds-catalog.LifetimeMarginSeconds) * time.Second,
 		streams: map[string]string{},

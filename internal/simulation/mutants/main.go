@@ -104,9 +104,9 @@ func runControl(ctx context.Context, root string, c control) (string, bool) {
 		}
 		args = append(args, "-overlay="+overlay)
 	}
-	args = append(args, "./internal/simulation")
+	args = append(args, cmp.Or(c.Package, "./internal/simulation"))
 	if c.Test == "" {
-		args = append(args, "-sim.control="+c.ID, "-sim.scenario="+c.Scenario, "-sim.seeds="+strconv.Itoa(c.Seeds))
+		args = append(args, "-sim.control="+c.ID, "-sim.scenario="+c.Scenario, "-sim.seeds="+strconv.Itoa(c.Seeds), "-sim.want="+c.Want)
 	}
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = root
@@ -119,11 +119,11 @@ func runControl(ctx context.Context, root string, c control) (string, bool) {
 	case !found:
 		return fmt.Sprintf("%s\terror: TestControl reported nothing\n%s", c.ID, out), false
 	case err != nil || caught == 0:
-		return fmt.Sprintf("%s\tNOT CAUGHT in %d seeds", c.ID, seeds), false
+		return fmt.Sprintf("%s\tNOT CAUGHT by %s in %d seeds", c.ID, c.Want, seeds), false
 	case float64(caught) < weak*float64(seeds):
-		return fmt.Sprintf("%s\tcaught in %d/%d seeds: weak", c.ID, caught, seeds), true
+		return fmt.Sprintf("%s\tcaught by %s in %d/%d seeds: weak", c.ID, c.Want, caught, seeds), true
 	}
-	return fmt.Sprintf("%s\tcaught in %d/%d seeds", c.ID, caught, seeds), true
+	return fmt.Sprintf("%s\tcaught by %s in %d/%d seeds", c.ID, c.Want, caught, seeds), true
 }
 
 // testVerdict judges a control whose test must fail: a failure of anything else, such as
@@ -152,7 +152,7 @@ func writeOverlay(root, dir string, c control) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	mutated, err := mutate(src, c.Old, c.New)
+	mutated, err := c.mutate(src)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", c.File, err)
 	}
@@ -168,6 +168,18 @@ func writeOverlay(root, dir string, c control) (string, error) {
 	}
 	overlay := filepath.Join(dir, "overlay.json")
 	return overlay, os.WriteFile(overlay, js, 0o600)
+}
+
+// mutate applies c's replacements to src, its File.
+func (c control) mutate(src []byte) ([]byte, error) {
+	out, err := mutate(src, c.Old, c.New)
+	for _, r := range c.More {
+		if err != nil {
+			break
+		}
+		out, err = mutate(out, r[0], r[1])
+	}
+	return out, err
 }
 
 // mutate replaces from, which must occur exactly once in src, with to: a mutant whose

@@ -31,6 +31,9 @@ const (
 func (e *Engine) Read(ctx context.Context, cat *Catalog, stream string, key []expr.Value, from, to *int64) iter.Seq2[[]expr.Value, error] {
 	return func(yield func([]expr.Value, error) bool) {
 		s, err := cat.stream(stream)
+		if err == nil {
+			err = s.checkKey(key)
+		}
 		if err != nil {
 			yield(nil, err)
 			return
@@ -82,20 +85,25 @@ func (e *Engine) events(ctx context.Context, cat *Catalog, s *stream, key []expr
 	}
 }
 
-// lookupKey returns the partition key of the PRIMARY KEY values key, without a shard
-// suffix, or "" when it is too long to match any event.
-func (s *stream) lookupKey(key []expr.Value) (string, error) {
+// checkKey checks the PRIMARY KEY values of a read.
+func (s *stream) checkKey(key []expr.Value) error {
 	if len(key) != len(s.key) {
-		return "", fmt.Errorf("dynaflux: %d values for the %d PRIMARY KEY columns of stream %s", len(key), len(s.key), s.Def.Name)
+		return fmt.Errorf("dynaflux: %d values for the %d PRIMARY KEY columns of stream %s", len(key), len(s.key), s.Def.Name)
 	}
 	for i, c := range s.key {
 		if _, _, err := encode(s.Columns[c].Name, s.Columns[c].Type, key[i]); err != nil {
-			return "", err
+			return err
 		}
 	}
+	return nil
+}
+
+// lookupKey returns the partition key of the PRIMARY KEY values key, without a shard
+// suffix, or "" when it is too long to match any event.
+func (s *stream) lookupKey(key []expr.Value) (string, error) {
 	pk, err := keys.Key(s.keyTypes(), key)
 	if err != nil {
-		return "", fmt.Errorf("dynaflux: partition key: %w", err)
+		return "", fmt.Errorf("partition key: %w", err)
 	}
 	if s.Def.Shards > 1 && len(keys.ShardKey(pk, 0)) > store.MaxPKLen || len(pk) > store.MaxPKLen {
 		return "", nil
@@ -122,7 +130,7 @@ func skRange(from, to *int64) (string, string, bool, error) {
 		hi, err = keys.AppendField(nil, catalog.EventTimeType(), expr.Micros(*to))
 	}
 	if err != nil {
-		return "", "", false, fmt.Errorf("dynaflux: read bound: %w", err)
+		return "", "", false, fmt.Errorf("event_time bound: %w", err)
 	}
 	return string(lo), string(hi), true, nil
 }

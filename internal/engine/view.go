@@ -31,8 +31,8 @@ func (e *Engine) ReadRow(ctx context.Context, cat *Catalog, version string, key 
 		return nil, false, fmt.Errorf("dynaflux: %d values for the %d keys of view %s", len(key), len(vv.Keys), version)
 	}
 	for i, k := range vv.Keys {
-		if err := check(k.Expr.Type, key[i]); err != nil {
-			return nil, false, invalid(k.Name, err)
+		if _, _, err := encode(k.Name, k.Expr.Type, key[i]); err != nil {
+			return nil, false, err
 		}
 	}
 	sq, ok, err := rowQuery(vv, key)

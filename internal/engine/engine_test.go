@@ -6,6 +6,7 @@ package engine_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"math/big"
 	"math/rand/v2"
@@ -544,6 +545,18 @@ func TestReadWithoutRequest(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestReadRejectsAnInvalidKey(t *testing.T) {
+	t.Parallel()
+	c := compile(t, streams)
+	var got []string
+	for _, err := range newEngine(mem.New()).Read(t.Context(), c, "page_views", []expr.Value{expr.String("\xff")}, nil, nil) {
+		got = append(got, fmt.Sprint(err))
+	}
+	if want := []string{"dynaflux: user_id: invalid value: not valid UTF-8"}; !slices.Equal(got, want) {
+		t.Errorf("read %q, want %q", got, want)
 	}
 }
 

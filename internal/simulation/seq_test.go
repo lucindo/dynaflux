@@ -5,6 +5,7 @@ package simulation_test
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"sync"
 	"testing"
@@ -56,19 +57,19 @@ func (w *widths) Config() simulation.Config {
 	return simulation.Config{Catalog: w.cat, Naming: catalog.Naming{Store: storeName}}
 }
 
-func (*widths) Event(_ *rand.Rand, n int, _ bool) (string, []expr.Value) {
+func (*widths) Event(_ *rand.Rand, n int, _ bool) simulation.Event {
 	stream := streamName
 	if n%quietEvery == 0 {
 		stream = quietStream
 	}
-	return stream, []expr.Value{expr.Uint(0), expr.Null()}
+	return simulation.Event{Stream: stream, Vals: []expr.Value{expr.Uint(0), expr.Null()}}
 }
 
 func (w *widths) NewCore(b store.Backend, _ simulation.Archiver) simulation.Core {
 	return widthsCore{w, b}
 }
 
-func (*widths) Expect(*simulation.Oracle, string, projector.Record) error { return nil }
+func (*widths) Expect(*simulation.Oracle, string, string, projector.Record) error { return nil }
 
 func (*widths) Read(context.Context, store.Backend) (simulation.State, error) {
 	return simulation.State{}, nil
@@ -77,6 +78,10 @@ func (*widths) Read(context.Context, store.Backend) (simulation.State, error) {
 type widthsCore struct {
 	w *widths
 	b store.Backend
+}
+
+func (widthsCore) ApplyBackfill(context.Context, string, []projector.BackfillRecord) error {
+	return errors.New("widths has no views to backfill")
 }
 
 func (c widthsCore) Handle(_ context.Context, b projector.Batch) (projector.Result, error) {

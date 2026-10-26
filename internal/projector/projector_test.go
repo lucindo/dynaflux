@@ -150,11 +150,12 @@ const (
 var start = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC) //nolint:gochecknoglobals // a constant time.Time
 
 type fixture struct {
-	cat  *engine.Catalog
-	mem  *mem.Mem
-	e    *engine.Engine
-	meta *meta.Meta
-	core *projector.Core
+	cat     *engine.Catalog
+	mem     *mem.Mem
+	e       *engine.Engine
+	meta    *meta.Meta
+	archive *archiveLog
+	core    *projector.Core
 }
 
 // newFixture returns the test store with every view version live, and a core that writes
@@ -180,12 +181,14 @@ func newPendingFixture(t *testing.T, wrap func(store.Backend) store.Backend) *fi
 	if wrap == nil {
 		wrap = func(b store.Backend) store.Backend { return b }
 	}
+	a := &archiveLog{}
 	return &fixture{
-		cat:  cat,
-		mem:  m,
-		e:    engine.New(m, engine.Options{Region: "us-east-1", Entropy: rand.NewChaCha8([32]byte{})}),
-		meta: meta.New(m, naming.MetaTable()),
-		core: projector.New(cat.Projector(), wrap(m), projector.Config{Naming: naming}),
+		cat:     cat,
+		mem:     m,
+		e:       engine.New(m, engine.Options{Region: "us-east-1", Entropy: rand.NewChaCha8([32]byte{})}),
+		meta:    meta.New(m, naming.MetaTable()),
+		archive: a,
+		core:    projector.New(cat.Projector(), wrap(m), a, projector.Config{Naming: naming}),
 	}
 }
 
@@ -422,8 +425,8 @@ func TestHandleFailsTheBatch(t *testing.T) {
 		ctx   func(context.Context) (context.Context, context.CancelFunc)
 		want  error // nil for any error
 	}{
-		{"a row DynamoDB rejects", failPuts(pageTotalsTable, rejected), oneClick, aMinute, store.ErrInvalidRequest},
-		{"a breaker that can't be written", failPuts(catalog.Naming{Store: "app"}.MetaTable(), errTransient), oneClick, aMinute, errTransient},
+		{"a row DynamoDB rejects", failPuts(pageTotalsTable, "", rejected), oneClick, aMinute, store.ErrInvalidRequest},
+		{"a breaker that can't be written", failPuts(catalog.Naming{Store: "app"}.MetaTable(), "view", errTransient), oneClick, aMinute, errTransient},
 		{"no deadline", nil, oneClick, context.WithCancel, nil},
 		{"no delivery unit", nil, func(click store.Item) projector.Batch {
 			return projector.Batch{Stream: "clicks", Records: []projector.Record{insert(1, click)}}
@@ -616,6 +619,7 @@ func TestHandleAppliesAdditiveVersionOnlyOnceActivating(t *testing.T) {
 		if err := f.meta.SetViewState(t.Context(), "page_totals@v1", meta.Activating); err != nil {
 			t.Fatal(err)
 		}
+		time.Sleep(meta.MaxViewStateAge) // the core uses the states it read until then
 		f.handle(t, insert(2, f.click(t, "u2", "/a", 200)))
 		if got, want := f.row(t, "page_totals@v1", page("/a")), "/a 200 2.00 200 200 1 1"; got != want {
 			t.Errorf("page_totals /a once activating is %q, want %q", got, want)
@@ -626,13 +630,39 @@ func TestHandleAppliesAdditiveVersionOnlyOnceActivating(t *testing.T) {
 func TestHandleSendsNothingAfterDeadline(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		f := newFixture(t, func(b store.Backend) store.Backend { return slowGets{Backend: b, delay: 2 * time.Minute} })
+		f := newFixture(t, func(b store.Backend) store.Backend {
+			return slowGets{Backend: b, table: "app-view-page_keys-v1", delay: 2 * time.Minute}
+		})
 		res := f.handle(t, insert(1, f.click(t, "u1", "/a", 100)))
 		if res.FailedSeq != seq(1) {
 			t.Errorf("FailedSeq %q, want %q", res.FailedSeq, seq(1))
 		}
 		if got := f.row(t, "page_keys@v1", page("/a")); got != "" {
 			t.Errorf("page_keys /a is %q after the deadline, want no row", got)
+		}
+	})
+}
+
+// TestHandleAdvancesNothingAfterDeadline: the last row write lands, but its response comes
+// after the deadline, so the progress write that would follow is never sent.
+func TestHandleAdvancesNothingAfterDeadline(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		f := newFixture(t, func(b store.Backend) store.Backend {
+			return slowPuts{Backend: b, table: "app-view-page_rates-v1", delay: 2 * time.Minute}
+		})
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		_, err := f.core.Handle(ctx, projector.Batch{Stream: "clicks", Unit: unit, Records: []projector.Record{insert(1, f.click(t, "u1", "/a", 100))}})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Handle: %v, want a timeout", err)
+		}
+		u, err := f.meta.Unit(t.Context(), "clicks", unit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := f.row(t, "page_rates@v1", page("/a")), "/a 10"; got != want || u.Progress != "" {
+			t.Errorf("page_rates /a is %q and progress %q, want %q and none", got, u.Progress, want)
 		}
 	})
 }
@@ -742,20 +772,21 @@ func (f *failOnce) Put(ctx context.Context, table string, it store.Item, c store
 	return f.Backend.Put(ctx, table, it, c)
 }
 
-// failPuts returns a wrapper that fails every write to table with err.
-func failPuts(table string, err error) func(store.Backend) store.Backend {
-	return func(b store.Backend) store.Backend { return failingPuts{Backend: b, table: table, err: err} }
+// failPuts returns a wrapper that fails with err every write to table, or with pk set, every
+// write to that partition of table.
+func failPuts(table, pk string, err error) func(store.Backend) store.Backend {
+	return func(b store.Backend) store.Backend { return failingPuts{Backend: b, table: table, pk: pk, err: err} }
 }
 
 type failingPuts struct {
 	store.Backend
 
-	table string
-	err   error
+	table, pk string
+	err       error
 }
 
 func (f failingPuts) Put(ctx context.Context, table string, it store.Item, c store.Cond) error {
-	if table == f.table {
+	if table == f.table && (f.pk == "" || it[catalog.AttrPK].Str == f.pk) {
 		return f.err
 	}
 	return f.Backend.Put(ctx, table, it, c)
@@ -782,15 +813,34 @@ func (a *afterViewStates) Query(ctx context.Context, table string, q store.Query
 	}
 }
 
-// slowGets answers each Get only after delay.
+// slowGets answers each Get of table only after delay.
 type slowGets struct {
 	store.Backend
 
+	table string
 	delay time.Duration
 }
 
 func (s slowGets) Get(ctx context.Context, table string, k store.Key, consistent bool) (store.Item, error) {
 	it, err := s.Backend.Get(ctx, table, k, consistent)
-	time.Sleep(s.delay)
+	if table == s.table {
+		time.Sleep(s.delay)
+	}
 	return it, err
+}
+
+// slowPuts answers the writes to one table late.
+type slowPuts struct {
+	store.Backend
+
+	table string
+	delay time.Duration
+}
+
+func (s slowPuts) Put(ctx context.Context, table string, it store.Item, c store.Cond) error {
+	err := s.Backend.Put(ctx, table, it, c)
+	if table == s.table {
+		time.Sleep(s.delay)
+	}
+	return err
 }

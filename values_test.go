@@ -193,7 +193,7 @@ func TestBatchErrorUnwrapsOnlyFailures(t *testing.T) {
 	if !errors.Is(be, dynaflux.ErrOutsideWindow) || errors.Is(be, dynaflux.ErrInvalidValue) {
 		t.Error("errors.Is doesn't see exactly the failures")
 	}
-	const want = "dynaflux: 2 of 4 events failed; event 1: dynaflux: duplicate event; event 3: dynaflux: event_time outside the ACCEPT window"
+	const want = "dynaflux: 2 of 4 events failed; event 1: duplicate event; event 3: event_time outside the ACCEPT window"
 	if be.Error() != want {
 		t.Errorf("Error() = %q, want %q", be.Error(), want)
 	}

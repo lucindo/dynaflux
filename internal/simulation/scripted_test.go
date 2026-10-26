@@ -6,6 +6,7 @@ package simulation_test
 import (
 	"cmp"
 	"context"
+	"errors"
 	"math/rand/v2"
 	"reflect"
 	"slices"
@@ -19,6 +20,7 @@ import (
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/engine"
 	"github.com/lucindo/dynaflux/internal/expr"
+	"github.com/lucindo/dynaflux/internal/keys"
 	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/simulation"
 	"github.com/lucindo/dynaflux/internal/store"
@@ -153,6 +155,41 @@ func TestRequestLongAfterHandleReturned(t *testing.T) {
 	}
 }
 
+// TestRequestWhoseContextOutlivesDeadline: a core request is sent with a context that ends
+// by its invocation's deadline, or Lambda's kill alone would stop it.
+func TestRequestWhoseContextOutlivesDeadline(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		ctx  func(context.Context) (context.Context, context.CancelFunc)
+		want string
+	}{
+		{"an earlier deadline", func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(ctx, time.Second)
+		}, ""},
+		{"no deadline", func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.WithoutCancel(ctx))
+		}, "P7:"},
+		{"a later deadline", func(ctx context.Context) (context.Context, context.CancelFunc) {
+			deadline, _ := ctx.Deadline()
+			return context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(time.Microsecond))
+		}, "P7:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sys := newScripted(t, func(ctx context.Context, b store.Backend, n int64) error {
+				if n > 1 {
+					return nil
+				}
+				ctx, cancel := tc.ctx(ctx)
+				defer cancel()
+				return put(ctx, b, "before")
+			})
+			expectViolation(t, simulation.Run(t, oneEvent(simulation.Faults{}), sys, 1), tc.want)
+		})
+	}
+}
+
 // TestQueryPages: each page of a Query is a request of its own, refused once the
 // invocation's deadline has passed.
 func TestQueryPages(t *testing.T) {
@@ -250,27 +287,28 @@ func TestStoreHistoryChecks(t *testing.T) {
 	}
 }
 
-// TestHighWaterMarkBound: P4 bounds a row by the live units of one stream, since a view
-// reads one stream, and leaves room for a write that landed late.
+// TestHighWaterMarkBound: P4 bounds a row by the live units of its view's stream, and leaves
+// room for a write that landed late.
 func TestHighWaterMarkBound(t *testing.T) {
 	t.Parallel()
+	// Each stream opens two units, and the event's rolls over into a third: a row of the
+	// event's stream may hold 3 + 1 entries, one of the quiet stream 2 + 1.
 	perStream := oneEvent(simulation.Faults{})
-	perStream.Topology = simulation.Topology{Partitions: 2, UnitRecords: 1000}
+	perStream.Topology.Partitions = 2
 	late := oneEvent(simulation.Faults{Late: 1, LateMax: time.Hour})
-	late.Window = time.Second
 	for _, tc := range []struct {
 		name    string
 		sc      simulation.Scenario
+		window  time.Duration // the catalog's W, which P4 checks
+		table   string
 		entries int
 		want    string
 	}{
-		// Each stream opens two units, and the event's may roll over into a third: a row
-		// of one stream may hold 3 + 1 entries, but both streams have 5 units.
-		{"two streams, over one stream's bound", perStream, 5, "P4:"},
-		{"two streams, within one stream's bound", perStream, 2, ""},
+		{"over its stream's bound", perStream, time.Hour, quietView, 4, "P4:"},
+		{"within its stream's bound", perStream, time.Hour, viewTable, 4, ""},
 		// The unit closes after its event; the write lands late, after the retry of its
 		// batch finished the unit, and may still carry that unit's entry.
-		{"a late write", late, 3, ""},
+		{"a late write", late, time.Second, viewTable, 3, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -278,14 +316,82 @@ func TestHighWaterMarkBound(t *testing.T) {
 			for i := range tc.entries {
 				marks["U"+strconv.Itoa(i)] = str("1")
 			}
-			hwm := write{viewTable, store.Item{
+			hwm := write{tc.table, store.Item{
 				catalog.AttrPK:             str("page#p1"),
 				catalog.AttrSK:             str("!"),
 				catalog.AttrHighWaterMarks: {Type: store.M, Map: marks},
 			}}
-			sys := newScripted(t, writes(hwm))
+			sys := &scripted{cat: compileWindow(t, streamsSQL, tc.window), script: writes(hwm)}
 			expectViolation(t, simulation.Run(t, tc.sc, sys, 1), tc.want)
 		})
+	}
+}
+
+// TestHighWaterMarkOfFinishedUnit: P4 fails a row write that keeps the mark of a unit
+// finished more than W + 2 lifetimes before it, however few marks the row holds. Unit A
+// takes the first event and finishes; the batch of B, A's child, fails until the run's tenth
+// invocation, about 8 s later, which writes a row with A's mark and B's.
+func TestHighWaterMarkOfFinishedUnit(t *testing.T) {
+	t.Parallel()
+	sc := oneEvent(simulation.Faults{})
+	sc.Events = 2
+	for _, tc := range []struct {
+		name   string
+		window time.Duration
+		want   string
+	}{
+		{"W + 2 lifetimes is 5 s", time.Second, "P4:"},
+		{"W + 2 lifetimes is 64 s", time.Minute, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var a string
+			script := func(ctx context.Context, b store.Backend, n int64) error {
+				unit := keys.UnitKey(ctx.Value(batchUnit{}).(string))
+				switch {
+				case n == 1:
+					a = unit
+					return nil
+				case n < 10:
+					return errors.New("not yet")
+				}
+				marks := map[string]store.Value{a: str("1"), unit: str("1")}
+				it := store.Item{catalog.AttrPK: str("page#p1"), catalog.AttrSK: str("!"), catalog.AttrHighWaterMarks: {Type: store.M, Map: marks}}
+				return b.Put(ctx, viewTable, it, store.Cond{})
+			}
+			sys := &scripted{cat: compileWindow(t, streamsSQL, tc.window), script: script}
+			expectViolation(t, simulation.Run(t, sc, sys, 1), tc.want)
+		})
+	}
+}
+
+// TestPrunedMarks: the harness counts the high-water marks that row writes drop, and of
+// those, the marks of units still delivering.
+func TestPrunedMarks(t *testing.T) {
+	t.Parallel()
+	sys := newScripted(t, func(ctx context.Context, b store.Backend, n int64) error {
+		if n > 1 {
+			return nil
+		}
+		open := keys.UnitKey(ctx.Value(batchUnit{}).(string))
+		for _, units := range [][]string{{open, "gone"}, {open}, {}} {
+			marks := map[string]store.Value{}
+			for _, u := range units {
+				marks[u] = str("1")
+			}
+			it := store.Item{catalog.AttrPK: str("page#p1"), catalog.AttrSK: str("!"), catalog.AttrHighWaterMarks: {Type: store.M, Map: marks}}
+			if err := b.Put(ctx, viewTable, it, store.Cond{}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	out := simulation.Run(t, oneEvent(simulation.Faults{}), sys, 1)
+	if len(out.Violations) > 0 {
+		t.Fatalf("violations: %v", out.Violations)
+	}
+	if s := out.Stats; s.Pruned != 2 || s.PrunedOpen != 1 || out.MaxHWM != 2 {
+		t.Errorf("%d marks pruned, %d of a unit delivering, at most %d marks; want 2, 1, 2", s.Pruned, s.PrunedOpen, out.MaxHWM)
 	}
 }
 
@@ -321,17 +427,20 @@ func hasViolation(out simulation.Outcome, property string) bool {
 	return slices.ContainsFunc(out.Violations, func(v string) bool { return strings.HasPrefix(v, property) })
 }
 
-// streamsSQL is the store of the systems without views: two streams, the second of which
-// gets no events from scripted systems.
+// streamsSQL is the store of the systems that write their own rows: two streams, the second
+// of which gets no events from scripted systems, and a view of each, which they don't project.
 const streamsSQL = `
 CREATE STREAM events (n UInt32) PRIMARY KEY (n);
 CREATE STREAM quiet (n UInt32) PRIMARY KEY (n);
+CREATE MATERIALIZED VIEW event_counts ORDER BY (n) AS SELECT n, count() AS c FROM events GROUP BY n;
+CREATE MATERIALIZED VIEW quiet_counts ORDER BY (n) AS SELECT n, count() AS c FROM quiet GROUP BY n;
 `
 
 const (
 	streamName  = "events"
 	quietStream = "quiet"
-	viewTable   = "views"
+	viewTable   = storeName + "-view-event_counts-v1"
+	quietView   = storeName + "-view-quiet_counts-v1"
 )
 
 // scripted is a system whose cores run script, numbering invocations from 1 across
@@ -352,15 +461,15 @@ func (s *scripted) Config() simulation.Config {
 	return simulation.Config{Catalog: s.cat, Naming: catalog.Naming{Store: storeName}}
 }
 
-func (*scripted) Event(*rand.Rand, int, bool) (string, []expr.Value) {
-	return streamName, []expr.Value{expr.Uint(0), expr.Null()}
+func (*scripted) Event(*rand.Rand, int, bool) simulation.Event {
+	return simulation.Event{Stream: streamName, Vals: []expr.Value{expr.Uint(0), expr.Null()}}
 }
 
 func (s *scripted) NewCore(b store.Backend, _ simulation.Archiver) simulation.Core {
 	return scriptedCore{s, b}
 }
 
-func (*scripted) Expect(*simulation.Oracle, string, projector.Record) error { return nil }
+func (*scripted) Expect(*simulation.Oracle, string, string, projector.Record) error { return nil }
 
 func (s *scripted) Read(ctx context.Context, b store.Backend) (simulation.State, error) {
 	for _, name := range []string{"before", "at", "late"} {
@@ -380,8 +489,16 @@ type scriptedCore struct {
 	b   store.Backend
 }
 
-func (c scriptedCore) Handle(ctx context.Context, _ projector.Batch) (projector.Result, error) {
+// batchUnit is the context key of the unit whose batch a script handles.
+type batchUnit struct{}
+
+func (c scriptedCore) Handle(ctx context.Context, b projector.Batch) (projector.Result, error) {
+	ctx = context.WithValue(ctx, batchUnit{}, b.Unit)
 	return projector.Result{}, c.sys.script(ctx, c.b, c.sys.invocations.Add(1))
+}
+
+func (scriptedCore) ApplyBackfill(context.Context, string, []projector.BackfillRecord) error {
+	return errors.New("scripted systems have no views to backfill")
 }
 
 func put(ctx context.Context, b store.Backend, name string) error {

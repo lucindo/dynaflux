@@ -27,7 +27,7 @@ func TestMutateNeedsExactlyOneOccurrence(t *testing.T) {
 
 func TestParseCaught(t *testing.T) {
 	t.Parallel()
-	out := []byte("=== RUN   TestControl\n    sim_test.go:209: control C21: caught in 7/20 seeds\n--- PASS: TestControl\n")
+	out := []byte("=== RUN   TestControl\n    sim_test.go:209: control C21: caught in 7/20 seeds by P1:\n--- PASS: TestControl\n")
 	if caught, seeds, ok := parseCaught(out, "C21"); !ok || caught != 7 || seeds != 20 {
 		t.Errorf("parseCaught = %d, %d, %v; want 7, 20, true", caught, seeds, ok)
 	}
@@ -37,7 +37,7 @@ func TestParseCaught(t *testing.T) {
 }
 
 // TestTableMatchesSources fails on a stale row: a mutant whose text no longer occurs once
-// in its file, or an unknown scenario.
+// in its file, an unknown scenario, or a seed control without the property it breaks.
 func TestTableMatchesSources(t *testing.T) {
 	t.Parallel()
 	var names, ids []string
@@ -45,8 +45,8 @@ func TestTableMatchesSources(t *testing.T) {
 		names = append(names, sc.Name)
 	}
 	for _, c := range table() {
-		if slices.Contains(ids, c.ID) || c.Test == "" && (!slices.Contains(names, c.Scenario) || c.Seeds < 1) {
-			t.Errorf("%s: a repeated ID, an unknown scenario %q or no seeds", c.ID, c.Scenario)
+		if slices.Contains(ids, c.ID) || c.Test == "" && (!slices.Contains(names, c.Scenario) || c.Seeds < 1 || c.Want == "") {
+			t.Errorf("%s: a repeated ID, an unknown scenario %q, no seeds or no property", c.ID, c.Scenario)
 		}
 		ids = append(ids, c.ID)
 		if c.File == "" {
@@ -56,7 +56,7 @@ func TestTableMatchesSources(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, stale := mutate(src, c.Old, c.New); stale != nil {
+		if _, stale := c.mutate(src); stale != nil {
 			t.Errorf("%s: %s: %v", c.ID, c.File, stale)
 		}
 	}

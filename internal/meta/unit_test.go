@@ -344,12 +344,12 @@ func TestFenceUnits(t *testing.T) {
 				m := meta.New(bk.new(), table)
 				advance(t, m, "old", seq(10))
 				setStates(t, m, meta.Activating)
-				if err := m.FenceUnits(t.Context(), stream, version, listing(new(time.Time), "old", "new")); err != nil {
+				if _, err := m.FenceUnits(t.Context(), stream, version, listing(new(time.Time), "old", "new")); err != nil {
 					t.Fatal(err)
 				}
 				advance(t, m, "old", seq(20))
 				// Repeating the call keeps the fences.
-				if err := m.FenceUnits(t.Context(), stream, version, listing(new(time.Time), "old", "new")); err != nil {
+				if _, err := m.FenceUnits(t.Context(), stream, version, listing(new(time.Time), "old", "new")); err != nil {
 					t.Fatal(err)
 				}
 				wantFences(t, m, map[string]string{"old": seq(10), "new": seq(0)})
@@ -387,11 +387,13 @@ func TestFenceUnitsListsAfterTheDelay(t *testing.T) {
 				setStates(t, m, meta.Activating)
 				time.Sleep(tt.call)
 				var listedAt time.Time
-				if err := m.FenceUnits(t.Context(), stream, version, listing(&listedAt, "u1")); err != nil {
+				cut, err := m.FenceUnits(t.Context(), stream, version, listing(&listedAt, "u1"))
+				if err != nil {
 					t.Fatal(err)
 				}
-				if want := bubbleStart.Add(tt.list); !listedAt.Equal(want) {
-					t.Errorf("listed at %s, want %s", listedAt, want)
+				// mem takes no time, so the cut is when the units were listed.
+				if want := bubbleStart.Add(tt.list); !listedAt.Equal(want) || !cut.Equal(want) {
+					t.Errorf("listed at %s with the cut at %s, want both at %s", listedAt, cut, want)
 				}
 				wantFences(t, m, map[string]string{"u1": seq(0)})
 			})
@@ -406,7 +408,7 @@ func TestFenceUnitsWaitEndsWithContext(t *testing.T) {
 		setStates(t, m, meta.Activating)
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
-		if err := m.FenceUnits(ctx, stream, version, noListing(t)); !errors.Is(err, context.DeadlineExceeded) {
+		if _, err := m.FenceUnits(ctx, stream, version, noListing(t)); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("FenceUnits = %v, want context.DeadlineExceeded", err)
 		}
 		if now, want := time.Now(), bubbleStart.Add(time.Minute); !now.Equal(want) {
@@ -421,7 +423,7 @@ func TestFenceUnitsListError(t *testing.T) {
 		m := meta.New(mem.New(), table)
 		setStates(t, m, meta.Activating)
 		errList := errors.New("list failed")
-		err := m.FenceUnits(t.Context(), stream, version, func(context.Context) ([]string, error) { return nil, errList })
+		_, err := m.FenceUnits(t.Context(), stream, version, func(context.Context) ([]string, error) { return nil, errList })
 		if !errors.Is(err, errList) {
 			t.Fatalf("FenceUnits = %v, want the list error", err)
 		}
@@ -444,7 +446,7 @@ func TestFenceUnitsNeedsActivating(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				m := meta.New(mem.New(), table)
 				tt.setup(t, m)
-				if err := m.FenceUnits(t.Context(), stream, version, noListing(t)); !errors.Is(err, meta.ErrNotActivating) {
+				if _, err := m.FenceUnits(t.Context(), stream, version, noListing(t)); !errors.Is(err, meta.ErrNotActivating) {
 					t.Errorf("FenceUnits = %v, want ErrNotActivating", err)
 				}
 				if u := readUnit(t, m, "u1"); u.Fences != nil {

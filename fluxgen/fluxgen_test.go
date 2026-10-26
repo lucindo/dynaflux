@@ -307,7 +307,7 @@ func TestZeroEventTimeInAnyLocationIsUnset(t *testing.T) {
 		ev.EventTime = time.Time{}.In(time.FixedZone("Tokyo", 9*60*60))
 		_, err := fluxgen.AppendEvent(t.Context(), newStore(mem.New()), loadCatalog(t), "api_calls", ev.fields())
 		// api_calls has DEDUP BY, so an unset event_time is an error.
-		const want = "event_time: dynaflux: invalid value: a stream with DEDUP BY needs it"
+		const want = "dynaflux: event_time: invalid value: a stream with DEDUP BY needs it"
 		if err == nil || err.Error() != want {
 			t.Errorf("got %v, want %s", err, want)
 		}

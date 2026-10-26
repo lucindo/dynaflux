@@ -61,6 +61,9 @@ func EncodeValue(t catalog.Type, v expr.Value) (store.Value, bool, error) {
 		}
 		return a, true, nil
 	}
+	if v.Kind() != expr.KindArray {
+		return store.Value{}, false, wrongRep(t)
+	}
 	elem := catalog.Type{Kind: t.Kind, Precision: t.Precision, Scale: t.Scale}
 	elems := v.AsArray()
 	list := make([]store.Value, len(elems))
@@ -78,6 +81,9 @@ func EncodeValue(t catalog.Type, v expr.Value) (store.Value, bool, error) {
 }
 
 func encodeScalar(t catalog.Type, v expr.Value) (store.Value, error) {
+	if v.Kind() != expr.KindOf(t.Kind) {
+		return store.Value{}, wrongRep(t)
+	}
 	switch t.Kind {
 	case catalog.KindString:
 		return store.Value{Type: store.S, Str: v.AsString()}, nil
@@ -121,6 +127,8 @@ func encodeScalar(t catalog.Type, v expr.Value) (store.Value, error) {
 }
 
 func number(text string) store.Value { return store.Value{Type: store.N, Str: text} }
+
+func wrongRep(t catalog.Type) error { return fmt.Errorf("wrong representation for %s", t) }
 
 // DecodeValue returns the value of the column type t that an attribute holds (encoding.md
 // §5.1), or NULL for an absent attribute of a Nullable type. Numbers are read exactly, in any

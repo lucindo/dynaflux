@@ -29,8 +29,6 @@ const (
 	attrFences   = "fences"
 )
 
-const replayDelay = 30 * time.Second // most time before a replaying mapping starts
-
 // Injected errors. Neither is a condition failure, so the code under test treats them as
 // transient.
 var (
@@ -46,6 +44,9 @@ type invocation struct {
 	empty    bool          // a core invocation without records
 	stallAt  int           // the request whose response stalls; -1 for none
 	stall    time.Duration // how long before the deadline the stalled response returns
+	// taken is set when a writer's write of an event found another call's event at its key.
+	// Only the writer touches it.
+	taken bool
 
 	mu       sync.Mutex
 	requests int
@@ -109,12 +110,16 @@ type region struct {
 	store    store.Backend // mem behind the gates and faults: what the code under test gets
 	archiver Archiver
 	archive  *archive
+	sweeper  *sweeper
 	streams  map[string]*stream // by table
 	order    []*stream          // in catalog order
 	mappings []*mapping
 	links    []*link
 	pool     []Core // idle warm containers
 	unitIDs  map[string]bool
+	units    map[string]*unit // by unit key, as high-water marks name them
+	// written holds the keys of the items written to each view table, for P2.
+	written map[string]map[store.Key]bool
 }
 
 func newRegion(ctx context.Context, r *run, i int) (*region, error) {
@@ -125,12 +130,15 @@ func newRegion(ctx context.Context, r *run, i int) (*region, error) {
 		archive: &archive{cfg: r.sc.Archive},
 		streams: map[string]*stream{},
 		unitIDs: map[string]bool{},
+		units:   map[string]*unit{},
+		written: map[string]map[store.Key]bool{},
 	}
 	rg.store = gated{rg}
 	rg.archiver = archiver{rg}
+	rg.sweeper = &sweeper{rg: rg, id: rg.name + " sweeper", queue: newDueQueue[sweep]()}
 	rg.mappings = []*mapping{{rg: rg, name: "m0", start: time.Now()}}
-	if r.sc.ESM.Replay {
-		start := time.Now().Add(between(r.topo, 0, replayDelay))
+	if r.sc.ESM.Replay > 0 {
+		start := time.Now().Add(between(r.topo, 0, r.sc.ESM.Replay))
 		rg.mappings = append(rg.mappings, &mapping{rg: rg, name: "m1", start: start})
 	}
 	cat := r.cfg.Catalog.Catalog()
@@ -139,10 +147,35 @@ func newRegion(ctx context.Context, r *run, i int) (*region, error) {
 		rg.streams[st.table] = st
 		rg.order = append(rg.order, st)
 	}
-	if err := meta.New(rg.mem, r.meta).SetLive(ctx, cat); err != nil {
+	if err := rg.setLive(ctx); err != nil {
 		return nil, err
 	}
 	return rg, nil
+}
+
+// setLive makes every view version live but those a backfill fills.
+func (rg *region) setLive(ctx context.Context) error {
+	r := rg.run
+	m := meta.New(rg.mem, r.meta)
+	for _, v := range r.cfg.Catalog.Catalog().Views {
+		for _, vv := range v.Versions {
+			id := catalog.VersionID(v.Name, vv.Number)
+			if r.backfills(id) {
+				continue
+			}
+			for _, s := range []meta.State{meta.Activating, meta.Live} {
+				if err := m.SetViewState(ctx, id, s); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// backfills reports whether the run backfills version.
+func (r *run) backfills(version string) bool {
+	return r.sc.Backfill.Within > 0 && slices.Contains(r.cfg.Backfill, version)
 }
 
 // open creates every stream's root units, which starts their pollers.
@@ -196,6 +229,9 @@ func (rg *region) enter(ctx context.Context, k kind, op string) (time.Duration, 
 		r.violatef("P9: %s: %s for an empty batch", inv.id, op)
 	}
 	core := !inv.deadline.IsZero()
+	if d, has := ctx.Deadline(); core && (!has || d.After(inv.deadline)) {
+		r.violatef("P7: %s: %s with a context that outlives the invocation's deadline", inv.id, op)
+	}
 	if core && r.draw(r.sc.Faults.Crash) {
 		r.count(&r.stats.Crashes)
 		inv.kill()
@@ -342,6 +378,10 @@ func (g gated) Put(ctx context.Context, table string, it store.Item, c store.Con
 	case faultNone, faultAmbiguous, faultRetried:
 	}
 	err := g.rg.apply(ctx, table, it, c)
+	if g.rg.streams[table] != nil {
+		var ce *store.ConditionError
+		invocationOf(ctx).taken = errors.As(err, &ce)
+	}
 	if err == nil && f == faultRetried {
 		// The SDK's retry finds the first attempt's write and fails its condition.
 		var cur store.Item
@@ -386,6 +426,15 @@ func (rg *region) apply(ctx context.Context, table string, it store.Item, c stor
 	if getErr == nil {
 		rg.checkWrite(table, cur, it)
 	}
+	switch {
+	case rg.run.views[table] != "":
+		if rg.written[table] == nil {
+			rg.written[table] = map[store.Key]bool{}
+		}
+		rg.written[table][keyOf(it)] = true
+	case table == rg.run.meta:
+		rg.sweeper.expire(table, it)
+	}
 	return nil
 }
 
@@ -419,36 +468,66 @@ func (rg *region) checkWrite(table string, cur, next store.Item) {
 		}
 	}
 	if hwm, ok := next[catalog.AttrHighWaterMarks]; ok {
-		// One entry per unit of the view's stream that can still deliver, plus the
-		// backfill's.
-		if n, bound := len(hwm.Map), rg.liveUnits(time.Now())+1; n > bound {
-			r.violatef("P4: %s: %d high-water marks, over the bound %d", where, n, bound)
-		}
+		rg.checkMarks(where, table, cur[catalog.AttrHighWaterMarks].Map, hwm.Map)
 	}
 }
 
-// liveUnits returns the most units of one stream whose high-water marks a row may still
-// need at now. A unit finished at f had its progress stamped by f + timeout at the
-// latest, and a write lands at most a timeout after it read progress, plus LateMax when
-// writes land late; from f + W + 2·timeout (+ LateMax) on, every write may prune the
-// unit's entry.
-func (rg *region) liveUnits(now time.Time) int {
+// checkMarks checks P4 on a write to table, a view's, that replaced the high-water marks old
+// with next: no entry of a unit that finished by prunableSince, and at most one per unit
+// of the view's stream that may still need its own, plus the backfill's. It counts the
+// entries the write dropped.
+func (rg *region) checkMarks(where, table string, old, next map[string]store.Value) {
+	r := rg.run
+	since := rg.prunableSince(time.Now())
+	n, bound := len(next), rg.streams[r.sources[table]].liveUnits(since)+1
+	if n > bound {
+		r.violatef("P4: %s: %d high-water marks, over the bound %d", where, n, bound)
+	}
+	for name := range next {
+		if u := rg.units[name]; u != nil && !u.finished.IsZero() && !u.finished.After(since) {
+			r.violatef("P4: %s: the high-water mark of %s, which finished %v ago", where, u.id, time.Since(u.finished))
+		}
+	}
+	var pruned, open int64
+	for name := range old {
+		if _, kept := next[name]; kept {
+			continue
+		}
+		pruned++
+		if u := rg.units[name]; u != nil && u.finished.IsZero() {
+			open++
+		}
+	}
+	r.mu.Lock()
+	r.stats.Pruned += pruned
+	r.stats.PrunedOpen += open
+	r.maxHWM = max(r.maxHWM, n)
+	r.mu.Unlock()
+}
+
+// prunableSince returns the time at or before which a unit must have finished for a row
+// write that lands at now to drop its high-water mark. A unit finished at f had its progress stamped by f + timeout at
+// the latest, and a write lands at most a timeout after it read progress, plus LateMax when
+// writes land late; from f + W + 2·timeout (+ LateMax) on, every write prunes the unit's
+// entry.
+func (rg *region) prunableSince(now time.Time) time.Time {
 	sc := rg.run.sc
 	since := now.Add(-rg.run.window - 2*sc.ESM.Timeout)
 	if sc.Faults.Late > 0 {
 		since = since.Add(-sc.Faults.LateMax)
 	}
-	most := 0
-	for _, s := range rg.order {
-		n := 0
-		for _, u := range s.units {
-			if u.finished.IsZero() || u.finished.After(since) {
-				n++
-			}
+	return since
+}
+
+// liveUnits returns the units of s still delivering, or finished after since.
+func (s *stream) liveUnits(since time.Time) int {
+	n := 0
+	for _, u := range s.units {
+		if u.finished.IsZero() || u.finished.After(since) {
+			n++
 		}
-		most = max(most, n)
 	}
-	return most
+	return n
 }
 
 // acquire takes a warm container, or starts a new one.

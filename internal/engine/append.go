@@ -229,7 +229,7 @@ func (e *Engine) put(ctx context.Context, table string, s *stream, it store.Item
 		}
 		return ErrDuplicate
 	case errors.Is(err, store.ErrTooLarge):
-		return fmt.Errorf("%w: the event is over DynamoDB's 400 KB item limit", ErrInvalidValue)
+		return fmt.Errorf("dynaflux: %w: the event is over DynamoDB's 400 KB item limit", ErrInvalidValue)
 	}
 	return fmt.Errorf("dynaflux: append to %s: %w", s.Def.Name, err)
 }

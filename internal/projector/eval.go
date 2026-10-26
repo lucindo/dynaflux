@@ -13,13 +13,14 @@ import (
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-// rowGroup is one row item of a view version and the batch's contributions to it, in
-// sequence order.
+// rowGroup is one row item of a view version and the batch's or backfill chunk's
+// contributions to it, in the order they are applied.
 type rowGroup struct {
-	v    *view
-	key  store.Key
-	lsk  string // the sort fields without a SPLIT suffix, for marker keys
-	keys []expr.Value
+	v     *view
+	owner byte // keys.OwnerLive or keys.OwnerBackfill: the namespace the contributions count in
+	key   store.Key
+	lsk   string // the sort fields without a SPLIT suffix, for marker keys
+	keys  []expr.Value
 	// exp is when the row expires, in microseconds, when hasExp: the version has TTL.
 	exp      int64
 	hasExp   bool
@@ -32,6 +33,7 @@ type rowGroup struct {
 type contribution struct {
 	seq       string // in PadSeq's form
 	delivered string
+	unitKey   string
 	states    []agg.State   // by aggregate; nil where no input reached it
 	values    [][]uniqValue // by aggregate with markers: the record's distinct values
 	seen      map[uniqKey]bool
@@ -52,9 +54,10 @@ type groupKey struct {
 	k store.Key
 }
 
-// rows collects a batch's contributions by row item, in the order the items were reached.
+// rows collects a batch's or backfill chunk's contributions by row item, in the order the
+// items were reached.
 type rows struct {
-	unit   string
+	owner  byte // keys.OwnerLive, or keys.OwnerBackfill for the backfill's namespace B
 	groups map[groupKey]*rowGroup
 	order  []*rowGroup
 }
@@ -93,7 +96,7 @@ func (rs *rows) add(v *view, rec *record, vals []expr.Value, bad []error) error 
 		if !ok {
 			continue
 		}
-		k, lsk, kerr := v.itemKey(kvs, rs.unit)
+		k, lsk, kerr := v.itemKey(kvs, rec.unit)
 		if kerr != nil {
 			return kerr
 		}
@@ -150,8 +153,8 @@ func (v *view) rowKeys(f *expr.Frame) (bool, []expr.Value, error) {
 	return true, kvs, nil
 }
 
-// itemKey returns the key of the item that unit writes for the row with key values kvs, and
-// the row's sort fields without a SPLIT suffix.
+// itemKey returns the key of the item that a record of unit writes for the row with key
+// values kvs, and the row's sort fields without a SPLIT suffix.
 func (v *view) itemKey(kvs []expr.Value, unit string) (store.Key, string, error) {
 	n := v.def.PartitionKeyLen
 	pk, err := keys.Key(v.keyTypes[:n], kvs[:n])
@@ -186,13 +189,14 @@ func (rs *rows) contribution(v *view, k store.Key, lsk string, kvs []expr.Value,
 		if err != nil {
 			return nil, err
 		}
-		g = &rowGroup{v: v, key: k, lsk: lsk, keys: kvs, exp: exp, hasExp: hasExp, owners: map[store.Key]string{}}
+		g = &rowGroup{v: v, owner: rs.owner, key: k, lsk: lsk, keys: kvs, exp: exp, hasExp: hasExp, owners: map[store.Key]string{}}
 		rs.groups[gk] = g
 		rs.order = append(rs.order, g)
 	}
 	c := &contribution{
 		seq:       rec.seq,
 		delivered: rec.Seq,
+		unitKey:   rec.unitKey,
 		states:    make([]agg.State, len(v.aggs)),
 		values:    make([][]uniqValue, len(v.aggs)),
 	}

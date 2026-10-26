@@ -16,6 +16,14 @@ func keyOf(it store.Item) store.Key {
 	return store.Key{PK: it[catalog.AttrPK].Str, SK: it[catalog.AttrSK].Str}
 }
 
+// recordKey returns the key of a record's item: a REMOVE has only its old image.
+func recordKey(rec projector.Record) store.Key {
+	if rec.Op == projector.Remove {
+		return keyOf(rec.Old)
+	}
+	return keyOf(rec.New)
+}
+
 func keyText(it store.Item) string {
 	return it[catalog.AttrPK].Str + " " + it[catalog.AttrSK].Str
 }

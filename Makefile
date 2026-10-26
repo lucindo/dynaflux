@@ -43,7 +43,7 @@ DOCKERFILES = $(shell git ls-files --cached --others --exclude-standard -- '*Doc
 
 .PHONY: help check-git-hooks warn-git-hooks setup-git-hooks tools tools-update \
         test bench cross-arch fmt fix lint vuln osv gomod mod-download verify check-clean \
-        hadolint checkov trivy semgrep
+        sim sim-controls sim-seed hadolint checkov trivy semgrep
 
 .DEFAULT_GOAL := help
 
@@ -95,7 +95,7 @@ bench: ## Run all benchmarks with memory stats (not part of verify).
 # Float64 results must not depend on the CPU. Apple silicon runs the amd64 build through
 # Rosetta; an amd64 machine runs it natively.
 cross-arch: ## Run the cross-architecture Float64 tests as amd64 (not part of verify).
-	GOARCH=amd64 go test -run 'CrossArchitecture|NoFusedMultiplyAdd' ./internal/agg ./internal/expr
+	GOARCH=amd64 go test -run 'CrossArchitecture|NoFusedMultiplyAdd' ./internal/agg
 
 fmt: tools ## Format Go code with the formatters in .golangci.yml.
 	$(GOLANGCI_LINT) fmt
@@ -129,6 +129,23 @@ check-clean: ## Fail if the working tree is dirty (CI guard: verify must not rew
 		echo; \
 		exit 1; \
 	fi
+
+# === Simulation
+
+# `make test` runs the harness's smoke tier with -race. These targets leave -race off unless
+# SIM_RACE=-race: the scheduler runs one actor at a time, so -race sees only the core's own
+# goroutines, and the smoke tier covers those.
+SIM_RACE ?=
+
+sim: ## Run every simulation scenario at its full tier of seeds (SIM_RACE=-race adds -race).
+	go test $(SIM_RACE) -count=1 -timeout=60m ./internal/simulation -sim.full
+
+sim-controls: ## Run every negative control of the simulation harness; each must be caught.
+	go run ./internal/simulation/mutants
+
+sim-seed: ## Rerun one simulation seed verbosely: make sim-seed SCENARIO=faults SEED=17.
+	@[ -n "$(SCENARIO)" ] && [ -n "$(SEED)" ] || { echo "Usage: make sim-seed SCENARIO=<name> SEED=<n>"; exit 1; }
+	go test $(SIM_RACE) -count=1 -v -run '^TestSim$$/^$(SCENARIO)$$' ./internal/simulation -sim.seed=$(SEED)
 
 # === External scanners
 

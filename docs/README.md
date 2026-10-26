@@ -23,3 +23,9 @@ The specifications are normative: they define what Dynaflux accepts and what it 
 [decisions/](decisions/README.md) holds the architecture decision records. Each one records a
 decision that shapes Dynaflux: the problem, what we chose and rejected, and what follows from
 it.
+
+## Runbooks
+
+| Document | What it covers |
+|----------|----------------|
+| [runbooks/simulation.md](runbooks/simulation.md) | The simulation harness: its test tiers and how long they take, rerunning a failing seed, and the negative controls. |

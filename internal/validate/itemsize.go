@@ -29,7 +29,7 @@ func (p *project) checkItemSizes() {
 	const limit = (maxItemKB - hwmReserveKB) * bytesPerKB
 	for _, d := range p.decls {
 		v := d.view
-		if v == nil || v.stream == nil {
+		if v == nil || v.stream == nil || !v.keysOK {
 			continue
 		}
 		if n := maxItemSize(&v.version); n > limit {

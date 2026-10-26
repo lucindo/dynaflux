@@ -63,6 +63,9 @@ func AppendField(dst []byte, t catalog.Type, v expr.Value) ([]byte, error) {
 	if v.IsNull() {
 		return dst, errors.New("a key value is NULL")
 	}
+	if v.Kind() != expr.KindOf(t.Kind) {
+		return dst, wrongRep(t)
+	}
 	switch t.Kind {
 	case catalog.KindString:
 		return appendString(dst, v.AsString()), nil

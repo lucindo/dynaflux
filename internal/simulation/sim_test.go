@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"reflect"
 	"slices"
 	"strconv"
@@ -23,11 +24,12 @@ import (
 )
 
 var (
-	full         = flag.Bool("sim.full", false, "run each scenario's full tier of seeds")                  //nolint:gochecknoglobals // go test flags are package variables
-	seedCount    = flag.Int("sim.seeds", 0, "seeds per scenario or control; 0 uses the tier's")            //nolint:gochecknoglobals // go test flags are package variables
-	controlID    = flag.String("sim.control", "", "run TestControl for this negative control")             //nolint:gochecknoglobals // go test flags are package variables
-	scenarioName = flag.String("sim.scenario", "faults", "the scenario TestControl runs a code mutant in") //nolint:gochecknoglobals // go test flags are package variables
-	onlySeed     = flag.Int("sim.seed", -1, "run only this seed in TestSim")                               //nolint:gochecknoglobals // go test flags are package variables
+	full         = flag.Bool("sim.full", false, "run each scenario's full tier of seeds")                      //nolint:gochecknoglobals // go test flags are package variables
+	seedCount    = flag.Int("sim.seeds", 0, "seeds per scenario or control; 0 uses the tier's")                //nolint:gochecknoglobals // go test flags are package variables
+	controlID    = flag.String("sim.control", "", "run TestControl for this negative control")                 //nolint:gochecknoglobals // go test flags are package variables
+	scenarioName = flag.String("sim.scenario", "faults", "the scenario TestControl runs a code mutant in")     //nolint:gochecknoglobals // go test flags are package variables
+	want         = flag.String("sim.want", "", "the property prefix a seed must violate to catch the control") //nolint:gochecknoglobals // go test flags are package variables
+	onlySeed     = flag.Int("sim.seed", -1, "run only this seed in TestSim")                                   //nolint:gochecknoglobals // go test flags are package variables
 )
 
 func scenario(t *testing.T, name string) simulation.Scenario {
@@ -63,15 +65,21 @@ func seedList(n int) []int {
 	return list
 }
 
-// report fails t on out's violations; tests names the -run pattern that reruns seed.
-func report(t *testing.T, tests string, seed int, out simulation.Outcome) {
+// report fails t on the violations of seed of sc.
+func report(t *testing.T, sc simulation.Scenario, seed int, out simulation.Outcome) {
 	t.Helper()
 	if len(out.Violations) == 0 {
 		return
 	}
 	shown := out.Violations[:min(len(out.Violations), 10)]
-	t.Errorf("seed %d: %d violations (rerun: go test ./internal/simulation -run '%s' -sim.seed=%d -v):\n%s",
-		seed, len(out.Violations), tests, seed, strings.Join(shown, "\n"))
+	t.Errorf("seed %d: %d violations (rerun: make sim-seed SCENARIO=%s SEED=%d):\n%s",
+		seed, len(out.Violations), sc.Name, seed, strings.Join(shown, "\n"))
+}
+
+// outlivesWindow reports whether a scenario runs long past W, so that its hot rows exceed
+// P4's bound unless the core prunes.
+func outlivesWindow(sc simulation.Scenario) bool {
+	return slices.Contains([]string{"d23a", "long", "late", "regions"}, sc.Name)
 }
 
 // TestSim runs every scenario exact, and checks that a tier of seeds made its faults
@@ -82,32 +90,51 @@ func TestSim(t *testing.T) {
 	for _, sc := range simulation.Scenarios() {
 		t.Run(sc.Name, func(t *testing.T) {
 			t.Parallel()
-			var mu sync.Mutex
-			var total simulation.Stats
-			ran := 0
-			t.Cleanup(func() { checkTier(t, sc, ran, total) })
-			for _, seed := range seedList(seeds(sc)) {
-				t.Run(strconv.Itoa(seed), func(t *testing.T) {
-					t.Parallel()
-					out := simulation.Run(t, sc, sys, uint64(seed))
-					report(t, "^TestSim$/^"+sc.Name+"$", seed, out)
-					mu.Lock()
-					add(&total, out.Stats)
-					ran++
-					mu.Unlock()
-				})
-			}
+			runTier(t, sc, sys, outlivesWindow(sc), func(t *testing.T, seed int, out simulation.Outcome) {
+				t.Helper()
+				report(t, sc, seed, out)
+			})
 		})
 	}
 }
 
-// checkTier fails t when ran seeds, a whole tier, didn't exercise what sc sets up.
-func checkTier(t *testing.T, sc simulation.Scenario, ran int, total simulation.Stats) {
+// runTier runs sc's seeds in parallel, gives each outcome to check, and checks that the
+// tier made sc's faults happen, and that rows dropped marks when prunes is set.
+func runTier(t *testing.T, sc simulation.Scenario, sys simulation.System, prunes bool, check func(t *testing.T, seed int, out simulation.Outcome)) {
 	t.Helper()
-	t.Logf("%d seeds: %+v", ran, total)
-	if ran < sc.Seeds.Smoke {
-		return
+	list := seedList(seeds(sc))
+	if len(list) == 0 {
+		t.Skip("no smoke seeds: the full tier runs this scenario")
 	}
+	var mu sync.Mutex
+	var total simulation.Stats
+	ran, most := 0, 0
+	t.Cleanup(func() {
+		t.Logf("%d seeds: %+v", ran, total)
+		t.Logf("a row write left up to %d high-water marks", most)
+		// One seed, or some of a tier, needn't make every fault happen.
+		if *onlySeed < 0 && ran == len(list) {
+			checkTier(t, sc, prunes, total)
+		}
+	})
+	for _, seed := range list {
+		t.Run(strconv.Itoa(seed), func(t *testing.T) {
+			t.Parallel()
+			out := simulation.Run(t, sc, sys, uint64(seed))
+			check(t, seed, out)
+			mu.Lock()
+			add(&total, out.Stats)
+			ran++
+			most = max(most, out.MaxHWM)
+			mu.Unlock()
+		})
+	}
+}
+
+// checkTier fails t when a tier of seeds of sc didn't exercise what sc sets up, and
+// pruning when prunes is set.
+func checkTier(t *testing.T, sc simulation.Scenario, prunes bool, total simulation.Stats) {
+	t.Helper()
 	if total.Invocations == 0 || total.Units <= int64(sc.Regions*sc.Topology.Partitions) {
 		t.Errorf("nothing was delivered, or no unit rolled over: %+v", total)
 	}
@@ -115,8 +142,36 @@ func checkTier(t *testing.T, sc simulation.Scenario, ran int, total simulation.S
 		total.Killed, total.Timeouts, total.Slow, total.Stale, total.Dups, total.Empty) == 0 {
 		t.Errorf("a fault never happened: %+v", total)
 	}
+	if sc.Topology.Idle > 0 && total.Idle == 0 {
+		t.Errorf("no unit went quiet: %+v", total)
+	}
+	if prunes && min(total.Pruned, total.PrunedOpen) == 0 {
+		t.Errorf("no row write dropped a high-water mark, or none of a unit still delivering: %+v", total)
+	}
+	if sc.Faults.Late > 0 && total.Late == 0 {
+		t.Errorf("no write landed late: %+v", total)
+	}
 	if sc.Poison > 0 && total.Poison == 0 {
 		t.Errorf("no event was poison: %+v", total)
+	}
+	if sc.Backfill.Within > 0 && min(total.Backfills, total.Chunks, total.Unlisted) == 0 {
+		t.Errorf("no backfill went live, or no unit was created after a listing: %+v", total)
+	}
+	checkRegionsTier(t, sc, total)
+}
+
+// checkRegionsTier fails t when a tier of sc didn't exercise its cross-region duplicates,
+// isolations or deletes.
+func checkRegionsTier(t *testing.T, sc simulation.Scenario, total simulation.Stats) {
+	t.Helper()
+	if sc.Duplicate > 0 && min(total.Modifies, total.Divergent, total.Reported) == 0 {
+		t.Errorf("no event was appended in two regions before either replicated, none with two payloads, or no core reported one: %+v", total)
+	}
+	if sc.Isolation.Share > 0 && min(total.Cuts, total.Held) == 0 {
+		t.Errorf("no region was cut off, or no replicated write was held back: %+v", total)
+	}
+	if sc.Sweep.Delay > 0 && total.Removes == 0 {
+		t.Errorf("no event expired: %+v", total)
 	}
 }
 
@@ -127,62 +182,105 @@ func add(total *simulation.Stats, s simulation.Stats) {
 	}
 }
 
-// TestDeterministic replays seeds: a seed's run is the same every time, and two seeds
-// differ.
+// TestDeterministic runs two seeds of late, which has every fault, twice each: a seed's run
+// is the same every time, and two seeds differ. The full tier adds regions, which cuts
+// regions off and deletes events, and runs four seeds of each.
 func TestDeterministic(t *testing.T) {
 	t.Parallel()
-	sc, sys := scenario(t, "faults"), newPageViews(t)
-	var mu sync.Mutex
-	traces := map[uint64]bool{}
-	t.Cleanup(func() {
-		if len(traces) != 2 {
-			t.Errorf("two seeds gave %d traces, want 2", len(traces))
-		}
-	})
-	for seed := range uint64(2) {
-		t.Run(strconv.FormatUint(seed, 10), func(t *testing.T) {
+	sys := newPageViews(t)
+	names, n := []string{"late"}, 2
+	if *full {
+		names, n = append(names, "regions"), 4
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			first := simulation.Run(t, sc, sys, seed)
-			second := simulation.Run(t, sc, sys, seed)
-			if !reflect.DeepEqual(first, second) {
-				t.Fatalf("run 1 = %+v\nrun 2 = %+v", first, second)
-			}
-			if first.Steps == 0 {
-				t.Fatal("no steps")
-			}
-			mu.Lock()
-			traces[first.Trace] = true
-			mu.Unlock()
+			replay(t, scenario(t, name), sys, n)
 		})
 	}
 }
 
-// expectCaught runs n seeds of sc in parallel, and fails unless one violates a property.
-func expectCaught(t *testing.T, control string, sc simulation.Scenario, sys simulation.System, n int) {
+// replay runs the first n seeds of sc twice each, every run in parallel.
+func replay(t *testing.T, sc simulation.Scenario, sys simulation.System, n int) {
+	t.Helper()
+	runs := make([][2]simulation.Outcome, n)
+	t.Cleanup(func() {
+		if t.Failed() {
+			return
+		}
+		traces := map[uint64]bool{}
+		for seed, r := range runs {
+			if !reflect.DeepEqual(r[0], r[1]) {
+				t.Errorf("seed %d: run 1 = %+v\nrun 2 = %+v", seed, r[0], r[1])
+			}
+			if r[0].Steps == 0 {
+				t.Errorf("seed %d: no steps", seed)
+			}
+			traces[r[0].Trace] = true
+		}
+		if len(traces) != n {
+			t.Errorf("%d seeds gave %d traces", n, len(traces))
+		}
+	})
+	for seed := range n {
+		for i := range runs[seed] {
+			t.Run(fmt.Sprintf("%d/run%d", seed, i+1), func(t *testing.T) {
+				t.Parallel()
+				runs[seed][i] = simulation.Run(t, sc, sys, uint64(seed))
+			})
+		}
+	}
+}
+
+// expectCaught runs n seeds of sc in parallel, and fails unless one violates a property
+// whose violations start with want, such as "P1:".
+func expectCaught(t *testing.T, control, want string, sc simulation.Scenario, sys simulation.System, n int) {
 	t.Helper()
 	var caught atomic.Int64
 	t.Cleanup(func() {
-		t.Logf("control %s: caught in %d/%d seeds", control, caught.Load(), n)
+		t.Logf("control %s: caught in %d/%d seeds by %s", control, caught.Load(), n, want)
 		if caught.Load() == 0 {
-			t.Errorf("the harness did not catch control %s", control)
+			t.Errorf("the harness did not catch control %s by %s", control, want)
 		}
 	})
 	for seed := range n {
 		t.Run(strconv.Itoa(seed), func(t *testing.T) {
 			t.Parallel()
-			if out := simulation.Run(t, sc, sys, uint64(seed)); len(out.Violations) > 0 {
+			out := simulation.Run(t, sc, sys, uint64(seed))
+			if i := slices.IndexFunc(out.Violations, func(v string) bool { return strings.HasPrefix(v, want) }); i >= 0 {
 				caught.Add(1)
+				t.Logf("caught by %.200s", out.Violations[i])
+			} else if len(out.Violations) > 0 {
+				t.Logf("not caught by %s, but by %.200s", want, out.Violations[0])
 			}
 		})
 	}
 }
 
-// environmentControls change the environment or the configuration, not the code.
-func environmentControls(t *testing.T) map[string]simulation.Scenario {
+// envControl is a control that changes the environment or the configuration, not the
+// code: a scenario, and the system it runs.
+type envControl struct {
+	sc  simulation.Scenario
+	sys simulation.System
+}
+
+func environmentControls(t *testing.T) map[string]envControl {
 	t.Helper()
+	sys := newPageViews(t)
 	pf2 := scenario(t, "clean")
 	pf2.ESM.PF = 2
-	return map[string]simulation.Scenario{"C3": pf2}
+	pruning := scenario(t, "d23a")
+	pruning.ESM.PF = 2
+	lie := scenario(t, "handoff")
+	lie.Archive.Lie = true
+	return map[string]envControl{
+		"C3":     {pf2, sys},
+		"C16-C3": {pruning, sys},
+		"H2":     {lie, sys},
+		// S9's baseline: cores that never prune keep the marks of units that finished long
+		// ago, against P4, while P4 checks the catalog's W.
+		"B1": {scenario(t, "d23a"), sys.withCoreWindow(t, catalog.MaxPruneWindowSeconds*time.Second)},
+	}
 }
 
 // TestControl runs one negative control, an environment control or a code mutant that
@@ -192,18 +290,22 @@ func TestControl(t *testing.T) {
 	if *controlID == "" {
 		t.Skip("set -sim.control to run a negative control")
 	}
-	sc, ok := environmentControls(t)[*controlID]
+	c, ok := environmentControls(t)[*controlID]
 	if !ok {
-		sc = scenario(t, *scenarioName)
+		c = envControl{scenario(t, *scenarioName), newPageViews(t)}
 	}
-	expectCaught(t, *controlID, sc, newPageViews(t), seeds(sc))
+	if *want == "" {
+		t.Fatal("set -sim.want to the property the control breaks")
+	}
+	expectCaught(t, *controlID, *want, c.sc, c.sys, seeds(c.sc))
 }
 
 // TestParallelizationFactorControl is the smoke tier's environment control: two batches
-// of one unit at once lose updates.
+// of one unit at once lose updates. Every seed catches it, so two are enough.
 func TestParallelizationFactorControl(t *testing.T) {
 	t.Parallel()
-	expectCaught(t, "C3", environmentControls(t)["C3"], newPageViews(t), 5)
+	c := environmentControls(t)["C3"]
+	expectCaught(t, "C3", "P1:", c.sc, c.sys, 2)
 }
 
 // TestPropertiesCatchBugs runs the real core with one defect each and expects the
@@ -214,24 +316,27 @@ func TestPropertiesCatchBugs(t *testing.T) {
 	small.Regions, small.Events, small.Budget = 1, 60, 10*time.Minute
 	empty := small
 	empty.ESM.Empty = 0.5
-	// The core doesn't prune high-water marks yet: units that finished a W ago keep theirs.
 	pruned := small
-	pruned.Topology.UnitRecords, pruned.Window = 2, time.Second
+	pruned.Topology.UnitRecords, pruned.WriteGap = 2, 5*time.Second
 	sys := newPageViews(t)
+	// P4 checks a W of a second, and the cores prune with pageViews' W of minutes.
+	shortW := *sys
+	shortW.cat = fixtureWindow(t, time.Second)
 	for _, tc := range []struct {
 		name     string
 		sc       simulation.Scenario
+		sys      *pageViews
 		bug      bug
 		property string
 	}{
-		{"high-water marks never pruned", pruned, noBug, "P4:"},
-		{"a unit never drains", small, alwaysFail, "P6:"},
-		{"a panic", small, panics, "P8:"},
-		{"a request for an empty batch", empty, emptyCall, "P9:"},
+		{"high-water marks kept past P4's window", pruned, &shortW, noBug, "P4:"},
+		{"a unit never drains", small, sys, alwaysFail, "P6:"},
+		{"a panic", small, sys, panics, "P8:"},
+		{"a request for an empty batch", empty, sys, emptyCall, "P9:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			out := simulation.Run(t, tc.sc, &buggy{pageViews: sys, bug: tc.bug}, 1)
+			out := simulation.Run(t, tc.sc, &buggy{pageViews: tc.sys, bug: tc.bug}, 1)
 			for _, v := range out.Violations {
 				if strings.HasPrefix(v, tc.property) {
 					return
@@ -285,23 +390,42 @@ func (c buggyCore) Handle(ctx context.Context, b projector.Batch) (projector.Res
 }
 
 // TestChangeStreamCheck: P0 catches a change stream that repeats an append, lacks one, or
-// holds one that no append wrote.
+// holds one that no append wrote; that lacks the REMOVE of a deleted item, holds one of an
+// item never deleted, or one before its INSERT; or that holds a MODIFY of an event appended
+// in one region only.
 func TestChangeStreamCheck(t *testing.T) {
 	t.Parallel()
 	a, b := event("a"), event("b")
+	const narrow, wide = "999999999999999999999", "1000000000000000000000"
+	ins := func(it store.Item, seq string) projector.Record {
+		return projector.Record{Op: projector.Insert, Seq: seq, New: it}
+	}
+	mod := func(it store.Item, seq string) projector.Record {
+		return projector.Record{Op: projector.Modify, Seq: seq, Old: it, New: it}
+	}
+	rem := func(it store.Item, seq string) projector.Record {
+		return projector.Record{Op: projector.Remove, Seq: seq, Old: it}
+	}
 	for _, tc := range []struct {
 		name             string
-		applied, records []store.Item
+		applied, deleted []store.Item
+		records          []projector.Record
 		want             int
 	}{
-		{"each append once", []store.Item{a, b}, []store.Item{b, a}, 0},
-		{"an append twice", []store.Item{a, b}, []store.Item{a, b, a}, 1},
-		{"an append missing", []store.Item{a, b}, []store.Item{a}, 1},
-		{"a record without an append", []store.Item{a}, []store.Item{a, b}, 1},
+		{"each append once", []store.Item{a, b}, nil, []projector.Record{ins(b, narrow), ins(a, wide)}, 0},
+		{"an append twice", []store.Item{a, b}, nil, []projector.Record{ins(a, narrow), ins(b, narrow), ins(a, wide)}, 1},
+		{"an append missing", []store.Item{a, b}, nil, []projector.Record{ins(a, narrow)}, 1},
+		{"a record without an append", []store.Item{a}, nil, []projector.Record{ins(a, narrow), ins(b, wide)}, 1},
+		{"a REMOVE past the width boundary", []store.Item{a}, []store.Item{a}, []projector.Record{ins(a, narrow), rem(a, wide)}, 0},
+		{"a REMOVE missing", []store.Item{a}, []store.Item{a}, []projector.Record{ins(a, narrow)}, 1},
+		{"a REMOVE of an item never deleted", []store.Item{a}, nil, []projector.Record{ins(a, narrow), rem(a, wide)}, 1},
+		{"a REMOVE before its INSERT", []store.Item{a}, []store.Item{a}, []projector.Record{rem(a, narrow), ins(a, wide)}, 1},
+		{"a MODIFY of an event appended twice", []store.Item{a, a}, nil, []projector.Record{ins(a, narrow), mod(a, wide)}, 0},
+		{"a MODIFY of an event appended once", []store.Item{a}, nil, []projector.Record{ins(a, narrow), mod(a, wide)}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := simulation.CheckChangeStream(tc.applied, tc.records)
+			got := simulation.CheckChangeStream(tc.applied, tc.deleted, tc.records)
 			p0 := slices.DeleteFunc(slices.Clone(got), func(v string) bool { return !strings.HasPrefix(v, "P0:") })
 			if len(got) != tc.want || len(p0) != tc.want {
 				t.Errorf("violations %q, want %d of P0", got, tc.want)
@@ -316,7 +440,7 @@ func event(pk string) store.Item {
 
 // TestViewChecks: P1 compares a region's views with its oracle, P2 the regions with each
 // other, and P3 the breakers with the records that fail; a broken view is left out of P1
-// and P2.
+// and P2, and a row that a divergent duplicate reached out of P2.
 func TestViewChecks(t *testing.T) {
 	t.Parallel()
 	row := simulation.RowID{View: pageHourly, Key: "p1"}
@@ -333,25 +457,29 @@ func TestViewChecks(t *testing.T) {
 		return st
 	}
 	other := simulation.RecordID{Unit: "U1", Seq: "100000000000000000002"}
+	divergent := map[simulation.RowID]bool{row: true}
 	for _, tc := range []struct {
 		name   string
 		r0, r1 simulation.State
+		skip   map[simulation.RowID]bool
 		want   []string
 	}{
-		{"exact, a broken view differs", state("2", "1", &poison), state("2", "2", &poison), nil},
-		{"a count off in r0", state("3", "1", &poison), state("3", "1", &poison), []string{"P1:"}},
-		{"regions differ", state("2", "1", &poison), state("1", "1", &poison), []string{"P2:"}},
-		{"broken by a record that doesn't fail it", state("2", "1", &other), state("2", "1", &other), []string{"P3:"}},
-		{"not broken", state("2", "1", nil), state("2", "1", nil), []string{"P1:", "P3:"}},
+		{"exact, a broken view differs", state("2", "1", &poison), state("2", "2", &poison), nil, nil},
+		{"a count off in r0", state("3", "1", &poison), state("3", "1", &poison), nil, []string{"P1:"}},
+		{"regions differ", state("2", "1", &poison), state("1", "1", &poison), nil, []string{"P2:"}},
+		{"regions differ in a divergent row", state("2", "1", &poison), state("1", "1", &poison), divergent, nil},
+		{"broken by a record that doesn't fail it", state("2", "1", &other), state("2", "1", &other), nil, []string{"P3:"}},
+		{"not broken", state("2", "1", nil), state("2", "1", nil), nil, []string{"P1:", "P3:"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			violations := simulation.CheckViews(oracle, tc.r0, tc.r1, tc.skip)
 			var got []string
-			for _, v := range simulation.CheckViews(oracle, tc.r0, tc.r1) {
+			for _, v := range violations {
 				got = append(got, v[:3])
 			}
 			if !slices.Equal(got, tc.want) {
-				t.Errorf("violations %q, want properties %q", simulation.CheckViews(oracle, tc.r0, tc.r1), tc.want)
+				t.Errorf("violations %q, want properties %q", violations, tc.want)
 			}
 		})
 	}

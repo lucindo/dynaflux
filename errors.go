@@ -19,12 +19,12 @@ var (
 	ErrOutsideWindow = engine.ErrOutsideWindow // "dynaflux: event_time outside the ACCEPT window"
 	// ErrInvalidValue is a value that Dynaflux can't store, which a [ValueError] names, or
 	// an event over DynamoDB's 400 KB item limit.
-	ErrInvalidValue = engine.ErrInvalidValue // "dynaflux: invalid value"
+	ErrInvalidValue = engine.ErrInvalidValue // "invalid value"
 	// ErrNotFound is a :one query that found no row.
 	ErrNotFound = engine.ErrNotFound // "dynaflux: no row found"
 	// ErrTooManyKeys is a query call whose IN parameters make more than 100 key
 	// combinations to read.
-	ErrTooManyKeys = engine.ErrTooManyKeys // "dynaflux: too many key combinations"
+	ErrTooManyKeys = engine.ErrTooManyKeys // "too many key combinations"
 	// ErrEvaluation is an expression of a query that failed on the rows it read, such as an
 	// integer division by zero, or a sum outside its result type.
 	ErrEvaluation = engine.ErrEvaluation // "evaluation error"
@@ -41,7 +41,7 @@ type ValueError struct {
 	Err  error
 }
 
-func (e *ValueError) Error() string { return e.Name + ": " + e.Err.Error() }
+func (e *ValueError) Error() string { return "dynaflux: " + e.Name + ": " + e.Err.Error() }
 
 func (e *ValueError) Unwrap() error { return e.Err }
 
@@ -57,7 +57,8 @@ func (e *BatchError) Error() string {
 	b.WriteString("dynaflux: " + strconv.Itoa(len(failed)) + " of " + strconv.Itoa(len(e.Errs)) + " events failed")
 	for i, err := range e.Errs {
 		if err != nil {
-			b.WriteString("; event " + strconv.Itoa(i) + ": " + err.Error())
+			// The event's error starts with the prefix this text already has.
+			b.WriteString("; event " + strconv.Itoa(i) + ": " + strings.TrimPrefix(err.Error(), "dynaflux: "))
 		}
 	}
 	return b.String()

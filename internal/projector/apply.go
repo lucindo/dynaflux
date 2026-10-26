@@ -7,13 +7,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/agg"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/expr"
 	"github.com/lucindo/dynaflux/internal/keys"
+	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
@@ -21,22 +24,108 @@ import (
 // condition that keeps failing means the backend disagrees with the _v it returns.
 const maxAttempts = 100
 
-// applyRow writes the contributions of g that the item doesn't hold yet, by its high-water
-// mark for the unit, in one conditional write. A row that has expired is skipped.
-func (c *Core) applyRow(ctx context.Context, unitKey string, g *rowGroup) error {
-	v := g.v
-	if g.hasExp && time.Now().UnixMicro() >= g.exp {
-		return nil
+// applyRows writes the rows of unit own's records, "" for the backfill's, with bounded
+// parallelism, and returns each one's error. Every write has finished when it returns. It
+// reads every row before it writes any: pruning reads the items of the other units whose
+// high-water marks the rows hold, once for all of them. A row that has expired is skipped.
+func (c *Core) applyRows(ctx context.Context, stream, own string, groups []*rowGroup) []error {
+	errs := make([]error, len(groups))
+	items := make([]*item, len(groups))
+	now := time.Now().UnixMicro()
+	fanOut(len(groups), func(i int) {
+		if g := groups[i]; !g.hasExp || now < g.exp {
+			items[i], errs[i] = c.readRow(ctx, g)
+		}
+	})
+	units, err := c.units(ctx, stream, own, items)
+	// The items of a SPLIT row share its uniqExact markers, so they are written in turn: two
+	// identical marker requests in flight would race.
+	rows := logicalRows(groups)
+	fanOut(len(rows), func(r int) {
+		for _, i := range rows[r] {
+			switch {
+			case items[i] == nil: // expired, or not read
+			case err != nil:
+				errs[i] = err
+			default:
+				errs[i] = c.writeRow(ctx, groups[i], items[i], units)
+			}
+		}
+	})
+	return errs
+}
+
+// fanOut calls f for each index below n, rowParallelism at a time, and returns once every
+// call has.
+func fanOut(n int, f func(int)) {
+	sem := make(chan struct{}, rowParallelism)
+	var wg sync.WaitGroup
+	for i := range n {
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			f(i)
+		})
 	}
-	table := c.naming.ViewTable(v.name, v.def.Number)
-	stored, err := c.b.Get(ctx, table, g.key, true)
+	wg.Wait()
+}
+
+// logicalRows returns the indexes of groups by logical row: a SPLIT row's items together.
+func logicalRows(groups []*rowGroup) [][]int {
+	type row struct {
+		v       *view
+		pk, lsk string
+	}
+	at := map[row]int{}
+	var out [][]int
+	for i, g := range groups {
+		k := row{g.v, g.key.PK, g.lsk}
+		j, ok := at[k]
+		if !ok {
+			j = len(out)
+			at[k] = j
+			out = append(out, nil)
+		}
+		out[j] = append(out[j], i)
+	}
+	return out
+}
+
+func (c *Core) readRow(ctx context.Context, g *rowGroup) (*item, error) {
+	stored, err := c.b.Get(ctx, c.naming.ViewTable(g.v.name, g.v.def.Number), g.key, true)
 	if err != nil {
-		return fmt.Errorf("projector: read view %s row %q/%q: %w", v.id, g.key.PK, g.key.SK, err)
+		return nil, fmt.Errorf("projector: read view %s row %q/%q: %w", g.v.id, g.key.PK, g.key.SK, err)
 	}
+	return g.current(stored)
+}
+
+// units reads, by unit key, the items of the units other than own whose high-water marks
+// items hold.
+func (c *Core) units(ctx context.Context, stream, own string, items []*item) (map[string]meta.Unit, error) {
+	var ks []string
+	for _, it := range items {
+		if it != nil {
+			ks = slices.AppendSeq(ks, maps.Keys(it.hwm.Units))
+		}
+	}
+	slices.Sort(ks)
+	ks = slices.DeleteFunc(slices.Compact(ks), func(k string) bool { return k == own })
+	units, err := c.meta.Units(ctx, stream, ks, false)
+	if err != nil {
+		return nil, fmt.Errorf("projector: %w", err)
+	}
+	return units, nil
+}
+
+// writeRow writes the contributions of g that cur, its stored item, doesn't hold yet, by its
+// high-water marks, in one conditional write.
+func (c *Core) writeRow(ctx context.Context, g *rowGroup, cur *item, units map[string]meta.Unit) error {
+	v := g.v
+	table := c.naming.ViewTable(v.name, v.def.Number)
 	for range maxAttempts {
-		next, prev, nerr := c.nextItem(ctx, table, unitKey, g, stored)
-		if nerr != nil || next == nil {
-			return nerr
+		next, prev, err := c.nextItem(ctx, table, g, cur, units)
+		if err != nil || next == nil {
+			return err
 		}
 		cond := store.IfAbsent()
 		if prev > 0 {
@@ -50,24 +139,22 @@ func (c *Core) applyRow(ctx context.Context, unitKey string, g *rowGroup) error 
 			}
 			return nil
 		}
-		stored = ce.Current
+		if cur, err = g.current(ce.Current); err != nil {
+			return err
+		}
 	}
 	return fmt.Errorf("projector: write view %s row %q/%q: condition failed %d times in a row", v.id, g.key.PK, g.key.SK, maxAttempts)
 }
 
-// nextItem returns the item to write over stored, which has version prev (0 when absent),
-// or nil when stored already holds every contribution.
-func (c *Core) nextItem(ctx context.Context, table, unitKey string, g *rowGroup, stored store.Item) (store.Item, int64, error) {
-	cur, err := g.current(stored)
-	if err != nil {
-		return nil, 0, err
-	}
-	last := cur.hwm.Units[unitKey]
-	pending := slices.DeleteFunc(slices.Clone(g.contribs), func(ct *contribution) bool { return ct.seq <= last })
+// nextItem returns the item to write over cur, which has version prev (0 when absent), or
+// nil when cur already holds every contribution.
+func (c *Core) nextItem(ctx context.Context, table string, g *rowGroup, cur *item, units map[string]meta.Unit) (store.Item, int64, error) {
+	pending := g.pending(&cur.hwm)
 	if len(pending) == 0 {
 		return nil, 0, nil
 	}
-	counted, err := c.countValues(ctx, table, unitKey, g, pending)
+	c.prune(&cur.hwm, units)
+	counted, err := c.countValues(ctx, table, g, pending)
 	if err == nil {
 		err = cur.add(pending, counted)
 	}
@@ -76,10 +163,49 @@ func (c *Core) nextItem(ctx context.Context, table, unitKey string, g *rowGroup,
 	}
 	prev := cur.version
 	cur.version++
-	cur.hwm.Units[unitKey] = pending[len(pending)-1].seq
 	next, err := g.encodeItem(cur)
 	return next, prev, err
 }
+
+// pending returns the contributions that h doesn't hold yet, and moves h past them. Live, a
+// record counts above its unit's entry. The backfill applies records in one order, by unit
+// key and sequence number, so a record counts above the mark B of the last one applied.
+func (g *rowGroup) pending(h *keys.HWM) []*contribution {
+	if g.owner == keys.OwnerBackfill {
+		var last keys.Mark
+		if h.Backfill != nil {
+			last = *h.Backfill
+		}
+		out := slices.DeleteFunc(slices.Clone(g.contribs), func(ct *contribution) bool { return ct.mark().Compare(last) <= 0 })
+		if len(out) > 0 {
+			m := out[len(out)-1].mark()
+			h.Backfill = &m
+		}
+		return out
+	}
+	out := slices.DeleteFunc(slices.Clone(g.contribs), func(ct *contribution) bool {
+		return ct.seq <= h.Units[ct.unitKey]
+	})
+	for _, ct := range out {
+		h.Units[ct.unitKey] = ct.seq
+	}
+	return out
+}
+
+// prune drops each unit's mark that the unit's progress covers, once progress rose more than
+// W ago (S9 rule 3): an invocation that writes the row later started after the rise, so it
+// skips every record the mark stood for. The backfill's mark B stays.
+func (c *Core) prune(h *keys.HWM, units map[string]meta.Unit) {
+	for key, seq := range h.Units {
+		if u := units[key]; u.Progress >= seq && time.Since(u.ProgressAt) > c.window {
+			delete(h.Units, key)
+		}
+	}
+}
+
+func (ct *contribution) mark() keys.Mark { return keys.Mark{UnitKey: ct.unitKey, Seq: ct.seq} }
+
+func (r *record) mark() keys.Mark { return keys.Mark{UnitKey: r.unitKey, Seq: r.seq} }
 
 // current decodes the stored item, or returns an empty one when there is none.
 func (g *rowGroup) current(stored store.Item) (*item, error) {
@@ -141,14 +267,14 @@ func (g *rowGroup) marked(pending []*contribution) []marked {
 // first record that has a value creates its marker unless one exists, and a value counts
 // for the record that owns the marker, including a marker the record wrote in an earlier
 // attempt.
-func (c *Core) countValues(ctx context.Context, table, unitKey string, g *rowGroup, pending []*contribution) ([][]expr.Value, error) {
+func (c *Core) countValues(ctx context.Context, table string, g *rowGroup, pending []*contribution) ([][]expr.Value, error) {
 	ms := g.marked(pending)
 	if err := c.readMarkers(ctx, table, g, ms); err != nil {
 		return nil, err
 	}
 	counted := make([][]expr.Value, len(g.v.aggs))
 	for _, m := range ms {
-		owner, err := keys.Owner(keys.OwnerLive, unitKey, m.ct.seq)
+		owner, err := keys.Owner(g.owner, m.ct.unitKey, m.ct.seq)
 		if err != nil {
 			return nil, err
 		}
