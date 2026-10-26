@@ -94,6 +94,7 @@ func TestStringLiterals(t *testing.T) {
 		{`'é'`, "é"},
 		{`'-- /* not comments */'`, "-- /* not comments */"},
 		{"'a;b'", "a;b"},
+		{"'a\rb'", "a\rb"}, // a line ends only at a line feed
 	}
 	for _, tt := range tests {
 		t.Run(tt.src, func(t *testing.T) {
@@ -103,6 +104,17 @@ func TestStringLiterals(t *testing.T) {
 				t.Errorf("got %s, want %q", expr(x), tt.want)
 			}
 		})
+	}
+}
+
+// A line ends only at a line feed, so a lone carriage return is part of a quoted name.
+func TestQuotedNameWithCarriageReturn(t *testing.T) {
+	t.Parallel()
+	for _, src := range []string{"\"a\rb\"", "`a\rb`"} {
+		_, x := parseItem(t, src)
+		if c, ok := x.(*sql.ColumnRef); !ok || c.Name != "a\rb" {
+			t.Errorf("%q: got %s, want the name %q", src, expr(x), "a\rb")
+		}
 	}
 }
 
@@ -196,6 +208,9 @@ func TestPositions(t *testing.T) {
 		{"annotation name", "--\tname:  Q\t:one\nSELECT x FROM t", func(f *sql.File) diag.Pos {
 			return f.Stmts[0].(*sql.Query).Annotations[0].NamePos
 		}, pos(1, 11)},
+		{"annotation in a CRLF file", "-- name: Q :one\r\nSELECT x FROM t;\r\n", func(f *sql.File) diag.Pos {
+			return f.Stmts[0].(*sql.Query).Annotations[0].NamePos
+		}, pos(1, 10)},
 		{"qualified name starts at the qualifier", "SELECT x FROM db.t", func(f *sql.File) diag.Pos {
 			return f.Stmts[0].(*sql.Query).Select.From.Pos
 		}, pos(1, 15)},

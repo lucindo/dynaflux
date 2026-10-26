@@ -4,6 +4,7 @@
 package sql_test
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,8 +16,10 @@ import (
 	"github.com/lucindo/dynaflux/internal/txtar"
 )
 
+var update = flag.Bool("update", false, "write the ast and diagnostics sections of testdata from the parser's output") //nolint:gochecknoglobals // go test flags are package variables
+
 // Each testdata/*.txtar holds a file in.sql, its dump in ast, and the
-// diagnostics Parse reports for it. DYNAFLUX_UPDATE_GOLDEN=1 rewrites ast and
+// diagnostics Parse reports for it. go test -update rewrites ast and
 // diagnostics from the parser's output; review the diff.
 func TestParseGolden(t *testing.T) {
 	t.Parallel()
@@ -45,7 +48,7 @@ func checkGolden(t *testing.T, path string) {
 	}
 	f, ds := sql.Parse("in.sql", []byte(in))
 	gotAST, gotDiags := dump(f), diagLines(ds)
-	if os.Getenv("DYNAFLUX_UPDATE_GOLDEN") != "" {
+	if *update {
 		setSection(a, "ast", gotAST)
 		setSection(a, "diagnostics", gotDiags)
 		if writeErr := os.WriteFile(path, txtar.Format(a), 0o600); writeErr != nil {

@@ -2,10 +2,11 @@ Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
 A lexical or syntax error ends its statement: the parser reports the first
-one, skips to the next ; outside strings and comments, and goes on. A broken
-statement keeps its name and annotations, so the name still counts as
-defined; that is why IF NOT EXISTS and OR REPLACE are reported after the
-name.
+one, skips to the next ; outside strings and comments, and goes on. # and //
+comments count as comments for this skip, as they do in ClickHouse, so a ; in
+one doesn't end the statement. A broken statement keeps its name and
+annotations, so the name still counts as defined; that is why IF NOT EXISTS
+and OR REPLACE are reported after the name.
 -- in.sql --
 CREATE STREAM a (x Strin g, y Bad Type) PRIMARY KEY x;
 CREATE STREAM b (x String) PRIMARY KEY x;
@@ -24,6 +25,12 @@ SELECT x FROM b WHERE s = 'unclosed;
 SELECT x FROM b;
 CREATE STREAM IF NOT EXISTS d (x String) PRIMARY KEY x;
 CREATE OR REPLACE MATERIALIZED VIEW w ORDER BY x AS SELECT x FROM b GROUP BY x;
+SELECT x FROM b LEFT x;
+-- name: Q3 :one
+SELECT x FROM b;
+SELECT x FROM b WHERE x = 1 # note; more
+-- name: Q4 :one
+SELECT x FROM b;
 CREATE STREAM c (x String) PRIMARY KEY x /* unclosed ;
 SELECT x FROM b;
 -- ast --
@@ -47,7 +54,14 @@ query @15:1
     from b @15:15
 stream d broken @16:1
 view w broken @17:1
-stream c broken @18:1
+query broken @18:1
+query @20:1
+  -- name: Q3 :one (name @19:10) @19:1
+  select @20:1
+    item x @20:8
+    from b @20:15
+query broken @21:1
+stream c broken @24:1
 -- diagnostics --
 in.sql:1:26: error DF1101: a: expected , or ), found g
 in.sql:5:41: error DF1002: Q1: unexpected character @
@@ -61,5 +75,9 @@ in.sql:16:15: error DF1102: d: IF NOT EXISTS is not supported
   hint: Dynaflux creates and manages the tables
 in.sql:17:8: error DF1102: w: OR REPLACE is not supported
   hint: Dynaflux creates and manages the tables
-in.sql:18:42: error DF1004: c: block comment is not closed
+in.sql:18:17: error DF1102: JOIN is not supported
+  hint: a statement reads one stream or view; put the data you need into the stream, and split the work into views and queries
+in.sql:21:29: error DF1005: # comments are not supported
+  hint: use -- or /* */
+in.sql:24:42: error DF1004: c: block comment is not closed
   hint: add */; block comments nest, so every /* needs its own */

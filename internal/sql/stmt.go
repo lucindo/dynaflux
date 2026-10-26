@@ -425,6 +425,8 @@ func (p *parser) aliasHint(x Expr, alias *Ident) string {
 	}
 	next := p.peek()
 	switch {
+	case p.isKw("LEFT") && isKw(next, "ARRAY"): // the next clause, not an alias
+		return ""
 	case isOp(next, ","), isOp(next, ";"), next.kind == tokEOF:
 	case next.kind == tokIdent:
 		switch strings.ToUpper(next.text) {

@@ -205,11 +205,11 @@ func (p *parser) product() Expr {
 func (p *parser) unary() Expr {
 	start := p.tok
 	if !p.isOp("-") {
-		return p.operand()
+		return p.afterOperand(p.primary())
 	}
 	if p.peek().kind == tokNumber {
 		p.advance()
-		return p.number(&start)
+		return p.afterOperand(p.number(&start))
 	}
 	p.advance()
 	if !p.nest() {
@@ -220,10 +220,9 @@ func (p *parser) unary() Expr {
 	return &UnaryExpr{Op: OpNeg, X: x, Span: p.span(start)}
 }
 
-// operand parses a primary and rejects the ClickHouse operators that may
-// follow an operand.
-func (p *parser) operand() Expr {
-	x := p.primary()
+// afterOperand rejects the ClickHouse operators that may follow the operand x,
+// and returns x.
+func (p *parser) afterOperand(x Expr) Expr {
 	if p.failed || p.tok.kind != tokIdent && !p.isOp("[") {
 		return x
 	}
@@ -336,8 +335,8 @@ func (p *parser) call() Expr {
 	case p.isOp(")"):
 	default:
 		if p.isKw("DISTINCT") && startsExpr(p.peek()) {
+			c.Distinct, c.DistinctPos = true, p.tok.pos
 			p.advance()
-			c.Distinct = true
 		}
 		c.Args = p.args()
 	}

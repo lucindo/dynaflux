@@ -38,7 +38,7 @@ type token struct {
 	end     int
 	err     *diag.Diagnostic
 
-	// The comments between the previous token and this one.
+	// Annotations, and their diagnostics, from the comments before this token.
 	anns     []Annotation
 	annDiags []diag.Diagnostic
 }
@@ -82,6 +82,13 @@ func (l *lexer) at(i int) byte {
 }
 
 func (l *lexer) eof() bool { return l.off >= len(l.src) }
+
+// atLineEnd reports whether a line ends i bytes ahead: at a line feed, or at the carriage
+// return before one. A lone carriage return is an ordinary character (sql.md §3.1).
+func (l *lexer) atLineEnd(i int) bool {
+	c := l.at(i)
+	return c == '\n' || c == '\r' && l.at(i+1) == '\n'
+}
 
 // step moves past one character, keeping the line and column.
 func (l *lexer) step() {
@@ -294,18 +301,14 @@ const hintNumber = "write decimal digits with digits on both sides of the point,
 
 const hintUnclosedString = "close it with ', and write a line break as \\n"
 
-// string scans a string literal. After an error it still scans to the closing
-// quote or the line end, so that the token ends where the string does.
+// string scans a string literal.
 func (l *lexer) string(start int, pos diag.Pos) token {
 	l.stepASCII(1)
 	var b strings.Builder
-	var err *diag.Diagnostic
 	for {
-		if l.eof() || isLineBreak(l.src[l.off]) {
-			if err == nil {
-				err = newError(pos, "DF1003", hintUnclosedString, "string literal is not closed on this line")
-			}
-			return l.errorToken(start, pos, err)
+		if l.eof() || l.atLineEnd(0) {
+			return l.errorToken(start, pos,
+				newError(pos, "DF1003", hintUnclosedString, "string literal is not closed on this line"))
 		}
 		switch l.src[l.off] {
 		case '\'':
@@ -315,10 +318,10 @@ func (l *lexer) string(start int, pos diag.Pos) token {
 				continue
 			}
 			l.stepASCII(1)
-			return l.stringToken(start, pos, b.String(), err)
+			return l.stringToken(start, pos, b.String())
 		case '\\':
-			if e := l.escape(&b); e != nil && err == nil {
-				err = e
+			if err := l.escape(&b); err != nil {
+				return l.errorToken(start, pos, err)
 			}
 		default:
 			r, _ := utf8.DecodeRuneInString(l.src[l.off:])
@@ -328,12 +331,10 @@ func (l *lexer) string(start int, pos diag.Pos) token {
 	}
 }
 
-func (l *lexer) stringToken(start int, pos diag.Pos, value string, err *diag.Diagnostic) token {
-	if err == nil && !utf8.ValidString(value) {
-		err = newError(pos, "DF1007", "check the \\xHH escapes", "string literal is not valid UTF-8")
-	}
-	if err != nil {
-		return l.errorToken(start, pos, err)
+func (l *lexer) stringToken(start int, pos diag.Pos, value string) token {
+	if !utf8.ValidString(value) {
+		return l.errorToken(start, pos,
+			newError(pos, "DF1007", "check the \\xHH escapes", "string literal is not valid UTF-8"))
 	}
 	tok := l.token(tokString, start, pos)
 	tok.value = value
@@ -345,7 +346,7 @@ func (l *lexer) stringToken(start int, pos diag.Pos, value string, err *diag.Dia
 func (l *lexer) escape(b *strings.Builder) *diag.Diagnostic {
 	pos := l.pos()
 	c := l.at(1)
-	if l.off+1 >= len(l.src) || isLineBreak(c) {
+	if l.off+1 >= len(l.src) || l.atLineEnd(1) {
 		l.stepASCII(1)
 		return nil
 	}
@@ -384,36 +385,29 @@ func (l *lexer) badEscape(pos diag.Pos, r rune) *diag.Diagnostic {
 		"invalid escape \\%s in string literal", showRune(r))
 }
 
-// quoted scans a quoted identifier, which has no escapes.
+// quoted scans a quoted identifier, which has no escapes. ClickHouse reads a
+// backslash or a doubled quote inside it as an escape, so both are errors.
 func (l *lexer) quoted(start int, pos diag.Pos) token {
 	quote := l.src[l.off]
 	l.stepASCII(1)
-	bad := false
-	for {
-		if l.eof() || isLineBreak(l.src[l.off]) {
-			bad = true
+	for !l.eof() {
+		c := l.src[l.off]
+		if c == '\\' || l.atLineEnd(0) || c == quote && l.at(1) == quote {
 			break
 		}
-		c := l.src[l.off]
 		if c == quote {
 			l.stepASCII(1)
-			break
+			if l.off-start == len(`""`) {
+				break
+			}
+			tok := l.token(tokQuoted, start, pos)
+			tok.value = l.src[start+1 : l.off-1]
+			return tok
 		}
 		l.step()
-		if c == '\\' {
-			bad = true
-			if !l.eof() && !isLineBreak(l.src[l.off]) {
-				l.step() // a backslash quotes the next character in ClickHouse
-			}
-		}
 	}
-	tok := l.token(tokQuoted, start, pos)
-	if bad || tok.end-tok.start == len(`""`) {
-		return l.errorToken(start, pos, newError(pos, "DF1010",
-			`a quoted name can't be empty or contain its quote character, \ or a line break`, "invalid quoted identifier"))
-	}
-	tok.value = l.src[start+1 : l.off-1]
-	return tok
+	return l.errorToken(start, pos, newError(pos, "DF1010",
+		`a quoted name can't be empty or contain its quote character, \ or a line break`, "invalid quoted identifier"))
 }
 
 // lineComment scans a -- comment and returns what parseAnnotation returns
@@ -478,26 +472,25 @@ func (l *lexer) skip() {
 	}
 }
 
+// skipQuoted needs no case for a doubled quote: closing at the first and
+// reopening at the second skips the same text.
 func (l *lexer) skipQuoted(quote byte) {
 	l.stepASCII(1)
-	for !l.eof() && !isLineBreak(l.src[l.off]) {
+	for !l.eof() && !l.atLineEnd(0) {
 		c := l.src[l.off]
 		l.step()
-		switch {
-		case c == '\\':
-			if !l.eof() && !isLineBreak(l.src[l.off]) {
+		switch c {
+		case '\\':
+			if !l.eof() && !l.atLineEnd(0) {
 				l.step()
 			}
-		case c == quote && quote == '\'' && l.at(0) == '\'':
-			l.stepASCII(1)
-		case c == quote:
+		case quote:
 			return
 		}
 	}
 }
 
 func isSpace(c byte) bool     { return c == ' ' || c == '\t' || c == '\r' || c == '\n' }
-func isLineBreak(c byte) bool { return c == '\n' || c == '\r' }
 func isLetter(c byte) bool    { return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' }
 func isDigit(c byte) bool     { return '0' <= c && c <= '9' }
 func isIdentChar(c byte) bool { return isLetter(c) || isDigit(c) || c == '_' }

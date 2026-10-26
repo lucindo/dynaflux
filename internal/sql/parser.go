@@ -15,8 +15,10 @@ import (
 //
 // The diagnostics are the lexical and syntax errors (DF1001 to DF1010 and
 // DF1101 to DF1103), duplicate clauses (DF1105) and annotation errors (DF1201
-// to DF1203). After a lexical or syntax error the statement is Broken, and
-// parsing resumes after the next ; outside strings and comments.
+// to DF1203). After a lexical or syntax error the statement is Broken, that
+// error is its only diagnostic, and parsing resumes after the next ; outside
+// strings and comments. Errors in the annotations before a Broken statement
+// are still reported.
 func Parse(path string, src []byte) (*File, []diag.Diagnostic) {
 	f := &File{Path: path, Src: src}
 	if off, ok := invalidUTF8(src); ok {
@@ -55,8 +57,9 @@ type parser struct {
 
 	// After a lexical or syntax error, failed is set, tok is a tokStop token,
 	// and resync restarts the lexer at skipFrom.
-	failed   bool
-	skipFrom token
+	failed    bool
+	skipFrom  token
+	stmtDiags int // len(diags) when the current statement started
 
 	pending   []Annotation // annotations before the statement that starts at tok
 	stmtName  string       // the statement's name, once known, for diagnostics
@@ -78,6 +81,7 @@ func (p *parser) file() []Stmt {
 		}
 		anns := p.pending
 		p.pending = nil
+		p.stmtDiags = len(p.diags)
 		s := p.statement(anns)
 		if p.failed {
 			s = brokenStmt(s)
@@ -258,14 +262,14 @@ func (p *parser) report(d diag.Diagnostic) {
 	p.diags = append(p.diags, d)
 }
 
-// fail reports the statement's lexical or syntax error. Later errors in the
-// same statement are dropped.
+// fail reports the statement's lexical or syntax error. The statement's other
+// errors, earlier or later, are dropped: checks don't run on a Broken statement.
 func (p *parser) fail(d diag.Diagnostic) {
 	if p.failed {
 		return
 	}
 	d.Statement = p.stmtName
-	p.diags = append(p.diags, d)
+	p.diags = append(p.diags[:p.stmtDiags], d)
 	p.failed = true
 	p.skipFrom = p.tok
 	p.tok = token{kind: tokStop}

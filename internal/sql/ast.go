@@ -369,12 +369,13 @@ type ColumnRef struct {
 type Call struct {
 	Span
 
-	Name       Ident
-	Star       bool // the first argument list is *
-	Distinct   bool // DISTINCT starts the first argument list
-	Parametric bool
-	Params     []Expr
-	Args       []Expr
+	Name        Ident
+	Star        bool     // the first argument list is *
+	Distinct    bool     // DISTINCT starts the first argument list
+	DistinctPos diag.Pos // where DISTINCT is written, when Distinct is set
+	Parametric  bool
+	Params      []Expr
+	Args        []Expr
 }
 
 // Interval is INTERVAL [-] (number | string) [unit] [TO unit]. The unit is

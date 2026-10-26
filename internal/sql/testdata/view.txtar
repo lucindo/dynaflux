@@ -25,6 +25,7 @@ select tag, k, uniqExact(user_id) as users
 from page_views
 left array join tags as tag, keys as k
 array join more
+left array join extra
 where tag != ''
 group by tag, k
 order by tag
@@ -57,9 +58,11 @@ view tags_view @16:1
       item keys as k @19:30
     array join @20:1
       item more @20:12
-    where (!= tag '') @21:1
-    group by tag, k @22:1
-    order by @23:1
-      item tag @23:10
-    limit 5 @24:1
+    left array join @21:1
+      item extra @21:17
+    where (!= tag '') @22:1
+    group by tag, k @23:1
+    order by @24:1
+      item tag @24:10
+    limit 5 @25:1
 -- diagnostics --
