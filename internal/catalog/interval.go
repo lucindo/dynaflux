@@ -26,13 +26,49 @@ const (
 	UnitYear    Unit = "YEAR"
 )
 
-func (u Unit) known() bool {
-	switch u {
-	case UnitSecond, UnitMinute, UnitHour, UnitDay, UnitWeek, UnitMonth, UnitQuarter, UnitYear:
-		return true
+// ParseUnit returns the unit that word names in full, singular or plural, in any letter
+// case, such as MINUTE, minutes or Day.
+func ParseUnit(word string) (Unit, bool) {
+	u := Unit(strings.TrimSuffix(strings.ToUpper(word), "S"))
+	if !u.known() {
+		return "", false
 	}
-	return false
+	return u, true
 }
+
+// Max returns how many units u there are in 100 years of 365.25 days, the longest
+// interval (sql.md §8.1), or 0 for an unknown unit.
+func (u Unit) Max() uint64 {
+	const (
+		years                            = 100
+		days                             = 36525
+		hoursPerDay                      = 24
+		minutesPerHour, secondsPerMinute = 60, 60
+		daysPerWeek                      = 7
+		quartersPerYear, monthsPerYear   = 4, 12
+	)
+	switch u {
+	case UnitSecond:
+		return days * hoursPerDay * minutesPerHour * secondsPerMinute
+	case UnitMinute:
+		return days * hoursPerDay * minutesPerHour
+	case UnitHour:
+		return days * hoursPerDay
+	case UnitDay:
+		return days
+	case UnitWeek:
+		return days / daysPerWeek
+	case UnitMonth:
+		return years * monthsPerYear
+	case UnitQuarter:
+		return years * quartersPerYear
+	case UnitYear:
+		return years
+	}
+	return 0
+}
+
+func (u Unit) known() bool { return u.Max() > 0 }
 
 // Interval is N units of time. Its text form is "N UNIT", such as "5 MINUTE". N is never
 // negative: the direction comes from where the interval is used.
@@ -41,12 +77,17 @@ type Interval struct {
 	Unit Unit
 }
 
+// String returns the text form of i.
+func (i Interval) String() string {
+	return strconv.Itoa(i.N) + " " + string(i.Unit)
+}
+
 // MarshalText implements [encoding.TextMarshaler].
 func (i Interval) MarshalText() ([]byte, error) {
 	if i.N < 0 || !i.Unit.known() {
 		return nil, fmt.Errorf("invalid interval %d %q", i.N, i.Unit)
 	}
-	return []byte(strconv.Itoa(i.N) + " " + string(i.Unit)), nil
+	return []byte(i.String()), nil
 }
 
 // UnmarshalText implements [encoding.TextUnmarshaler] for the form MarshalText writes.
@@ -123,25 +164,15 @@ func (r *Retention) UnmarshalText(text []byte) error {
 // days, and a cut-off region could expire events before they replicate, so shorter
 // windows are refused.
 func retentionPeriod(p Interval) bool {
-	const (
-		hoursPerDay   = 24
-		daysPerWeek   = 7
-		monthsPerYear = 12
-		maxDays       = 36525
-		maxYears      = 100
-	)
+	const hoursPerDay = 24
+	least := uint64(1)
 	switch p.Unit {
 	case UnitHour:
-		return p.N >= hoursPerDay && p.N <= maxDays*hoursPerDay
-	case UnitDay:
-		return p.N >= 1 && p.N <= maxDays
-	case UnitWeek:
-		return p.N >= 1 && p.N <= maxDays/daysPerWeek
-	case UnitMonth:
-		return p.N >= 1 && p.N <= maxYears*monthsPerYear
-	case UnitYear:
-		return p.N >= 1 && p.N <= maxYears
+		least = hoursPerDay
+	case UnitDay, UnitWeek, UnitMonth, UnitYear:
 	case UnitSecond, UnitMinute, UnitQuarter:
+		return false
 	}
-	return false
+	n := uint64(max(p.N, 0))
+	return n >= least && n <= p.Unit.Max()
 }

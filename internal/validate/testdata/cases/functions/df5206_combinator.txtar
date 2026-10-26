@@ -1,7 +1,9 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-Combinators other than -If are DF5206.
+Combinators that Dynaflux doesn't support, such as -OrNull, are DF5206, and so is a
+combinator written twice, in a view or a query: ClickHouse rejects sumIfIf(x, cond) and
+sumMergeMerge(c).
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
@@ -16,8 +18,36 @@ CREATE MATERIALIZED VIEW page_stats
 ORDER BY (page)
 AS SELECT
     page,
-    sumOrNull(duration_ms) AS total_ms
+    sumOrNull(duration_ms)           AS total_ms,
+    sumIfIf(duration_ms, page != '') AS page_ms,
+    countIfIf(page != '')            AS page_views
 FROM page_views
 GROUP BY page;
+
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page)
+AS SELECT page, sum(duration_ms) AS total_ms
+FROM page_views
+GROUP BY page;
+-- dynaflux/queries.sql --
+-- name: Totals :many
+SELECT sumMergeMerge(total_ms) AS merged, sumIfIf(total_ms, total_ms > 1) AS big
+FROM page_totals
+WHERE page = {page:String};
 -- want --
+dynaflux/queries.sql:2:8: error DF5206
+dynaflux/queries.sql:2:43: error DF5206
 dynaflux/views.sql:5:5: error DF5206
+dynaflux/views.sql:6:5: error DF5206
+dynaflux/views.sql:7:5: error DF5206
+-- want-text --
+dynaflux/queries.sql:2:8: error DF5206: Totals: combinator -Merge is not supported twice
+  hint: use -If, or -Merge in a query over a view
+dynaflux/queries.sql:2:43: error DF5206: Totals: combinator -If is not supported twice
+  hint: use -If, or -Merge in a query over a view
+dynaflux/views.sql:5:5: error DF5206: page_stats: combinator -OrNull is not supported
+  hint: use -If, or -Merge in a query over a view
+dynaflux/views.sql:6:5: error DF5206: page_stats: combinator -If is not supported twice
+  hint: use -If, or -Merge in a query over a view
+dynaflux/views.sql:7:5: error DF5206: page_stats: combinator -If is not supported twice
+  hint: use -If, or -Merge in a query over a view

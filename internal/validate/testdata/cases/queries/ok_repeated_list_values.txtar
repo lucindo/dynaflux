@@ -1,0 +1,25 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A value repeated in an IN list counts once, by exact value: 1 and 1.0 are one value. So
+the binding reads 10 levels times 10 days, 100 key combinations, which is the limit.
+-- dynaflux/events.sql --
+CREATE STREAM events (
+    user_id String,
+    level   UInt8
+)
+PRIMARY KEY (user_id);
+-- dynaflux/level_daily.sql --
+CREATE MATERIALIZED VIEW level_daily
+ORDER BY (level, day)
+PRIMARY KEY (level)
+AS SELECT level, toDate(event_time) AS day, count() AS events
+FROM events
+GROUP BY level, day;
+-- dynaflux/queries.sql --
+-- name: LevelDays :many
+SELECT level, day, events
+FROM level_daily
+WHERE level IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1.0)
+  AND day IN ('2024-05-01', '2024-05-02', '2024-05-03', '2024-05-04', '2024-05-05', '2024-05-06', '2024-05-07', '2024-05-08', '2024-05-09', '2024-05-10');
+-- want --

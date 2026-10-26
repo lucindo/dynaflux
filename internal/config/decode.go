@@ -144,7 +144,7 @@ func (d *decoder) object(path string, n *yaml.Node, missing diag.Pos, keys ...st
 		}
 		if !slices.Contains(keys, k.Value) {
 			hint := allowed
-			if s, ok := suggest(k.Value, keys); ok {
+			if s, ok := diag.Suggest(k.Value, keys); ok {
 				hint = fmt.Sprintf("did you mean %q?", s)
 			}
 			d.errorf(at(k), "DF6005", hint, "unknown key %q", o.key(k.Value))
@@ -310,7 +310,7 @@ func (d *decoder) list(o object, k, example string, withDefault bool) []*yaml.No
 // repeated reports DF6012 when v, from entry n of list what, was seen before.
 func (d *decoder) repeated(seen map[string]bool, what, v string, n *yaml.Node) bool {
 	if seen[v] {
-		d.errorf(at(n), "DF6012", "remove the repeat", "%s lists %s twice", what, v)
+		d.errorf(at(n), "DF6012", "remove the repeat", "%s lists %q twice", what, v)
 		return true
 	}
 	seen[v] = true
@@ -336,47 +336,4 @@ func orList[T ~string](vs []T) string {
 		b.WriteString(string(v))
 	}
 	return b.String()
-}
-
-// suggest returns the candidate closest to s, the way the SQL diagnostics suggest names:
-// one that differs only in letter case, or else the one with the smallest edit distance, if
-// that is at most 2. Ties go to the candidate that sorts first.
-func suggest(s string, candidates []string) (string, bool) {
-	const maxDistance = 2
-	if s == "" {
-		// An empty name is within 2 edits of every short candidate.
-		return "", false
-	}
-	best, bestDist := "", maxDistance+1
-	for _, c := range slices.Sorted(slices.Values(candidates)) {
-		if strings.EqualFold(c, s) {
-			return c, true
-		}
-		if dist := levenshtein(s, c); dist < bestDist {
-			best, bestDist = c, dist
-		}
-	}
-	return best, best != ""
-}
-
-// levenshtein is the edit distance between a and b, over code points.
-func levenshtein(a, b string) int {
-	ra, rb := []rune(a), []rune(b)
-	prev := make([]int, len(rb)+1)
-	for j := range prev {
-		prev[j] = j
-	}
-	for i := range ra {
-		cur := make([]int, len(rb)+1)
-		cur[0] = i + 1
-		for j := range rb {
-			cost := 1
-			if ra[i] == rb[j] {
-				cost = 0
-			}
-			cur[j+1] = min(prev[j+1]+1, cur[j]+1, prev[j]+cost)
-		}
-		prev = cur
-	}
-	return prev[len(rb)]
 }

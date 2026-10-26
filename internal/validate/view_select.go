@@ -4,7 +4,6 @@
 package validate
 
 import (
-	"slices"
 	"strings"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -50,18 +49,19 @@ func (v *viewCompiler) arrayItem(aj *sql.ArrayJoin, item *sql.ArrayItem) *catalo
 		return nil
 	}
 	checkName(v.st, *alias, catalog.AttrPK, catalog.AttrSK)
+	element := o.typ()
+	element.Array = false
 	if s := v.info.stream; s != nil {
+		// A stream column wins over an alias of the same name.
 		if _, ok := s.stream.Column(alias.Name); ok || s.badColumns[alias.Name] {
-			v.st.errorf(alias.Pos, "DF5103", "choose another alias", "alias %s is also a column of %s", alias.Name, s.stream.Name)
+			aliasIsColumn(v.st, *alias, s.stream.Name)
+		} else {
+			v.columns[alias.Name], v.bad[alias.Name] = element, o.bad
 		}
 	}
 	if o.bad {
-		v.elements[alias.Name] = o
 		return nil
 	}
-	t := o.typ()
-	t.Array = false
-	v.elements[alias.Name] = operand{ir: catalog.Expr{Op: catalog.OpColumn, Type: t, Name: alias.Name}}
 	return &catalog.ArrayJoin{Array: o.ir, Alias: alias.Name}
 }
 
@@ -121,12 +121,7 @@ func (v *viewCompiler) key(st *stmt, out *output) operand {
 	switch {
 	case o.bad:
 	case o.typ().Nullable:
-		name := out.name
-		if _, isColumn := x.(*sql.ColumnRef); isColumn {
-			name += "_key" // an alias can't be the column's own name (DF5103)
-		}
-		st.errorf(x.Extent().Pos, "DF3103", "group by coalesce("+st.text(x)+", "+typeDefault(o.typ())+") AS "+name,
-			"key %s is Nullable", out.name)
+		st.errorf(x.Extent().Pos, "DF3103", nullableKeyHint(st, out, o.typ()), "key %s is Nullable", out.name)
 	case !isKeyType(o.typ()):
 		st.errorf(x.Extent().Pos, "DF3104", "", "key %s has type %s, which can't be a view key", out.name, o.typ())
 	default:
@@ -135,13 +130,26 @@ func (v *viewCompiler) key(st *stmt, out *output) operand {
 	return badOperand()
 }
 
+// nullableKeyHint suggests a coalesce for a Nullable key of type t, named as the key, or
+// <key>_key when the key is a column without an alias.
+func nullableKeyHint(st *stmt, out *output, t catalog.Type) string {
+	def, ok := typeDefault(t)
+	if !ok {
+		return "use a non-Nullable UUID: coalesce can't turn a string into a UUID"
+	}
+	name := out.name
+	if out.item.Alias == nil {
+		name += "_key" // an alias can't be the column's own name (DF5103)
+	}
+	return "group by coalesce(" + st.text(out.item.X) + ", " + def + ") AS " + name
+}
+
 // quietKey returns a key for WHERE, checked without reporting: its own check reports.
 func (v *viewCompiler) quietKey(out *output) operand {
 	if o, ok := v.quietKeys[out.name]; ok {
 		return o
 	}
-	quiet := &stmt{d: &diags{}, f: v.st.f, name: v.st.name}
-	o := v.key(quiet, out)
+	o := v.key(v.st.quiet(), out)
 	v.quietKeys[out.name] = o
 	return o
 }
@@ -188,7 +196,7 @@ func (v *viewCompiler) aggregateItem(out *output) (catalog.Aggregate, bool) {
 // regions round differently (DF3502), and about argMax or argMin of a Nullable argument,
 // which never records a NULL (DF3503).
 func (v *viewCompiler) aggregate(c *checker, x *sql.Call, fn aggregateFunc) (catalog.Aggregate, bool) {
-	if slices.ContainsFunc(fn.combinators, func(s string) bool { return s == combState || s == combMerge }) {
+	if fn.state || fn.merge {
 		v.st.errorf(x.Pos, "DF3105", "write the plain aggregate; views store aggregate states themselves",
 			"%s is not allowed in a view", x.Name.Name)
 		return catalog.Aggregate{}, false
@@ -204,16 +212,24 @@ func (v *viewCompiler) aggregate(c *checker, x *sql.Call, fn aggregateFunc) (cat
 	}
 	latest := agg.Fn == catalog.AggArgMax || agg.Fn == catalog.AggArgMin
 	if latest && agg.Args[0].Type.Nullable {
-		arg := v.st.text(x.Args[0])
-		rest := make([]string, 0, len(x.Args)-1)
-		for _, a := range x.Args[1:] {
-			rest = append(rest, v.st.text(a))
-		}
-		v.st.warnf(x.Pos, "DF3503",
-			"use a sentinel: "+x.Name.Name+"(coalesce("+arg+", "+typeDefault(agg.Args[0].Type)+"), "+strings.Join(rest, ", ")+")",
-			"%s skips rows where %s is NULL, so NULL never replaces a value", x.Name.Name, arg)
+		v.st.warnf(x.Pos, "DF3503", sentinelHint(v.st, x, agg.Args[0].Type),
+			"%s skips rows where %s is NULL, so NULL never replaces a value", x.Name.Name, v.st.text(x.Args[0]))
 	}
 	return agg, true
+}
+
+// sentinelHint suggests coalescing the Nullable first argument of argMax or argMin x, of
+// type t, with its type's default, or returns "" when the type has none.
+func sentinelHint(st *stmt, x *sql.Call, t catalog.Type) string {
+	def, ok := typeDefault(t)
+	if !ok {
+		return ""
+	}
+	args := []string{"coalesce(" + st.text(x.Args[0]) + ", " + def + ")"}
+	for _, a := range x.Args[1:] {
+		args = append(args, st.text(a))
+	}
+	return "use a sentinel: " + x.Name.Name + "(" + strings.Join(args, ", ") + ")"
 }
 
 // selectOrder reports ORDER BY and LIMIT in a view's SELECT (DF3006).

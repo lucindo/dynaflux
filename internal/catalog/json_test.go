@@ -6,6 +6,7 @@ package catalog_test
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"reflect"
@@ -17,6 +18,8 @@ import (
 )
 
 const goldenPath = "testdata/catalog.json"
+
+var update = flag.Bool("update", false, "write "+goldenPath+" from the fixture") //nolint:gochecknoglobals // go test flags are package variables
 
 func marshalFixture(t *testing.T) []byte {
 	t.Helper()
@@ -61,7 +64,7 @@ func TestMarshalRoundTrip(t *testing.T) {
 	}
 }
 
-// The golden file shows the JSON contract. Regenerate it with DYNAFLUX_UPDATE_GOLDEN=1.
+// The golden file shows the JSON contract. Regenerate it with go test -update.
 func TestMarshalGolden(t *testing.T) {
 	t.Parallel()
 	var got bytes.Buffer
@@ -69,7 +72,7 @@ func TestMarshalGolden(t *testing.T) {
 		t.Fatalf("Indent: %v", err)
 	}
 	got.WriteByte('\n')
-	if os.Getenv("DYNAFLUX_UPDATE_GOLDEN") != "" {
+	if *update {
 		if err := os.WriteFile(goldenPath, got.Bytes(), 0o600); err != nil {
 			t.Fatalf("update golden: %v", err)
 		}
@@ -79,7 +82,7 @@ func TestMarshalGolden(t *testing.T) {
 		t.Fatalf("read golden: %v", err)
 	}
 	if !bytes.Equal(got.Bytes(), want) {
-		t.Errorf("Marshal output differs from %s (DYNAFLUX_UPDATE_GOLDEN=1 rewrites it):\n%s", goldenPath, got.Bytes())
+		t.Errorf("Marshal output differs from %s (go test -update rewrites it):\n%s", goldenPath, got.Bytes())
 	}
 }
 
@@ -189,6 +192,36 @@ func TestMarshalRejectsInvalidCatalog(t *testing.T) {
 		}, "query TagTotals: aggregate 1: uniq takes 1 arguments and 0 parameters, not 2 and 0"},
 		{"invalid UTF-8", func(c *catalog.Catalog) { c.Views[0].Versions[1].Where.Args[1].Value = "\xff" },
 			"literal value is not valid UTF-8"},
+		{"no prune window", func(c *catalog.Catalog) { c.PruneWindowSeconds = 0 },
+			"prune window 0 seconds is not between 1 and 90000"},
+		{"prune window over 25 hours", func(c *catalog.Catalog) { c.PruneWindowSeconds = 90001 },
+			"prune window 90001 seconds is not between 1 and 90000"},
+		{"view without versions", func(c *catalog.Catalog) { c.Views[1].Versions = nil }, "view quota_usage has no versions"},
+		{"key range without bounds", func(c *catalog.Catalog) { c.Queries[0].Keys.Range.Lower, c.Queries[0].Keys.Range.Upper = nil, nil },
+			"query PageStats: key range on day has no bound"},
+		{"duplicate output column", func(c *catalog.Catalog) { c.Queries[0].Columns[1].Name = "day" },
+			"query PageStats: output column day appears twice"},
+		{"duplicate GROUP BY key", func(c *catalog.Catalog) {
+			a := c.Queries[3].Aggregation
+			a.GroupBy = append(a.GroupBy, a.GroupBy[0])
+		}, "query TagTotals: GROUP BY key tag appears twice"},
+		{"query without a sort order", func(c *catalog.Catalog) { c.Queries[0].OrderBy = nil }, "query PageStats: no sort order"},
+		{"uppercase stream name", func(c *catalog.Catalog) { c.Streams[0].Name = "Api_calls" }, `invalid stream name "Api_calls"`},
+		{"view name with a dash", func(c *catalog.Catalog) { c.Views[2].Name = "tag-hourly" }, `invalid view name "tag-hourly"`},
+		{"column name with invalid UTF-8", func(c *catalog.Catalog) { c.Streams[1].Columns[0].Name = "user\xffid" },
+			`stream page_views: invalid column name "user\xffid"`},
+		{"column named pk", func(c *catalog.Catalog) { c.Streams[1].Columns[0].Name = "pk" },
+			`stream page_views: invalid column name "pk"`},
+		{"view key named sk", func(c *catalog.Catalog) { c.Views[1].Versions[0].Keys[1].Name = "sk" },
+			`quota_usage@v1: invalid column name "sk"`},
+		{"aggregate named like a bookkeeping attribute", func(c *catalog.Catalog) { c.Views[1].Versions[0].Aggregates[0].Name = "_hwm" },
+			`quota_usage@v1: invalid column name "_hwm"`},
+		{"ARRAY JOIN alias with a digit first", func(c *catalog.Catalog) { c.Views[2].Versions[0].ArrayJoin.Alias = "1tag" },
+			`tag_hourly@v1: invalid ARRAY JOIN alias "1tag"`},
+		{"empty parameter name", func(c *catalog.Catalog) { c.Queries[0].Params[0].Name = "" },
+			`query PageStats: invalid parameter name ""`},
+		{"output column with a space", func(c *catalog.Catalog) { c.Queries[0].Columns[0].Name = "the day" },
+			`query PageStats: invalid output column name "the day"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -208,6 +241,35 @@ func TestMarshalRejectsInvalidCatalog(t *testing.T) {
 			t.Error("Marshal(nil) succeeded")
 		}
 	})
+}
+
+// The edges of what Marshal accepts: what the compiler can produce must round-trip.
+func TestMarshalAcceptsEdgeCases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(c *catalog.Catalog)
+	}{
+		{"prune window of 1 second", func(c *catalog.Catalog) { c.PruneWindowSeconds = 1 }},
+		{"prune window of 25 hours", func(c *catalog.Catalog) { c.PruneWindowSeconds = 90000 }},
+		{"key range with only an upper bound", func(c *catalog.Catalog) { c.Queries[0].Keys.Range.Lower = nil }},
+		// sql.md §3.4 reserves pk and sk for stream columns and view outputs only.
+		{"query output named pk", func(c *catalog.Catalog) { c.Queries[0].Columns[0].Name = "pk" }},
+		{"aggregation without GROUP BY or sort order", func(c *catalog.Catalog) {
+			q := &c.Queries[3]
+			q.Aggregation.GroupBy = nil
+			q.Columns = q.Columns[1:]
+			q.OrderBy = nil
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := fixture(t)
+			tt.mutate(c)
+			roundTrip(t, c)
+		})
+	}
 }
 
 // Every op round-trips with the arguments it takes, and fails with others.
@@ -276,7 +338,12 @@ func TestExprShape(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := fixture(t)
-			c.Queries[2].Columns[0].Expr = tt.expr
+			// An array literal appears only in a column DEFAULT, here that of page_views.tags.
+			if tt.expr.Op == catalog.OpArray {
+				c.Streams[1].Columns[3].Default = new(tt.expr)
+			} else {
+				c.Queries[2].Columns[0].Expr = tt.expr
+			}
 			if tt.ok {
 				roundTrip(t, c)
 				return

@@ -57,7 +57,7 @@ WHERE workspace_id = {workspace_id:String}
   "catalog": {
     "store": "analytics",
     "regions": ["us-east-1", "us-west-2"],
-    "timeout_seconds": 60,
+    "prune_window_seconds": 960,
     "streams": [
       {
         "name": "member_events",

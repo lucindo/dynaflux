@@ -17,6 +17,7 @@ var ErrNotFound = errors.New("no " + FileName + " in the directory or any parent
 
 // Find returns the path of the dynaflux.yaml that governs dir: the one in dir or in its
 // nearest parent, the way the go command finds go.mod. dir must be an existing directory.
+// The nearest entry of that name must be a regular file or a link to one.
 func Find(dir string) (string, error) {
 	start, err := filepath.Abs(dir)
 	if err != nil {
@@ -32,10 +33,13 @@ func Find(dir string) (string, error) {
 	for d := start; ; {
 		p := filepath.Join(d, FileName)
 		info, statErr := os.Stat(p)
-		if statErr == nil && !info.IsDir() {
+		switch {
+		// Reading a FIFO would block, and skipping the entry would select a parent's project.
+		case statErr == nil && !info.Mode().IsRegular():
+			return "", fmt.Errorf("find %s: %s isn't a regular file", FileName, p)
+		case statErr == nil:
 			return p, nil
-		}
-		if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		case !errors.Is(statErr, fs.ErrNotExist):
 			return "", fmt.Errorf("find %s: %w", FileName, statErr)
 		}
 		parent := filepath.Dir(d)

@@ -1,0 +1,171 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+costs.py's scenario A: its three views over a log kept 2 days, in 3 regions, with costs.py's
+120-second prune window. The stream report's figures are costs.py's for scenario A: 5.26
+write and 4.27 read units per event, and $10,442 a month per region.
+-- dynaflux.yaml --
+store: analytics
+prefix: prod-
+regions: [us-east-1, us-west-2, ap-northeast-1]
+runtime:
+  timeout_seconds: 60
+  prune_window_seconds: 120
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views, sum(duration_ms) AS total_ms
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW user_latest
+ORDER BY (user_id)
+AS SELECT user_id, argMax(page, event_time) AS last_page
+FROM page_views
+GROUP BY user_id;
+
+CREATE MATERIALIZED VIEW user_daily
+ORDER BY (user_id, day)
+AS SELECT user_id, toStartOfDay(event_time) AS day, count() AS views, uniqExact(page) AS pages
+FROM page_views
+GROUP BY user_id, day;
+-- dynaflux/queries.sql --
+-- name: PageStats :many
+SELECT day, views, total_ms
+FROM page_daily
+WHERE page = {page:String} AND day BETWEEN {from:Date} AND {to:Date}
+ORDER BY day;
+
+-- name: LastPage :one
+SELECT last_page FROM user_latest WHERE user_id = {user:String};
+
+-- name: RecentViews :many
+SELECT event_time, page
+FROM page_views
+WHERE user_id = {user:String} AND event_time >= {since:DateTime64(6)}
+ORDER BY event_time DESC
+LIMIT 20;
+-- explain page_views --
+stream page_views
+  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000  --uniq-new user_daily=0.3
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
+
+layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
+  table        prod-analytics-stream-page_views: Global Table, on-demand
+  key          pk user_id; sk event_time, event_id
+  log          LOG RETENTION 2 DAY: ~190 GB in ~20 partitions, each a change-stream shard
+  projector    batching window 1 s, batches of at most 100 events: ~20 invocations/s, 50 events each on average
+  marks        a view row keeps a shard's high-water mark for 120 s after the shard's progress passes it (runtime.prune_window_seconds)
+  archive      Firehose to Iceberg in us-east-1, us-west-2, ap-northeast-1
+
+per event, per region                                     write units  read units
+  event put, local or replicated                                 1.00
+  TTL delete, replicated from the region that expires it         0.67
+  page_daily, shared rows, 1,000 active                          1.07        1.07
+  user_latest, a row per entity                                  1.10        1.10
+  user_daily, a row per entity                                   1.10        1.10
+    uniqExact markers                                            0.30        1.00
+  progress item, one per batch                                   0.02
+  total                                                          5.26        4.27
+  per second, all events                                        5,260       4,273
+
+monthly                        per region  3 regions
+  DynamoDB requests               $10,044    $30,131
+    stream and meta tables         $2,770     $8,311
+    page_daily                     $2,116     $6,347
+    user_latest                    $2,168     $6,504
+    user_daily                     $2,989     $8,968
+  DynamoDB storage of the log         $48       $143
+  Lambda, the projector              $102       $305
+  Firehose                           $142       $426
+  S3 archive, year-1 average          $73       $218
+  replication transfer                $35       $105
+  total                           $10,442    $31,327
+  provisioned capacity at a 70% target would cut requests to $4,145 per region (-59%), but costs more than on-demand if it must cover peaks over 2.42 times the average
+  not modeled: query reads, view and marker storage, backfills, archive compaction, CloudWatch
+-- explain page_daily --
+view page_daily, from stream page_views
+  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
+
+layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
+  table        prod-analytics-view-page_daily-v1: regional, on-demand
+  mode         ASYNC: the projector applies events in batches
+  rows         shared: GROUP BY (page, day) leaves out user_id, the PRIMARY KEY of page_views, so any shard can write any row; ~1,000 active
+  backfill     fenced handoff: count and sum are additive
+
+row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
+  pk        page                                                  34 B
+  sk        day                                                    6 B
+  views     count()                                               13 B
+  total_ms  sum(duration_ms)                                      20 B
+  _v        row version                                           10 B
+  _hwm      ~20.1 high-water marks of ~30 B                      604 B
+  total     1 write unit, 1 read unit; the item limit is 400 KB  687 B
+
+per event, per region
+  rows         1.07 write units and 1.07 read units: a batch of 50 events updates 48.8 rows, and 10% of writes conflict and retry
+  per row      ~1.07 write and 1.07 read units per second on average; a partition takes 1,000 and 3,000
+  monthly      DynamoDB requests $2,116 per region, $6,347 for 3 regions
+-- explain user_daily --
+view user_daily, from stream page_views
+  assumptions  --rate 1000  --event-kb 1  --uniq-new user_daily=0.3
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
+
+layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
+  table        prod-analytics-view-user_daily-v1: regional, on-demand
+  mode         ASYNC: the projector applies events in batches
+  rows         a row per entity: GROUP BY (user_id, day) holds user_id, the PRIMARY KEY of page_views
+  backfill     fenced handoff: count is additive
+
+row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
+  pk     user_id, day                                          38 B
+  sk     a constant                                             3 B
+  views  count()                                               13 B
+  pages  uniqExact(page)                                       13 B
+  _v     row version                                           10 B
+  _hwm   ~1 high-water mark of ~30 B                           37 B
+  total  1 write unit, 1 read unit; the item limit is 400 KB  114 B
+
+per event, per region
+  rows         1.10 write units and 1.10 read units: a batch of 50 events updates 50 rows, and 10% of writes conflict and retry
+  markers      0.30 write units and 1.00 read units: a marker read per uniqExact per source row, and a write per new value (30%)
+  monthly      DynamoDB requests $2,989 per region, $8,968 for 3 regions
+-- explain PageStats --
+query PageStats :many, from view page_daily
+  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
+
+  read         Query of page = {page} AND day >= {from} AND day <= {to}
+  calls        1 Query per call, one per key combination
+  items        every row in the range
+  read cost    0.671 KB per row, and a Query rounds its total up to 4 KB: ~0.0839 read units per row eventually consistent, ~0.168 with WaitFor, which reads with strong consistency
+-- explain LastPage --
+query LastPage :one, from view user_latest
+  assumptions  --rate 1000  --event-kb 1
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
+
+  read         GetItem of user_id = {user}
+  items        1 item per call
+  read cost    0.131 KB per item, each rounded up to 4 KB: ~0.5 read units per item eventually consistent, ~1 with WaitFor, which reads with strong consistency
+-- explain RecentViews --
+query RecentViews :many, from stream page_views
+  assumptions  --event-kb 1
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
+
+  read         Query of user_id = {user} AND event_time >= {since}
+  calls        1 Query per call, one per key combination
+  items        every event in the range
+  read cost    1 KB per event, and a Query rounds its total up to 4 KB: ~0.125 read units per event eventually consistent, ~0.25 strongly consistent
+  limit        LIMIT 20 stops each Query after that many rows
+  window       only events still in the log, LOG RETENTION 2 DAY; older ones are in the archive

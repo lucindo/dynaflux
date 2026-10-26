@@ -81,7 +81,7 @@ dynaflux/queries/pages.sql:20:6: warning DF4501: RecentPageViews: reads stream p
   "catalog": {
     "store": "analytics",
     "regions": ["us-east-1", "us-west-2"],
-    "timeout_seconds": 60,
+    "prune_window_seconds": 960,
     "streams": [
       {
         "name": "page_views",
@@ -236,7 +236,7 @@ dynaflux/queries/pages.sql:20:6: warning DF4501: RecentPageViews: reads stream p
         ],
         "order_by": [
           {"expr": {"op": "column", "type": "DateTime64(6)", "name": "event_time"}, "desc": true, "nulls_first": false},
-          {"expr": {"op": "column", "type": "String", "name": "event_id"}, "desc": false, "nulls_first": false}
+          {"expr": {"op": "column", "type": "String", "name": "event_id"}, "desc": true, "nulls_first": false}
         ],
         "limit": {"op": "param", "type": "UInt32", "name": "n"}
       },
@@ -279,7 +279,7 @@ dynaflux/queries/pages.sql:20:6: warning DF4501: RecentPageViews: reads stream p
         ],
         "order_by": [
           {"expr": {"op": "aggregate", "type": "UInt64", "index": 0}, "desc": true, "nulls_first": false},
-          {"expr": {"op": "column", "type": "String", "name": "tag"}, "desc": false, "nulls_first": false}
+          {"expr": {"op": "column", "type": "String", "name": "tag"}, "desc": true, "nulls_first": false}
         ],
         "limit": {"op": "literal", "type": "UInt8", "value": "10"}
       }

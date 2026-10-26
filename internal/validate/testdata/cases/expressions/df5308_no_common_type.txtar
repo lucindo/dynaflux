@@ -1,14 +1,20 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-String and UInt8 have no common type. The diagnostic points at the if call.
+String and UInt8 have no common type, nor have Decimals of different scales, nor a
+Decimal and an integer that no Decimal(38, S) holds: Decimal(38, 20) with Int64 needs
+20 + 19 digits. The diagnostic points at the call. The stream query gets DF4501.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
     page        String,
     referrer    Nullable(String),
     tags        Array(String),
-    duration_ms UInt32
+    duration_ms UInt32,
+    price       Decimal(10, 2),
+    rate        Decimal(10, 3),
+    ratio       Decimal(38, 20),
+    total       Int64
 )
 PRIMARY KEY (user_id);
 -- dynaflux/page_daily.sql --
@@ -28,5 +34,22 @@ GROUP BY page, day;
 SELECT day, if(views > 10, 'busy', 0) AS label
 FROM page_daily
 WHERE page = {page:String};
+
+-- name: Mixed :many
+SELECT if(price > 0, price, rate) AS scales, if(price > 0, ratio, total) AS digits
+FROM page_views
+WHERE user_id = {user:String};
 -- want --
 dynaflux/queries.sql:2:13: error DF5308
+dynaflux/queries.sql:7:8: error DF5308
+dynaflux/queries.sql:7:46: error DF5308
+dynaflux/queries.sql:8:6: warning DF4501
+-- want-text --
+dynaflux/queries.sql:2:13: error DF5308: PageLabels: String and UInt8 have no common type
+  hint: for Decimals, use one scale
+dynaflux/queries.sql:7:8: error DF5308: Mixed: Decimal(10, 2) and Decimal(10, 3) have no common type
+  hint: for Decimals, use one scale
+dynaflux/queries.sql:7:46: error DF5308: Mixed: Decimal(38, 20) and Int64 have no common type
+  hint: for Decimals, use one scale
+dynaflux/queries.sql:8:6: warning DF4501: Mixed: reads stream page_views, which keeps events for 2 DAY after ingestion (LOG RETENTION). Older events are only in the archive.
+  hint: query older events with Athena, or aggregate them in a view

@@ -4,7 +4,6 @@
 package validate
 
 import (
-	"slices"
 	"strings"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -14,7 +13,7 @@ import (
 // aggregate checks a read-time aggregate (sql.md §7.4, §10.7) and refers to it by its
 // position among the query's aggregates. Its arguments read the source rows.
 func (q *queryCompiler) aggregate(c *checker, x *sql.Call, fn aggregateFunc) operand {
-	rows := q.newChecker(c.st, "SELECT", q.selectColumn)
+	rows := q.checker(c.st, "SELECT", q.selectColumn)
 	agg, ok := q.queryAggregate(rows, x, fn)
 	if !ok {
 		return badOperand()
@@ -24,13 +23,12 @@ func (q *queryCompiler) aggregate(c *checker, x *sql.Call, fn aggregateFunc) ope
 }
 
 func (q *queryCompiler) queryAggregate(c *checker, x *sql.Call, fn aggregateFunc) (catalog.QueryAggregate, bool) {
-	combs := strings.Join(fn.combinators, "")
 	switch {
-	case slices.Contains(fn.combinators, combState):
+	case fn.state:
 		c.st.errorf(x.Pos, "DF5206", hintCombinator, "combinator -State is not supported")
-	case strings.Contains(combs, combMerge+combIf):
+	case fn.mergeIf:
 		c.st.errorf(x.Pos, "DF4206", "filter the rows with WHERE", "%s is not supported", x.Name.Name)
-	case slices.Contains(fn.combinators, combMerge):
+	case fn.merge:
 		return q.merge(c, x, fn)
 	default:
 		agg, ok := c.aggregateCall(x, fn)
@@ -41,16 +39,18 @@ func (q *queryCompiler) queryAggregate(c *checker, x *sql.Call, fn aggregateFunc
 
 // merge checks <fn>Merge(c), which merges the stored states of the view column c.
 func (q *queryCompiler) merge(c *checker, x *sql.Call, fn aggregateFunc) (catalog.QueryAggregate, bool) {
-	params, paramsOK := c.aggregateParams(x, fn.fn)
-	if !c.arity(x, 1, 1, false) || !paramsOK {
+	inner := c.insideAggregate()
+	params, paramsOK := inner.aggregateParams(x, fn.fn)
+	if !inner.arity(x, 1, 1, false) || !paramsOK {
 		return catalog.QueryAggregate{}, false
 	}
-	arg := c.value(x.Args[0])
+	arg := inner.value(x.Args[0])
 	if arg.bad || q.src == nil || !q.mergeColumn(c.st, x, fn, arg, params) {
 		return catalog.QueryAggregate{}, false
 	}
+	// The column holds the finalized values of the same aggregate, so it has the merge's type.
 	return catalog.QueryAggregate{Merge: true, Aggregate: catalog.Aggregate{
-		Fn: fn.fn, Params: params, Args: []catalog.Expr{arg.ir}, Type: mergeType(fn.fn, arg.typ()),
+		Fn: fn.fn, Params: params, Args: []catalog.Expr{arg.ir}, Type: arg.typ(),
 	}}, true
 }
 
@@ -81,47 +81,36 @@ func (q *queryCompiler) mergeColumn(st *stmt, x *sql.Call, fn aggregateFunc, arg
 	}
 	column, need := st.text(x.Args[0]), strings.TrimSuffix(x.Name.Name, combMerge)
 	hint := ""
-	if def != nil && def.Fn == fn.fn && def.Cond != nil && !slices.Contains(fn.combinators, combIf) {
-		hint = "for a " + need + "If column, use " + need + "IfMerge(" + column + ")"
+	if def != nil && def.Fn == fn.fn && def.Cond != nil && !fn.withIf {
+		hint = "for " + withArticle(need+combIf) + " column, use " + need + "IfMerge(" + column + ")"
 	}
-	st.errorf(x.Pos, "DF4205", hint, "%s(%s) needs a %s column of a view; %s is %s", x.Name.Name, column, need, column, what)
+	st.errorf(x.Pos, "DF4205", hint, "%s(%s) needs %s column of a view; %s is %s",
+		x.Name.Name, column, withArticle(need), column, what)
 	return false
 }
 
 // mergeMismatch describes how the definition of a view column differs from what a merge
 // needs, or returns "".
 func mergeMismatch(def *catalog.ViewAggregate, fn aggregateFunc, params []float64) string {
-	ifs := 0
-	for _, comb := range fn.combinators {
-		if comb == combIf {
-			ifs++
-		}
-	}
-	defIfs := 0
+	defName := string(def.Fn)
 	if def.Cond != nil {
-		defIfs = 1
+		defName += combIf
 	}
-	defName := string(def.Fn) + strings.Repeat(combIf, defIfs)
 	switch {
-	case def.Fn != fn.fn || ifs != defIfs:
-		return "a " + defName + " column"
+	case def.Fn != fn.fn || fn.withIf != (def.Cond != nil):
+		return withArticle(defName) + " column"
 	case def.Fn == catalog.AggQuantileDD && params[0] != def.Params[0]:
-		return "a " + defName + " column with rel_acc " + formatFloat(def.Params[0])
+		return withArticle(defName) + " column with rel_acc " + formatFloat(def.Params[0])
 	}
 	return ""
 }
 
-// mergeType returns the type of <fn>Merge(c) for a column c of type col (sql.md §7.4).
-func mergeType(fn catalog.AggFunc, col catalog.Type) catalog.Type {
-	switch {
-	case fn == catalog.AggSum:
-		return sumType(col)
-	case fn == catalog.AggAvg || isQuantile(fn):
-		return catalog.Type{Kind: catalog.KindFloat64, Nullable: true}
-	case fn == catalog.AggCount || fn == catalog.AggUniq || fn == catalog.AggUniqExact:
-		return catalog.Type{Kind: catalog.KindUInt64}
+// withArticle puts "a" or "an" before an aggregate function name: an avg, a uniq.
+func withArticle(fn string) string {
+	if strings.ContainsRune("aeio", rune(fn[0])) { // uniq starts with a consonant sound
+		return "an " + fn
 	}
-	return col // min, max, any, argMax and argMin keep the column's type
+	return "a " + fn
 }
 
 // combinable reports a plain aggregate of a view column whose finalized values can't be
@@ -158,12 +147,18 @@ func isQuantile(fn catalog.AggFunc) bool {
 }
 
 // notCombinable reports an aggregate that would combine uniqExact values of different
-// view rows (DF4201).
+// view rows (DF4201). The hint suggests a view with one row per group: per GROUP BY key,
+// or without GROUP BY, per key column that WHERE binds with =.
 func (q *queryCompiler) notCombinable(st *stmt, x *sql.Call, col string) {
 	call := callHead(st, x) + "(" + col + ")"
 	keys := strings.Join(q.groupNames, ", ")
-	hint := "declare a view grouped by (" + keys + "), or make " + col + " a uniq() column and use uniqMerge(" + col +
-		") for an approximate count"
+	if q.sel.GroupBy == nil {
+		keys = strings.Join(q.equalityKeys(), ", ")
+	}
+	hint := "make " + col + " a uniq() column and use uniqMerge(" + col + ") for an approximate count"
+	if keys != "" {
+		hint = "declare a view grouped by (" + keys + "), or " + hint
+	}
 	if q.sel.GroupBy == nil {
 		st.errorf(x.Pos, "DF4201", hint, "%s cannot be combined across rows (the query combines all rows of %s).",
 			call, q.src.name)

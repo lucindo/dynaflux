@@ -66,7 +66,7 @@ func isKeyType(t catalog.Type) bool {
 
 func isBool(t catalog.Type) bool { return !t.Array && t.Kind == catalog.KindBool }
 
-// intBits returns the width of an integer kind.
+// intBits returns the width of an integer kind, and 0 for any other kind.
 func intBits(k catalog.Kind) int {
 	switch k {
 	case catalog.KindUInt8, catalog.KindInt8:
@@ -75,10 +75,12 @@ func intBits(k catalog.Kind) int {
 		return bits16
 	case catalog.KindUInt32, catalog.KindInt32:
 		return bits32
-	case catalog.KindUInt64, catalog.KindInt64, catalog.KindString, catalog.KindFloat64, catalog.KindDecimal,
-		catalog.KindBool, catalog.KindUUID, catalog.KindDate, catalog.KindDateTime, catalog.KindDateTime64:
+	case catalog.KindUInt64, catalog.KindInt64:
+		return bits64
+	case catalog.KindString, catalog.KindFloat64, catalog.KindDecimal, catalog.KindBool, catalog.KindUUID,
+		catalog.KindDate, catalog.KindDateTime, catalog.KindDateTime64:
 	}
-	return bits64
+	return 0
 }
 
 // wider returns the next integer width after bits, at most 64.

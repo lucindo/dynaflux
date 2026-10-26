@@ -17,8 +17,7 @@ const (
 	typeLowCardinality = "LowCardinality"
 	typeString         = "String"
 
-	hintTypeArgs = "write them as in Decimal(10, 2), Array(String) or DateTime64(6)"
-	hintDecimal  = "Decimal(P, S) needs 1 ≤ P ≤ 38 and 0 ≤ S ≤ P"
+	hintDecimal = "Decimal(P, S) needs 1 ≤ P ≤ 38 and 0 ≤ S ≤ P"
 )
 
 // resolveType resolves a declared type, of a column or a parameter (sql.md §4.1, §4.2).
@@ -96,8 +95,15 @@ func typeParam(st *stmt, t *sql.Type) (*sql.Type, bool) {
 			return inner, true
 		}
 	}
-	st.errorf(t.Pos, "DF5009", hintTypeArgs, "invalid type arguments for %s", st.text(t))
+	badTypeArgs(st, t)
 	return nil, false
+}
+
+// badTypeArgs reports invalid type arguments (DF5009).
+func badTypeArgs(st *stmt, t *sql.Type) (catalog.Type, bool) {
+	st.errorf(t.Pos, "DF5009", "write them as in Decimal(10, 2), Array(String) or DateTime64(6)",
+		"invalid type arguments for %s", st.text(t))
+	return catalog.Type{}, false
 }
 
 func isWrapper(t *sql.Type) bool {
@@ -117,8 +123,7 @@ func resolveScalar(st *stmt, t *sql.Type) (catalog.Type, bool) {
 	case ok && kind == catalog.KindDateTime64:
 		return resolveDateTime64(st, t)
 	case ok && t.Parens:
-		st.errorf(t.Pos, "DF5009", hintTypeArgs, "invalid type arguments for %s", st.text(t))
-		return catalog.Type{}, false
+		return badTypeArgs(st, t)
 	case ok:
 		return catalog.Type{Kind: kind}, true
 	}
@@ -132,41 +137,42 @@ func resolveScalar(st *stmt, t *sql.Type) (catalog.Type, bool) {
 
 // scalarKind returns the kind a type name spells, with ClickHouse's letter-case rules.
 func scalarKind(name string) (catalog.Kind, bool) {
-	for _, k := range []catalog.Kind{
-		catalog.KindString, catalog.KindUInt8, catalog.KindUInt16, catalog.KindUInt32, catalog.KindUInt64,
-		catalog.KindInt8, catalog.KindInt16, catalog.KindInt32, catalog.KindInt64, catalog.KindFloat64, catalog.KindUUID,
-	} {
-		if name == k.String() {
-			return k, true
-		}
-	}
-	for _, k := range []catalog.Kind{catalog.KindDate, catalog.KindDateTime64, catalog.KindDecimal, catalog.KindBool} {
-		if strings.EqualFold(name, k.String()) {
+	for _, k := range scalarKinds() {
+		caseFree := k == catalog.KindDate || k == catalog.KindDateTime64 || k == catalog.KindDecimal || k == catalog.KindBool
+		if name == k.String() || caseFree && strings.EqualFold(name, k.String()) {
 			return k, true
 		}
 	}
 	return 0, false
 }
 
-func knownTypeNames() []string {
-	return []string{
-		"String", "UInt8", "UInt16", "UInt32", "UInt64", "Int8", "Int16", "Int32", "Int64", "Float64",
-		"Decimal", "Bool", "UUID", "Date", "DateTime64", typeArray, typeNullable, typeLowCardinality,
+// scalarKinds lists the kinds that a declared type can name.
+func scalarKinds() []catalog.Kind {
+	return []catalog.Kind{
+		catalog.KindString, catalog.KindUInt8, catalog.KindUInt16, catalog.KindUInt32, catalog.KindUInt64,
+		catalog.KindInt8, catalog.KindInt16, catalog.KindInt32, catalog.KindInt64, catalog.KindFloat64, catalog.KindUUID,
+		catalog.KindDate, catalog.KindDateTime64, catalog.KindDecimal, catalog.KindBool,
 	}
+}
+
+func knownTypeNames() []string {
+	names := []string{typeArray, typeNullable, typeLowCardinality}
+	for _, k := range scalarKinds() {
+		names = append(names, k.String())
+	}
+	return names
 }
 
 func resolveDecimal(st *stmt, t *sql.Type) (catalog.Type, bool) {
 	const maxArgs = 2
 	if len(t.Args) > maxArgs {
-		st.errorf(t.Pos, "DF5009", hintTypeArgs, "invalid type arguments for %s", st.text(t))
-		return catalog.Type{}, false
+		return badTypeArgs(st, t)
 	}
 	nums := make([]int, len(t.Args))
 	for i, a := range t.Args {
 		n, ok := intTypeArg(a)
 		if !ok {
-			st.errorf(t.Pos, "DF5009", hintTypeArgs, "invalid type arguments for %s", st.text(t))
-			return catalog.Type{}, false
+			return badTypeArgs(st, t)
 		}
 		nums[i] = n
 	}
@@ -187,15 +193,13 @@ func resolveDecimal(st *stmt, t *sql.Type) (catalog.Type, bool) {
 func resolveDateTime64(st *stmt, t *sql.Type) (catalog.Type, bool) {
 	const maxArgs = 2
 	if len(t.Args) > maxArgs {
-		st.errorf(t.Pos, "DF5009", hintTypeArgs, "invalid type arguments for %s", st.text(t))
-		return catalog.Type{}, false
+		return badTypeArgs(st, t)
 	}
 	var zone *sql.StringLit
 	if len(t.Args) == maxArgs {
 		z, isString := t.Args[1].(*sql.StringLit)
 		if !isString {
-			st.errorf(t.Pos, "DF5009", hintTypeArgs, "invalid type arguments for %s", st.text(t))
-			return catalog.Type{}, false
+			return badTypeArgs(st, t)
 		}
 		zone = z
 	}
@@ -203,8 +207,7 @@ func resolveDateTime64(st *stmt, t *sql.Type) (catalog.Type, bool) {
 	if len(t.Args) > 0 {
 		p, ok := intTypeArg(t.Args[0])
 		if !ok {
-			st.errorf(t.Pos, "DF5009", hintTypeArgs, "invalid type arguments for %s", st.text(t))
-			return catalog.Type{}, false
+			return badTypeArgs(st, t)
 		}
 		precision = p
 	}

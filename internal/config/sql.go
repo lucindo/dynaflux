@@ -152,17 +152,17 @@ func (d *decoder) expand(fsys fs.FS, p Pattern) ([]string, error) {
 // broken link. A link that leaves through a link to a directory outside, which only
 // [os.Root] catches, is a read error.
 func (d *decoder) linkedFile(fsys fs.FS, name string, p Pattern) (bool, error) {
-	info, err := fs.Stat(fsys, name)
-	if err == nil {
-		return info.Mode().IsRegular(), nil
-	}
-	// Checked before ErrNotExist: fstest.MapFS reports an escaping link as missing.
+	// Checked before Stat, which follows the link out of the root on some file systems.
 	if target, out := leavesRoot(fsys, name); out {
 		d.errorf(p.Pos, "DF6205", "move the file into the project",
-			"%s links to %s; links must be relative and stay inside the project root", name, target)
+			"%q links to %q; links must be relative and stay inside the project root", name, target)
 		return false, nil
 	}
-	if errors.Is(err, fs.ErrNotExist) {
+	info, err := fs.Stat(fsys, name)
+	switch {
+	case err == nil:
+		return info.Mode().IsRegular(), nil
+	case errors.Is(err, fs.ErrNotExist):
 		return false, nil
 	}
 	return false, err
@@ -173,7 +173,7 @@ func (d *decoder) linkedFile(fsys fs.FS, name string, p Pattern) (bool, error) {
 func leavesRoot(fsys fs.FS, name string) (string, bool) {
 	target, err := fs.ReadLink(fsys, name)
 	if err != nil {
-		// Unknown: the caller reports the Stat error instead.
+		// Unknown: the caller's Stat reports the error.
 		return "", false
 	}
 	if filepath.IsAbs(target) {
@@ -213,8 +213,8 @@ func match(segs, names []string, dir bool) bool {
 }
 
 func matchName(seg, name string, isDir bool) bool {
-	if !strings.ContainsAny(seg, `*?[\`) {
-		return seg == name
+	if lit, ok := literal(seg); ok {
+		return lit == name
 	}
 	if skipped(seg, name, isDir) {
 		return false
@@ -223,12 +223,31 @@ func matchName(seg, name string, isDir bool) bool {
 	return err == nil && ok // validPattern checked the syntax
 }
 
+// literal returns seg without its escapes, and false when seg has a wildcard.
+func literal(seg string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(seg); i++ {
+		switch seg[i] {
+		case '*', '?', '[':
+			return "", false
+		case '\\':
+			i++ // validPattern refused a trailing \
+		}
+		b.WriteByte(seg[i])
+	}
+	return b.String(), true
+}
+
 // skipped reports whether wildcard segment seg skips name, as the go command does: names
-// that start with . or _, unless seg starts with the same character, and directories named
-// testdata.
+// that start with . or _, unless seg starts with the same character, escaped or not, and
+// directories named testdata.
 func skipped(seg, name string, isDir bool) bool {
 	if isDir && name == "testdata" {
 		return true
 	}
-	return (name[0] == '.' || name[0] == '_') && seg[0] != name[0]
+	first := seg[0]
+	if first == '\\' {
+		first = seg[1]
+	}
+	return (name[0] == '.' || name[0] == '_') && first != name[0]
 }

@@ -1,7 +1,8 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-avgMerge needs a column defined by avg; views is defined by count.
+avgMerge needs a column defined by avg: views is defined by count, and mean_ms by avgIf.
+Messages put "an" before avg.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
@@ -20,7 +21,8 @@ AS SELECT
     toStartOfDay(event_time) AS day,
     count()                  AS views,
     uniqExact(user_id)       AS visitors,
-    sum(duration_ms)         AS total_ms
+    sum(duration_ms)         AS total_ms,
+    avgIf(duration_ms, duration_ms > 0) AS mean_ms
 FROM page_views
 GROUP BY page, day;
 -- dynaflux/queries.sql --
@@ -28,5 +30,15 @@ GROUP BY page, day;
 SELECT avgMerge(views) AS mean_views
 FROM page_daily
 WHERE page = {page:String};
+
+-- name: MeanMs :one
+SELECT avgMerge(mean_ms) AS mean
+FROM page_daily
+WHERE page = {page:String};
 -- want --
 dynaflux/queries.sql:2:8: error DF4205
+dynaflux/queries.sql:7:8: error DF4205
+-- want-text --
+dynaflux/queries.sql:2:8: error DF4205: MeanViews: avgMerge(views) needs an avg column of a view; views is a count column
+dynaflux/queries.sql:7:8: error DF4205: MeanMs: avgMerge(mean_ms) needs an avg column of a view; mean_ms is an avgIf column
+  hint: for an avgIf column, use avgIfMerge(mean_ms)

@@ -1,0 +1,31 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A prune window of exactly timeout_seconds + 60 is valid, but below 960 it warns. The
+catalog carries the window.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+runtime:
+  timeout_seconds: 60
+  prune_window_seconds: 120
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:5:25: warning DF6306
+-- want-text --
+dynaflux.yaml:5:25: warning DF6306: runtime.prune_window_seconds is 120, less than 960: if you later lower it with runtime.timeout_seconds in one deploy, invocations started under the old timeout can outlive the new window
+  hint: remove it to use the default, 960, which is safe for every timeout
+-- want-catalog --
+{
+  "catalog": {
+    "prune_window_seconds": 120
+  }
+}

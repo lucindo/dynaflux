@@ -1,0 +1,75 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The common type of if, multiIf and coalesce values, by the rules of sql.md §4.5:
+- Decimal with an integer gives the smallest class of 9, 18 and 38 that holds max(P, S + D),
+  where D is 3, 5, 10, 19 or 20 digits by width, but 9 for Int32 and 18 for Int64 at scale 0.
+- Decimals of one scale give the larger precision class.
+- Date with DateTime gives DateTime, Date or DateTime with DateTime64(p) gives
+  DateTime64(p), and DateTime64(3) with DateTime64(6) gives DateTime64(6).
+- A Nullable value makes if Nullable; coalesce is Nullable only when its last value is.
+The stream query gets DF4501.
+-- dynaflux/measures.sql --
+CREATE STREAM measures (
+    site String,
+    ok   Bool,
+    d5   Decimal(5),
+    d95  Decimal(9, 5),
+    d12  Decimal(12, 2),
+    d20  Decimal(20, 2),
+    nd5  Nullable(Decimal(5)),
+    i8   Int8,
+    u16  UInt16,
+    i32  Int32,
+    i64  Int64,
+    u64  UInt64,
+    day  Date,
+    t3   DateTime64(3),
+    t6   DateTime64(6)
+)
+PRIMARY KEY (site);
+-- dynaflux/queries.sql --
+-- name: CommonTypes :many
+SELECT
+    if(ok, d5, i32)                AS int32_scale0,
+    if(ok, d5, i64)                AS int64_scale0,
+    if(ok, d5, u64)                AS uint64_scale0,
+    if(ok, d12, i32)               AS int32_scale2,
+    if(ok, d12, i64)               AS int64_scale2,
+    if(ok, d95, i8)                AS int8_scale5,
+    if(ok, d95, u16)               AS uint16_scale5,
+    multiIf(ok, d12, ok, d20, d12) AS decimal_classes,
+    if(ok, nd5, i8)                AS nullable_if,
+    coalesce(nd5, i8)              AS not_nullable_coalesce,
+    if(ok, day, toStartOfHour(t3)) AS date_datetime,
+    if(ok, toStartOfDay(t6), t3)   AS datetime_datetime64,
+    multiIf(ok, day, ok, t3, t6)   AS date_datetime64s
+FROM measures
+WHERE site = {site:String};
+-- want --
+dynaflux/queries.sql:16:6: warning DF4501
+-- want-catalog --
+{
+  "catalog": {
+    "queries": [
+      {
+        "name": "CommonTypes",
+        "columns": [
+          {"name": "int32_scale0", "expr": {"type": "Decimal(9, 0)"}},
+          {"name": "int64_scale0", "expr": {"type": "Decimal(18, 0)"}},
+          {"name": "uint64_scale0", "expr": {"type": "Decimal(38, 0)"}},
+          {"name": "int32_scale2", "expr": {"type": "Decimal(18, 2)"}},
+          {"name": "int64_scale2", "expr": {"type": "Decimal(38, 2)"}},
+          {"name": "int8_scale5", "expr": {"type": "Decimal(9, 5)"}},
+          {"name": "uint16_scale5", "expr": {"type": "Decimal(18, 5)"}},
+          {"name": "decimal_classes", "expr": {"type": "Decimal(38, 2)"}},
+          {"name": "nullable_if", "expr": {"type": "Nullable(Decimal(9, 0))"}},
+          {"name": "not_nullable_coalesce", "expr": {"type": "Decimal(9, 0)"}},
+          {"name": "date_datetime", "expr": {"type": "DateTime"}},
+          {"name": "datetime_datetime64", "expr": {"type": "DateTime64(3)"}},
+          {"name": "date_datetime64s", "expr": {"type": "DateTime64(6)"}}
+        ]
+      }
+    ]
+  }
+}

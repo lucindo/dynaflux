@@ -7,6 +7,7 @@ store: a
 regions: [us-west-2]
 runtime:
   timeout_seconds: 1
+  prune_window_seconds: 90000
   memory_mb: 128
   batching_window_seconds: 300
 defaults:

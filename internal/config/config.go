@@ -50,9 +50,12 @@ type Go struct {
 
 // Runtime configures the Lambda functions.
 type Runtime struct {
-	Out                   string // cleaned, relative to the project root
-	Arch                  Arch
-	TimeoutSeconds        int
+	Out            string // cleaned, relative to the project root
+	Arch           Arch
+	TimeoutSeconds int
+	// PruneWindowSeconds is how long the projector keeps a delivery unit's high-water mark
+	// in a view row after the unit's progress has passed it.
+	PruneWindowSeconds    int
 	MemoryMB              int
 	BatchingWindowSeconds int
 	Split                 Split

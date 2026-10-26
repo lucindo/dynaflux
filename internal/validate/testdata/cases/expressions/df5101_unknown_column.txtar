@@ -1,7 +1,10 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-An unknown column. The message suggests views.
+An unknown column. The hint suggests a visible name: one that differs only in letter case
+(USER_ID), or else one within two edits (veiws, duraton_ms). In a view, aggregate arguments
+see the source columns, and WHERE also the key aliases (dya). A double-quoted name also
+gets the note that string literals use single quotes.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
@@ -23,6 +26,17 @@ AS SELECT
     sum(duration_ms)         AS total_ms
 FROM page_views
 GROUP BY page, day;
+-- dynaflux/page_totals.sql --
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page, day)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    sum(duraton_ms)          AS total_ms,
+    countIf(page = "home")   AS home_views
+FROM page_views
+WHERE USER_ID != '' AND dya >= '2024-05-01' AND page != "pages"
+GROUP BY page, day;
 -- dynaflux/queries.sql --
 -- name: BusyDays :many
 SELECT day, views
@@ -30,4 +44,22 @@ FROM page_daily
 WHERE page = {page:String}
   AND veiws > 10;
 -- want --
+dynaflux/page_totals.sql:6:9: error DF5101
+dynaflux/page_totals.sql:7:20: error DF5101
+dynaflux/page_totals.sql:9:7: error DF5101
+dynaflux/page_totals.sql:9:25: error DF5101
+dynaflux/page_totals.sql:9:57: error DF5101
 dynaflux/queries.sql:5:7: error DF5101
+-- want-text --
+dynaflux/page_totals.sql:6:9: error DF5101: page_totals: unknown column duraton_ms
+  hint: did you mean duration_ms?
+dynaflux/page_totals.sql:7:20: error DF5101: page_totals: unknown column home
+  hint: string literals use single quotes
+dynaflux/page_totals.sql:9:7: error DF5101: page_totals: unknown column USER_ID
+  hint: did you mean user_id?
+dynaflux/page_totals.sql:9:25: error DF5101: page_totals: unknown column dya
+  hint: did you mean day?
+dynaflux/page_totals.sql:9:57: error DF5101: page_totals: unknown column pages
+  hint: did you mean page?; string literals use single quotes
+dynaflux/queries.sql:5:7: error DF5101: BusyDays: unknown column veiws
+  hint: did you mean views?

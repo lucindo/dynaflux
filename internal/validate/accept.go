@@ -23,7 +23,9 @@ func acceptWindow(st *stmt, clause *sql.ExprClause) catalog.Accept {
 	col, lower, upper, ok := acceptShape(clause.X)
 	ref, isRef := col.(*sql.ColumnRef)
 	switch {
-	case isRef && (ref.Name != catalog.ColumnEventTime || len(ref.Qualifier) > 0):
+	case isRef && qualified(st, ref.Ident):
+		return window
+	case isRef && ref.Name != catalog.ColumnEventTime:
 		st.errorf(clause.Pos, "DF2110", "ACCEPT event_time BETWEEN now() - INTERVAL 30 DAY AND now() + INTERVAL 5 MINUTE",
 			"ACCEPT must constrain event_time")
 		return window
@@ -35,16 +37,19 @@ func acceptWindow(st *stmt, clause *sql.ExprClause) catalog.Accept {
 		acceptShapeError(st, clause)
 		return window
 	}
-	future, upperOK := acceptBound(st, clause, upper, 1, "upper")
-	if !upperOK {
+	future, upperShaped, upperOK := acceptBound(st, upper, 1, "upper")
+	past, lowerShaped, lowerOK := catalog.Interval{}, true, true
+	if lower != nil {
+		past, lowerShaped, lowerOK = acceptBound(st, lower, -1, "lower")
+	}
+	if !upperShaped || !lowerShaped {
+		acceptShapeError(st, clause)
+	}
+	if !upperOK || !lowerOK {
 		return window
 	}
 	window.Future = future
 	if lower != nil {
-		past, lowerOK := acceptBound(st, clause, lower, -1, "lower")
-		if !lowerOK {
-			return window
-		}
 		window.Past = &past
 	}
 	return window
@@ -76,25 +81,24 @@ func acceptShapeError(st *stmt, clause *sql.ExprClause) {
 }
 
 // acceptBound compiles a bound now() or now() ± INTERVAL, whose sign must be 0 or the
-// given direction (DF2112).
-func acceptBound(st *stmt, clause *sql.ExprClause, x sql.Expr, direction int, which string) (catalog.Interval, bool) {
+// given direction (DF2112). It returns the interval, whether the bound has that shape, and
+// whether it is valid. The caller reports another shape, once for both bounds (DF2111).
+func acceptBound(st *stmt, x sql.Expr, direction int, which string) (catalog.Interval, bool, bool) {
 	x = unparen(x)
 	if isNow(x) {
-		return catalog.Interval{N: 0, Unit: catalog.UnitSecond}, true
+		return catalog.Interval{N: 0, Unit: catalog.UnitSecond}, true, true
 	}
 	b, ok := x.(*sql.BinaryExpr)
 	if !ok || b.Op != sql.OpAdd && b.Op != sql.OpSub || !isNow(unparen(b.X)) {
-		acceptShapeError(st, clause)
-		return catalog.Interval{}, false
+		return catalog.Interval{}, false, false
 	}
 	iv, ok := unparen(b.Y).(*sql.Interval)
 	if !ok {
-		acceptShapeError(st, clause)
-		return catalog.Interval{}, false
+		return catalog.Interval{}, false, false
 	}
 	interval, ok := checkInterval(st, iv)
 	if !ok {
-		return catalog.Interval{}, false
+		return catalog.Interval{}, true, false
 	}
 	sign := 1
 	if b.Op == sql.OpSub {
@@ -103,9 +107,9 @@ func acceptBound(st *stmt, clause *sql.ExprClause, x sql.Expr, direction int, wh
 	if sign != direction {
 		st.errorf(b.Pos, "DF2112", "the lower bound is now() - INTERVAL …, the upper bound now() + INTERVAL …",
 			"ACCEPT %s bound is on the wrong side of now()", which)
-		return catalog.Interval{}, false
+		return catalog.Interval{}, true, false
 	}
-	return interval, true
+	return interval, true, true
 }
 
 func isNow(x sql.Expr) bool {
@@ -113,54 +117,10 @@ func isNow(x sql.Expr) bool {
 	return ok && strings.EqualFold(c.Name.Name, "now") && len(c.Args) == 0 && !c.Star && !c.Parametric
 }
 
-// intervalUnit returns the unit a word names, in full, singular or plural, in any case.
-func intervalUnit(word string) (catalog.Unit, bool) {
-	u := catalog.Unit(strings.TrimSuffix(strings.ToUpper(word), "S"))
-	switch u {
-	case catalog.UnitSecond, catalog.UnitMinute, catalog.UnitHour, catalog.UnitDay, catalog.UnitWeek,
-		catalog.UnitMonth, catalog.UnitQuarter, catalog.UnitYear:
-		return u, true
-	}
-	return "", false
-}
-
-// Units in 100 years of 365.25 days (sql.md §8.1).
-const (
-	maxYears    = 100
-	maxQuarters = 400
-	maxMonths   = 1200
-	maxWeeks    = 5217
-	maxDays     = 36525
-	maxHours    = 876600
-	maxMinutes  = 52596000
-	maxSeconds  = 3155760000
-)
-
-func maxIntervals(u catalog.Unit) uint64 {
-	switch u {
-	case catalog.UnitYear:
-		return maxYears
-	case catalog.UnitQuarter:
-		return maxQuarters
-	case catalog.UnitMonth:
-		return maxMonths
-	case catalog.UnitWeek:
-		return maxWeeks
-	case catalog.UnitDay:
-		return maxDays
-	case catalog.UnitHour:
-		return maxHours
-	case catalog.UnitMinute:
-		return maxMinutes
-	case catalog.UnitSecond:
-	}
-	return maxSeconds
-}
-
 // checkInterval checks INTERVAL n unit (sql.md §8.1, DF5404).
 func checkInterval(st *stmt, iv *sql.Interval) (catalog.Interval, bool) {
 	n, isNumber := iv.Value.(*sql.NumberLit)
-	unit, unitOK := intervalUnit(iv.Unit.Name)
+	unit, unitOK := catalog.ParseUnit(iv.Unit.Name)
 	var reason string
 	switch {
 	case iv.To != nil:
@@ -175,10 +135,10 @@ func checkInterval(st *stmt, iv *sql.Interval) (catalog.Interval, bool) {
 		reason = "the value must be at least 1"
 	case !unitOK:
 		reason = iv.Unit.Name + " is not a unit; write a unit in full, such as MINUTE"
-	case n.Int > maxIntervals(unit):
+	case n.Int > unit.Max():
 		reason = n.Text + " " + string(unit) + " is more than 100 years"
 	default:
-		return catalog.Interval{N: int(min(n.Int, maxSeconds)), Unit: unit}, true
+		return catalog.Interval{N: int(min(n.Int, math.MaxInt)), Unit: unit}, true
 	}
 	st.errorf(iv.Pos, "DF5404", "write a positive whole number and a full unit name, such as INTERVAL 5 MINUTE",
 		"invalid INTERVAL: %s", reason)
@@ -197,7 +157,7 @@ func logRetention(st *stmt, r *sql.LogRetention, def catalog.Retention) catalog.
 			"LOG RETENTION FOREVER keeps every event in DynamoDB; the table and the cost of projecting it keep growing")
 		return catalog.RetainForever()
 	}
-	unit, ok := intervalUnit(r.Unit.Name)
+	unit, ok := catalog.ParseUnit(r.Unit.Name)
 	ret := catalog.RetainFor(catalog.Interval{N: int(min(r.Value.Int, math.MaxInt32)), Unit: unit})
 	if _, err := ret.MarshalText(); ok && err == nil && !r.Neg && !r.Value.IsFloat {
 		return ret

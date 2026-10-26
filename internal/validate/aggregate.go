@@ -4,7 +4,6 @@
 package validate
 
 import (
-	"slices"
 	"strings"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -22,14 +21,12 @@ const (
 // arguments and its -If condition, and types it. Combinators other than If are the
 // caller's to check.
 func (c *checker) aggregateCall(x *sql.Call, fn aggregateFunc) (catalog.Aggregate, bool) {
-	inner := &checker{st: c.st, env: c.env, guards: c.guards}
-	inner.env.place, inner.env.aggregate = placeAggregate, nil
+	inner := c.insideAggregate()
 	params, paramsOK := inner.aggregateParams(x, fn.fn)
-	hasIf := slices.Contains(fn.combinators, combIf)
-	if !inner.aggregateArity(x, fn.fn, hasIf) {
+	if !inner.aggregateArity(x, fn.fn, fn.withIf) {
 		return catalog.Aggregate{}, false
 	}
-	args, cond, argsOK := inner.aggregateArgs(x, hasIf)
+	args, cond, argsOK := inner.aggregateArgs(x, fn.withIf)
 	if !paramsOK || !argsOK {
 		return catalog.Aggregate{}, false
 	}
@@ -42,6 +39,14 @@ func (c *checker) aggregateCall(x *sql.Call, fn aggregateFunc) (catalog.Aggregat
 		types[i], irs[i] = a.typ(), a.ir
 	}
 	return catalog.Aggregate{Fn: fn.fn, Params: params, Args: irs, Cond: cond, Type: aggregateResult(fn.fn, types)}, true
+}
+
+// insideAggregate returns a checker for the parameters and arguments of an aggregate,
+// where another aggregate is DF5204.
+func (c *checker) insideAggregate() *checker {
+	inner := &checker{st: c.st, env: c.env, guards: c.guards}
+	inner.env.place, inner.env.aggregate = placeAggregate, nil
+	return inner
 }
 
 // aggregateArity checks the argument count of an aggregate; hasIf adds the condition.
@@ -63,7 +68,7 @@ func (c *checker) aggregateArity(x *sql.Call, fn catalog.AggFunc, hasIf bool) bo
 	case fn == catalog.AggCount && !hasIf && (x.Star || len(x.Args) > 0):
 		c.countArgument(x)
 	case x.Star:
-		c.st.errorf(x.Pos, "DF5203", "", "%s doesn't accept * as argument 1", x.Name.Name)
+		c.starArg(x)
 	case isUniq && len(x.Args) > n:
 		c.st.errorf(x.Pos, "DF5209", "", "%s takes one argument in v1", x.Name.Name)
 	default:
@@ -149,10 +154,7 @@ func (c *checker) level(x *sql.Call, params []sql.Expr) (float64, bool) {
 
 // paramValue returns the value of an aggregate parameter, which must be a number literal.
 func (c *checker) paramValue(x *sql.Call, p sql.Expr, what string) (float64, bool) {
-	if param, ok := unparen(p).(*sql.Param); ok {
-		if !c.param(param, paramValue).bad {
-			c.st.errorf(param.Pos, "DF4404", "", "the %s of %s needs a literal, not a parameter", what, x.Name.Name)
-		}
+	if c.rejectParam(p, "the "+what+" of "+x.Name.Name) {
 		return 0, false
 	}
 	n, ok := unparen(p).(*sql.NumberLit)
@@ -226,17 +228,18 @@ func sumType(t catalog.Type) catalog.Type {
 }
 
 // typeDefault returns the text of a value of t that hints can offer as a sentinel for
-// NULL: the type's default (sql.md §7.1).
-func typeDefault(t catalog.Type) string {
+// NULL: the type's default (sql.md §7.1). A UUID has none, because coalesce never
+// converts a string literal.
+func typeDefault(t catalog.Type) (string, bool) {
 	switch {
 	case t.Kind == catalog.KindString:
-		return "''"
+		return "''", true
 	case isNumeric(scalarOf(t)):
-		return "0"
+		return "0", true
 	case isBool(t):
-		return "false"
+		return "false", true
 	case isTemporal(scalarOf(t)):
-		return "toDate('1970-01-01')"
+		return "toDate('1970-01-01')", true
 	}
-	return "'00000000-0000-0000-0000-000000000000'"
+	return "", false
 }

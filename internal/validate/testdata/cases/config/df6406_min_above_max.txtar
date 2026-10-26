@@ -22,3 +22,6 @@ CREATE STREAM page_views (
 PRIMARY KEY (user_id);
 -- want --
 dynaflux.yaml:6:17: error DF6406
+-- want-text --
+dynaflux.yaml:6:17: error DF6406: defaults.autoscaling.read.min is 10, more than max 5
+  hint: set min to at most max

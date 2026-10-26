@@ -1,7 +1,8 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-Nullable parameters aren't allowed. The diagnostic points at the parameter's type.
+Nullable and LowCardinality parameters aren't allowed, also as an Array element. The
+diagnostic points at the parameter's type.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
@@ -27,6 +28,10 @@ GROUP BY page, day;
 -- name: PageDays :many
 SELECT day, views
 FROM page_daily
-WHERE page = {page:Nullable(String)};
+WHERE page = {page:Nullable(String)}
+  AND views > {floor:LowCardinality(String)}
+  AND page IN {pages:Array(LowCardinality(String))};
 -- want --
 dynaflux/queries.sql:4:20: error DF4401
+dynaflux/queries.sql:5:22: error DF4401
+dynaflux/queries.sql:6:22: error DF4401

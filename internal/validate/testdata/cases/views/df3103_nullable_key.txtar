@@ -2,12 +2,15 @@ Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
 View keys can't be Nullable. The diagnostic points at the SELECT item that defines the
-key.
+key. The hint names the key AS <key>, or AS <key>_key when the key is a column without an
+alias. A UUID has no value to coalesce with, since coalesce never converts a string
+literal, so its hint has no code.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
     page        String,
     referrer    Nullable(String),
+    request_id  Nullable(UUID),
     tags        Array(String),
     duration_ms UInt32
 )
@@ -18,5 +21,26 @@ ORDER BY (referrer)
 AS SELECT referrer, count() AS views
 FROM page_views
 GROUP BY referrer;
+
+CREATE MATERIALIZED VIEW referrer_named
+ORDER BY (ref)
+AS SELECT referrer AS ref, count() AS views
+FROM page_views
+GROUP BY ref;
+
+CREATE MATERIALIZED VIEW request_totals
+ORDER BY (request_id)
+AS SELECT request_id, count() AS views
+FROM page_views
+GROUP BY request_id;
 -- want --
 dynaflux/views.sql:3:11: error DF3103
+dynaflux/views.sql:9:11: error DF3103
+dynaflux/views.sql:15:11: error DF3103
+-- want-text --
+dynaflux/views.sql:3:11: error DF3103: referrer_totals: key referrer is Nullable
+  hint: group by coalesce(referrer, '') AS referrer_key
+dynaflux/views.sql:9:11: error DF3103: referrer_named: key ref is Nullable
+  hint: group by coalesce(referrer, '') AS ref
+dynaflux/views.sql:15:11: error DF3103: request_totals: key request_id is Nullable
+  hint: use a non-Nullable UUID: coalesce can't turn a string into a UUID

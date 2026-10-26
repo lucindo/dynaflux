@@ -1,0 +1,25 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The prune window must be at least timeout_seconds + 60: 359 is one second short of
+300 + 60.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+runtime:
+  timeout_seconds: 300
+  prune_window_seconds: 359
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:5:25: error DF6305
+-- want-text --
+dynaflux.yaml:5:25: error DF6305: runtime.prune_window_seconds is 359, less than runtime.timeout_seconds + 60 = 360: the projector could drop a high-water mark that a running invocation still needs, and count some events twice
+  hint: set it to at least 360, or remove it to use the default, 960

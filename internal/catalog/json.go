@@ -18,7 +18,9 @@ import (
 // older Dynaflux refuses a newer catalog rather than misreading it. [Unmarshal] reads every
 // version from MinFormatVersion to FormatVersion, so a new CLI can read the catalogs that
 // older releases deployed. A change that only adds omitzero fields keeps MinFormatVersion;
-// any other change raises it to the new FormatVersion.
+// any other change raises it to the new FormatVersion. That strands the catalogs that older
+// generated code embeds, so it also replaces dynaflux.GeneratedCodeVersion1 with the next
+// version, and that code fails to compile instead of failing when it starts.
 const (
 	FormatVersion    = 1
 	MinFormatVersion = 1
@@ -61,17 +63,23 @@ func Marshal(c *Catalog) ([]byte, error) {
 // Unmarshal decodes a catalog that [Marshal] wrote, byte for byte: it rejects unsupported
 // format versions, unknown fields and enum values, missing fields, and any other bytes for
 // the same catalog. Consumers can rely on the invariants it checks:
+//   - the names that SQL defines match [a-z][a-z0-9_]*, and those that become DynamoDB
+//     attributes (stream columns, view keys and aggregates) aren't pk or sk
 //   - names are unique: streams and views, which share one namespace; queries; a
 //     stream's columns, implicit ones included; a view version's keys and aggregates; a
-//     query's parameters
-//   - Shards, Split and PartitionKeyLen are in range, and storage formats are supported
-//   - a view's version numbers are unique and at least 1, at most one is current, and
-//     each version's Fingerprint matches its definition
+//     query's parameters, output columns and GROUP BY keys
+//   - PruneWindowSeconds, Shards, Split and PartitionKeyLen are in range, and storage
+//     formats are supported
+//   - a view has versions, their numbers are unique and at least 1, at most one is
+//     current, and each version's Fingerprint matches its definition
+//   - a query's key range has a bound, and its OrderBy is empty only for an aggregation
+//     without GROUP BY
 //   - every Expr has the fields and argument count its Op takes, and every aggregate the
 //     arguments and parameters its function takes
 //   - a Nullable column has no Default
 //
-// Name resolution, types and literal values are the compiler's to check.
+// Name resolution, types, literal values and the names that SQL doesn't define (the
+// store, regions and Go names) are the compiler's to check.
 func Unmarshal(data []byte) (*Catalog, error) {
 	// The probe reads the version before the strict decode, so a newer catalog gets a
 	// version error rather than an unknown-field error. It also rejects trailing data.

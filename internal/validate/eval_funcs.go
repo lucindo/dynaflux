@@ -43,7 +43,7 @@ func evalChoice(e catalog.Expr) (cval, error) {
 	if err != nil || v.null {
 		return v, err
 	}
-	return convert(v, e.Args[i].Type, e.Type)
+	return convert(v, e.Args[i].Type, e.Type), nil
 }
 
 // chosen returns the index of the argument that a conditional returns, or -1 for NULL.
@@ -200,16 +200,10 @@ func upperASCII(s string) string {
 }
 
 // convert converts the value a conditional returns to the conditional's type (sql.md
-// §4.5); a Decimal that its storage can't hold fails.
-func convert(v cval, from, to catalog.Type) (cval, error) {
-	from, to = scalarOf(from), scalarOf(to)
-	switch {
-	case from == to || isTemporal(to):
-		return v, nil
-	case isFloat(to):
-		return cval{f: toFloat(v, from)}, nil
-	case isDecimal(to):
-		return fitResult(num(v, from), to)
+// §4.5). Only a conversion to Float64 changes how the value is held.
+func convert(v cval, from, to catalog.Type) cval {
+	if isFloat(scalarOf(to)) {
+		return cval{f: toFloat(v, from)}
 	}
-	return v, nil
+	return v
 }

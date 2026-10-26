@@ -4,8 +4,10 @@
 package catalog_test
 
 import (
+	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -20,29 +22,40 @@ func fingerprint(t *testing.T, v *catalog.ViewVersion) string {
 	return fp
 }
 
+// Frozen view versions, without the fields that Fingerprint ignores. They're written out
+// rather than built like the fixture, so that only Fingerprint or the JSON form of a
+// version can change their fingerprints.
+const (
+	frozenPageDailyV1  = `{"stream":"page_views","where":{"op":"notEquals","type":"Bool","args":[{"op":"column","type":"String","name":"page"},{"op":"literal","type":"String"}]},"keys":[{"name":"page","expr":{"op":"column","type":"String","name":"page"}},{"name":"day","expr":{"op":"toStartOfDay","type":"DateTime","args":[{"op":"column","type":"DateTime64(6)","name":"event_time"}]}}],"partition_key_len":1,"ttl":{"key":"day","plus":"2 YEAR"},"split":1,"aggregates":[{"fn":"count","type":"UInt64","name":"views"},{"fn":"uniqExact","args":[{"op":"column","type":"String","name":"user_id"}],"type":"UInt64","name":"visitors"}],"storage_format":1}`
+	frozenPageDailyV2  = `{"stream":"page_views","where":{"op":"notEquals","type":"Bool","args":[{"op":"column","type":"String","name":"page"},{"op":"literal","type":"String"}]},"keys":[{"name":"page","expr":{"op":"column","type":"String","name":"page"}},{"name":"day","expr":{"op":"toStartOfDay","type":"DateTime","args":[{"op":"column","type":"DateTime64(6)","name":"event_time"}]}}],"partition_key_len":1,"ttl":{"key":"day","plus":"2 YEAR"},"split":1,"aggregates":[{"fn":"max","args":[{"op":"column","type":"DateTime64(6)","name":"event_time"}],"type":"DateTime64(6)","name":"last_view"},{"fn":"sum","args":[{"op":"column","type":"UInt32","name":"duration_ms"}],"type":"UInt64","name":"total_ms"},{"fn":"count","type":"UInt64","name":"views"},{"fn":"uniqExact","args":[{"op":"column","type":"String","name":"user_id"}],"type":"UInt64","name":"visitors"}],"storage_format":1}`
+	frozenQuotaUsage   = `{"stream":"api_calls","keys":[{"name":"account_id","expr":{"op":"column","type":"String","name":"account_id"}},{"name":"month","expr":{"op":"toStartOfMonth","type":"Date","args":[{"op":"column","type":"DateTime64(6)","name":"event_time"}]}}],"partition_key_len":1,"ttl":{"key":"month","plus":"13 MONTH"},"split":1,"aggregates":[{"fn":"count","type":"UInt64","name":"calls"},{"fn":"quantile","params":[0.9],"args":[{"op":"column","type":"UInt32","name":"units"}],"type":"Nullable(Float64)","name":"p90_units"},{"fn":"count","cond":{"op":"equals","type":"Bool","args":[{"op":"column","type":"String","name":"endpoint"},{"op":"literal","type":"String","value":"search"}]},"type":"UInt64","name":"searches"},{"fn":"sum","args":[{"op":"column","type":"UInt32","name":"units"}],"type":"UInt64","name":"used_units"}],"storage_format":1}`
+	frozenTagHourly    = `{"stream":"page_views","array_join":{"array":{"op":"column","type":"Array(String)","name":"tags"},"alias":"tag"},"keys":[{"name":"tag","expr":{"op":"column","type":"String","name":"tag"}},{"name":"hour","expr":{"op":"toStartOfHour","type":"DateTime","args":[{"op":"column","type":"DateTime64(6)","name":"event_time"}]}}],"partition_key_len":1,"ttl":{"key":"hour","plus":"30 DAY"},"split":2,"aggregates":[{"fn":"uniq","args":[{"op":"column","type":"String","name":"user_id"}],"type":"UInt64","name":"users"},{"fn":"count","type":"UInt64","name":"views"}],"storage_format":1}`
+	frozenEscapedValue = `{"stream":"s","where":{"op":"literal","type":"String","value":"<a href=\"x\">&é\u2028\b\f\n\r\t\u0001\u007f\\"},"partition_key_len":1,"split":1,"storage_format":1}`
+)
+
 // Fingerprints are frozen: a different value here renumbers every deployed view.
 func TestFingerprintIsFrozen(t *testing.T) {
 	t.Parallel()
-	escaped := func() catalog.ViewVersion {
-		v := pageDailyV2()
-		v.Where.Args[1].Value = `<a href="x">&é` + " "
-		return v
-	}
 	tests := []struct {
 		name    string
-		version func() catalog.ViewVersion
+		version string
 		want    string
 	}{
-		{"page_daily@v1", pageDailyV1, "ddde3c055025d1b4a545162930ba400594d0f4f4ae526a2f73adfe985c341508"},
-		{"page_daily@v2", pageDailyV2, "a3e853dc10c9a79c54e83e5cddbe4dc96159e25893a0f531d4739bdc8ec1c1e8"},
-		{"quota_usage@v1", quotaUsage, "5f93bf7a2634e6e6758f37d25a2ea4c4fa0ac575ae62271efc8f51d7a1ffb308"},
-		{"tag_hourly@v1", tagHourly, "c1c64f23b6306d15fe7b563578de93f97a6d7d58d767b3addd9a0cb694c96180"},
-		{"literal with escaped characters", escaped, "da3bea16fe23cfbfc5ef0513545e80f1dfdd9c95d3c7bfba0702e92cc1f4c3a2"},
+		{"page_daily@v1", frozenPageDailyV1, "ddde3c055025d1b4a545162930ba400594d0f4f4ae526a2f73adfe985c341508"},
+		{"page_daily@v2", frozenPageDailyV2, "a3e853dc10c9a79c54e83e5cddbe4dc96159e25893a0f531d4739bdc8ec1c1e8"},
+		{"quota_usage@v1", frozenQuotaUsage, "5f93bf7a2634e6e6758f37d25a2ea4c4fa0ac575ae62271efc8f51d7a1ffb308"},
+		{"tag_hourly@v1", frozenTagHourly, "c1c64f23b6306d15fe7b563578de93f97a6d7d58d767b3addd9a0cb694c96180"},
+		{"literal with escaped characters", frozenEscapedValue, "7c56050bb6ab1411e6e0db56c5d9328e10dd5c0e2fa7ff00733966c009cb41f5"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			v := tt.version()
+			dec := json.NewDecoder(strings.NewReader(tt.version))
+			dec.DisallowUnknownFields()
+			var v catalog.ViewVersion
+			if err := dec.Decode(&v); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
 			if got := fingerprint(t, &v); got != tt.want {
 				t.Errorf("Fingerprint = %s, want %s", got, tt.want)
 			}

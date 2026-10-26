@@ -64,9 +64,8 @@ func exactValue(n *sql.NumberLit) *big.Rat {
 	return r
 }
 
-// exponentSlack is how far past the literal's length an exponent can go before it's
-// clamped: a non-zero value past it is 0 as a Float64 and needs more than 38 digits,
-// as it does at the bound.
+// exponentSlack bounds exponents to ±(len(text)+400), which changes no result: a non-zero
+// value there or beyond is 0 or infinite as a Float64, and needs more than 38 digits.
 const exponentSlack = 400
 
 // clampExponent bounds the exponent of a float literal's text, which can overflow an
@@ -114,24 +113,7 @@ func decimalLiteral(n *sql.NumberLit) (catalog.Expr, bool) {
 	if precision > catalog.MaxDecimalPrecision {
 		return catalog.Expr{}, false
 	}
-	return literal(decimalType(precision, scale), formatDecimal(m, scale)), true
-}
-
-// formatDecimal writes the Decimal whose value is m / 10^scale in canonical form.
-func formatDecimal(m *big.Int, scale int) string {
-	digits := new(big.Int).Abs(m).String()
-	if len(digits) <= scale {
-		digits = strings.Repeat("0", scale-len(digits)+1) + digits
-	}
-	sign := ""
-	if m.Sign() < 0 {
-		sign = "-"
-	}
-	if scale == 0 {
-		return sign + digits
-	}
-	cut := len(digits) - scale
-	return sign + digits[:cut] + "." + digits[cut:]
+	return literal(decimalType(precision, scale), r.FloatString(scale)), true
 }
 
 // Bounds of temporal values (sql.md §4.1): dates through 2106-02-07, and times before
@@ -148,7 +130,6 @@ const (
 	dateLayout     = "2006-01-02"
 	dateTimeLayout = "2006-01-02 15:04:05"
 	dateLen        = len(dateLayout)
-	dateTimeLen    = len(dateTimeLayout)
 	nanoDigits     = 9 // fractional digits of a nanosecond
 )
 
@@ -156,62 +137,24 @@ const (
 // calendar date, a time for DateTime and DateTime64, and up to p fractional digits for
 // DateTime64(p), within the range of §4.1.
 func parseTime(s string, t catalog.Type) (time.Time, bool) {
-	date, rest := s, ""
-	if len(s) > dateLen {
-		date, rest = s[:dateLen], s[dateLen:]
+	layout := dateLayout
+	if t.Kind != catalog.KindDate && len(s) > dateLen {
+		layout = dateTimeLayout
 	}
-	tm, ok := parseDate(date)
-	if !ok {
+	s, frac, hasFrac := strings.Cut(s, ".")
+	tm, err := time.Parse(layout, s)
+	// Formatting back rejects what Parse allows beyond the layout, such as a one-digit hour.
+	if err != nil || tm.Format(layout) != s {
 		return time.Time{}, false
 	}
-	if rest != "" {
-		if t.Kind == catalog.KindDate {
-			return time.Time{}, false
-		}
-		if tm, ok = parseClock(tm, rest, t.Precision); !ok {
-			return time.Time{}, false
-		}
-	}
-	return tm, inRange(tm, t)
-}
-
-func parseDate(s string) (time.Time, bool) {
-	if len(s) != dateLen || s[4] != '-' || s[7] != '-' {
-		return time.Time{}, false
-	}
-	y, ok1 := digitsValue(s[0:4])
-	m, ok2 := digitsValue(s[5:7])
-	d, ok3 := digitsValue(s[8:10])
-	if !ok1 || !ok2 || !ok3 {
-		return time.Time{}, false
-	}
-	tm := time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC)
-	return tm, tm.Year() == y && int(tm.Month()) == m && tm.Day() == d
-}
-
-// parseClock adds " hh:mm:ss[.f]" to a date; precision is the most fractional digits.
-func parseClock(date time.Time, s string, precision int) (time.Time, bool) {
-	const hours, minutes = 24, 60
-	clock, frac, hasFrac := strings.Cut(s, ".")
-	if len(clock) != dateTimeLen-dateLen || clock[0] != ' ' || clock[3] != ':' || clock[6] != ':' {
-		return time.Time{}, false
-	}
-	h, ok1 := digitsValue(clock[1:3])
-	m, ok2 := digitsValue(clock[4:6])
-	sec, ok3 := digitsValue(clock[7:9])
-	if !ok1 || !ok2 || !ok3 || h >= hours || m >= minutes || sec >= minutes {
-		return time.Time{}, false
-	}
-	nanos := 0
 	if hasFrac {
 		v, ok := digitsValue(frac)
-		if !ok || len(frac) > precision {
+		if !ok || len(frac) > t.Precision {
 			return time.Time{}, false
 		}
-		nanos = v * int(math.Pow10(nanoDigits-len(frac)))
+		tm = tm.Add(time.Duration(v * int(math.Pow10(nanoDigits-len(frac)))))
 	}
-	return date.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute +
-		time.Duration(sec)*time.Second + time.Duration(nanos)), true
+	return tm, inRange(tm, t)
 }
 
 func digitsValue(s string) (int, bool) {

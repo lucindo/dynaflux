@@ -24,10 +24,11 @@ type Query struct {
 	Aggregation *Aggregation `json:"aggregation,omitzero"`
 	// Columns are the output columns in SELECT order; generated code uses this order.
 	Columns []NamedExpr `json:"columns,omitempty"`
-	// OrderBy is the full sort order: the ORDER BY items, then, ascending, the columns of
-	// the row key that they don't sort by. The row key is the view key, (event_time,
-	// event_id) for a stream, or the GROUP BY keys. OrderBy is empty only for an
-	// aggregation without GROUP BY, which returns one row.
+	// OrderBy is the full sort order: the ORDER BY items, then the columns of the row key
+	// that they don't sort by, in the direction of the last ORDER BY item (ascending
+	// without ORDER BY). The row key is the view key, (event_time, event_id) for a stream,
+	// or the GROUP BY keys. OrderBy is empty only for an aggregation without GROUP BY,
+	// which returns one row.
 	OrderBy []OrderItem `json:"order_by,omitempty"`
 	// Limit is an unsigned integer literal or parameter, or nil for no limit.
 	Limit *Expr `json:"limit,omitzero"`
@@ -117,7 +118,9 @@ type RangeBound struct {
 type Aggregation struct {
 	// GroupBy are the GROUP BY keys. Their names are the columns that Columns and OrderBy
 	// see besides the aggregates.
-	GroupBy    []NamedExpr      `json:"group_by,omitempty"`
+	GroupBy []NamedExpr `json:"group_by,omitempty"`
+	// Aggregates are in the order they appear in the query, one per call; an OpAggregate
+	// refers to one by its position.
 	Aggregates []QueryAggregate `json:"aggregates,omitempty"`
 }
 

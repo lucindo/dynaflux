@@ -14,6 +14,7 @@ runtime:
   out: cmd/runtime
   arch: x86_64
   timeout_seconds: 900
+  prune_window_seconds: 960
   memory_mb: 10240
   batching_window_seconds: 0
   split: stream

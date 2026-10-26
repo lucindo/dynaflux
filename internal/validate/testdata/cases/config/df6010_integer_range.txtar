@@ -1,7 +1,7 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-Integers outside their Lambda ranges.
+Integers outside their ranges: the Lambda limits, and 25 hours for the prune window.
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]
@@ -9,6 +9,7 @@ runtime:
   timeout_seconds: 901
   memory_mb: 64
   batching_window_seconds: 301
+  prune_window_seconds: 90001
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
@@ -22,3 +23,4 @@ PRIMARY KEY (user_id);
 dynaflux.yaml:4:20: error DF6010
 dynaflux.yaml:5:14: error DF6010
 dynaflux.yaml:6:28: error DF6010
+dynaflux.yaml:7:25: error DF6010

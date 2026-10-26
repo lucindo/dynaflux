@@ -238,8 +238,9 @@ func (v *viewCompiler) groupsByPartition(primaryKey []string) bool {
 // those views. M1 doesn't read dynaflux.lock, so it counts only the current definitions.
 func (p *project) checkSyncTransactions() {
 	items := map[*streamInfo]int{}
-	for _, v := range p.compiledViews() {
-		if v.version.Mode != catalog.ModeSync || v.stream == nil {
+	for _, d := range p.decls {
+		v := d.view
+		if v == nil || v.version.Mode != catalog.ModeSync || v.stream == nil {
 			continue
 		}
 		items[v.stream]++
@@ -249,11 +250,11 @@ func (p *project) checkSyncTransactions() {
 			}
 		}
 	}
-	for _, s := range p.compiledStreams() {
-		if n := 1 + items[s]; n > maxTransactItems {
-			s.decl.st.errorf(s.decl.pos, "DF3305",
+	for _, d := range p.decls {
+		if n := 1 + items[d.stream]; d.stream != nil && n > maxTransactItems {
+			d.st.errorf(d.pos, "DF3305",
 				"make some views ASYNC, use fewer uniqExact aggregates in SYNC views, or retire old versions",
-				"an append to %s writes %d items in one transaction; DynamoDB allows %d", s.stream.Name, n, maxTransactItems)
+				"an append to %s writes %d items in one transaction; DynamoDB allows %d", d.name, n, maxTransactItems)
 		}
 	}
 }

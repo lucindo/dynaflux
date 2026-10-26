@@ -1,0 +1,90 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A log kept 100 years in ~347,000 partitions, with SHARDS 64: each shard gets ~0.0029
+events/s, so batches average 1.0014 events. An entity's events come through 64
+change-stream shards, so its row in user_totals holds 64 high-water marks: 87 B + 64 × 29.7
+B = 1.94 KB, or 2 write units. Under SPLIT 3 an item holds ~21 marks (0.70 KB, 1 write
+unit; SPLIT 2 leaves 1.01 KB), which halves the row writes: 2,200 write and 1,100 read
+units/s cost $3,975 a month, and 1,100 of each cost $2,168, saving $1,807.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1]
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id)
+SHARDS 64
+LOG RETENTION 36525 DAY;
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW user_totals
+ORDER BY (user_id)
+AS SELECT user_id, count() AS views, sum(duration_ms) AS total_ms
+FROM page_views
+GROUP BY user_id;
+-- explain page_views --
+stream page_views
+  assumptions  --rate 1000  --event-kb 1
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote
+
+layout, in us-east-1
+  table        analytics-stream-page_views: Global Table, on-demand
+  key          pk user_id and a shard of 64; sk event_time, event_id
+  log          LOG RETENTION 36525 DAY: ~3,471,336 GB in ~347,134 partitions, each a change-stream shard
+  projector    batching window 1 s, batches of at most 100 events: ~999 invocations/s, 1 event each on average
+  marks        a view row keeps a shard's high-water mark for 960 s after the shard's progress passes it (runtime.prune_window_seconds)
+  archive      Firehose to Iceberg in us-east-1
+
+per event, per region             write units  read units
+  event put, local or replicated         1.00
+  user_totals, a row per entity          2.20        1.10
+  progress item, one per batch           1.00
+  total                                  4.20        1.10
+  per second, all events                4,199       1,100
+
+monthly                        per region  1 region
+  DynamoDB requests                $7,257    $7,257
+    stream and meta tables         $3,283    $3,283
+    user_totals                    $3,975    $3,975
+  DynamoDB storage of the log    $867,834  $867,834
+  Lambda, the projector            $1,645    $1,645
+  Firehose                           $142      $142
+  S3 archive, year-1 average          $73       $73
+  replication transfer              $0.00     $0.00
+  total                          $876,951  $876,951
+  provisioned capacity at a 70% target would cut requests to $2,995 per region (-59%), but costs more than on-demand if it must cover peaks over 2.42 times the average
+  not modeled: query reads, view and marker storage, backfills, archive compaction, CloudWatch
+
+warning page_views: batches average 1 event over 347,134 shards, so view writes rarely combine: most events cost a row write in every view
+  hint: shorten LOG RETENTION, which means fewer shards, or raise runtime.batching_window_seconds
+warning page_views: ~347,134 shards per region: after an outage, the projector catches up with one invocation per shard, over Lambda's default quota of 1,000 concurrent executions, which all of the account's functions in a region share
+  hint: shorten LOG RETENTION, or raise the account's Lambda concurrency quota
+warning user_totals: rows reach 1.94 KB with ~64 high-water marks, one for each change-stream shard that SHARDS 64 spreads an entity's events over; every write costs 2 write units
+  hint: SPLIT 3 keeps each item at 1 write unit, saving ~$1,807 a month per region; queries then read 3 items per row; or use fewer SHARDS on page_views
+-- explain user_totals --
+view user_totals, from stream page_views
+  assumptions  --rate 1000  --event-kb 1
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote
+
+layout, in us-east-1
+  table        analytics-view-user_totals-v1: regional, on-demand
+  mode         ASYNC: the projector applies events in batches
+  rows         a row per entity: GROUP BY (user_id) holds user_id, the PRIMARY KEY of page_views
+  backfill     fenced handoff: count and sum are additive
+
+row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
+  pk        user_id                                                  34 B
+  sk        a constant                                                3 B
+  views     count()                                                  13 B
+  total_ms  sum(duration_ms)                                         20 B
+  _v        row version                                              10 B
+  _hwm      ~64 high-water marks of ~30 B                         1.86 KB
+  total     2 write units, 1 read unit; the item limit is 400 KB  1.94 KB
+
+per event, per region
+  rows         2.20 write units and 1.10 read units: a batch of 1 event updates 1 row, and 10% of writes conflict and retry
+  monthly      DynamoDB requests $3,975 per region, $3,975 for 1 region
+
+warning user_totals: rows reach 1.94 KB with ~64 high-water marks, one for each change-stream shard that SHARDS 64 spreads an entity's events over; every write costs 2 write units
+  hint: SPLIT 3 keeps each item at 1 write unit, saving ~$1,807 a month per region; queries then read 3 items per row; or use fewer SHARDS on page_views

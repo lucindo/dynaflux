@@ -40,11 +40,29 @@ func (c *checker) binary(x *sql.BinaryExpr) operand {
 	switch x.Op {
 	case sql.OpOr, sql.OpAnd:
 		return c.logic(x)
-	case sql.OpEq, sql.OpNe, sql.OpLt, sql.OpLe, sql.OpGt, sql.OpGe:
-		return c.compare(x)
-	case sql.OpAdd, sql.OpSub, sql.OpMul, sql.OpDiv, sql.OpMod:
+	case sql.OpEq:
+		return c.compare(x, catalog.OpEquals)
+	case sql.OpNe:
+		return c.compare(x, catalog.OpNotEquals)
+	case sql.OpLt:
+		return c.compare(x, catalog.OpLess)
+	case sql.OpLe:
+		return c.compare(x, catalog.OpLessOrEquals)
+	case sql.OpGt:
+		return c.compare(x, catalog.OpGreater)
+	case sql.OpGe:
+		return c.compare(x, catalog.OpGreaterOrEquals)
+	case sql.OpAdd:
+		return c.arith(x, catalog.OpPlus)
+	case sql.OpSub:
+		return c.arith(x, catalog.OpMinus)
+	case sql.OpMul:
+		return c.arith(x, catalog.OpMultiply)
+	case sql.OpDiv:
+		return c.arith(x, catalog.OpDivide)
+	case sql.OpMod:
 	}
-	return c.arith(x)
+	return c.arith(x, catalog.OpModulo)
 }
 
 func (c *checker) logic(x *sql.BinaryExpr) operand {
@@ -99,24 +117,7 @@ func isComparison(op sql.BinaryOp) bool {
 	return false
 }
 
-func comparisonOp(op sql.BinaryOp) catalog.Op {
-	switch op {
-	case sql.OpEq:
-		return catalog.OpEquals
-	case sql.OpNe:
-		return catalog.OpNotEquals
-	case sql.OpLt:
-		return catalog.OpLess
-	case sql.OpLe:
-		return catalog.OpLessOrEquals
-	case sql.OpGt:
-		return catalog.OpGreater
-	case sql.OpGe, sql.OpOr, sql.OpAnd, sql.OpAdd, sql.OpSub, sql.OpMul, sql.OpDiv, sql.OpMod:
-	}
-	return catalog.OpGreaterOrEquals
-}
-
-func (c *checker) compare(x *sql.BinaryExpr) operand {
+func (c *checker) compare(x *sql.BinaryExpr, op catalog.Op) operand {
 	if c.chained(x.X, x.OpPos) {
 		return badOperand()
 	}
@@ -129,7 +130,7 @@ func (c *checker) compare(x *sql.BinaryExpr) operand {
 		return badOperand()
 	}
 	t := boolType(l.typ().Nullable || r.typ().Nullable)
-	return predicate(catalog.Expr{Op: comparisonOp(x.Op), Type: t, Args: []catalog.Expr{li, ri}}, x)
+	return predicate(catalog.Expr{Op: op, Type: t, Args: []catalog.Expr{li, ri}}, x)
 }
 
 // comparedWithNull reports a NULL literal operand of a comparison or BETWEEN (DF5305).
@@ -319,7 +320,11 @@ func (c *checker) isNull(x *sql.IsNullExpr) operand {
 		return o
 	}
 	if !o.typ().Nullable {
-		c.st.errorf(x.X.Extent().Pos, "DF5306", "", "%s is not Nullable, so IS NULL is always false", c.st.text(x.X))
+		result := "IS NULL is always false"
+		if x.Not {
+			result = "IS NOT NULL is always true"
+		}
+		c.st.errorf(x.X.Extent().Pos, "DF5306", "", "%s is not Nullable, so %s", c.st.text(x.X), result)
 		return badOperand()
 	}
 	ir := catalog.Expr{Op: catalog.OpIsNull, Type: boolType(false), Args: []catalog.Expr{o.ir}}
@@ -329,13 +334,12 @@ func (c *checker) isNull(x *sql.IsNullExpr) operand {
 	return predicate(ir, x)
 }
 
-func (c *checker) arith(x *sql.BinaryExpr) operand {
+func (c *checker) arith(x *sql.BinaryExpr, op catalog.Op) operand {
 	l, r := c.value(x.X), c.value(x.Y)
 	if l.bad || r.bad {
 		return badOperand()
 	}
-	op, symbol := arithOp(x.Op)
-	t, err := arithType(symbol, l.typ(), r.typ())
+	t, err := arithType(arithSymbol(op), l.typ(), r.typ())
 	if err != nil {
 		return c.typeError(x, err)
 	}
@@ -343,21 +347,6 @@ func (c *checker) arith(x *sql.BinaryExpr) operand {
 		return badOperand()
 	}
 	return operand{ir: catalog.Expr{Op: op, Type: t, Args: []catalog.Expr{l.ir, r.ir}}, node: x}
-}
-
-func arithOp(op sql.BinaryOp) (catalog.Op, string) {
-	switch op {
-	case sql.OpAdd:
-		return catalog.OpPlus, opPlus
-	case sql.OpSub:
-		return catalog.OpMinus, opMinus
-	case sql.OpMul:
-		return catalog.OpMultiply, opTimes
-	case sql.OpDiv:
-		return catalog.OpDivide, opDivide
-	case sql.OpOr, sql.OpAnd, sql.OpEq, sql.OpNe, sql.OpLt, sql.OpLe, sql.OpGt, sql.OpGe, sql.OpMod:
-	}
-	return catalog.OpModulo, opModulo
 }
 
 // divisor checks the divisor d of /, % or intDiv (sql.md §5.6): a literal 0 is DF5313,

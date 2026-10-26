@@ -22,8 +22,8 @@ const (
 )
 
 // KeyAttrType is the DynamoDB type of [AttrPK] and [AttrSK] in every table of storage
-// format 1: a string in an order-preserving encoding. docs/spec/encoding.md (M2) confirms
-// it; a storage format with another key type turns this into a function of the format.
+// format 1: a string in an order-preserving encoding. A storage format with another key
+// type turns this into a function of the format.
 const KeyAttrType = "S"
 
 // SequenceWidth is the width of a stored change-stream sequence number. They have up to 40

@@ -4,7 +4,6 @@
 package validate
 
 import (
-	"maps"
 	"slices"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -17,69 +16,17 @@ type whereTerm struct {
 	o operand
 }
 
-// nameOutputs names the SELECT items (sql.md §10.2).
-func (q *queryCompiler) nameOutputs() {
-	var isColumn func(string) bool
-	if q.src != nil {
-		isColumn = func(name string) bool {
-			_, ok := q.src.columns[name]
-			return ok || q.src.bad[name]
-		}
-	}
-	q.outs = selectOutputs(q.st, q.sel.Items, q.sel.From.Name, isColumn)
-	for _, out := range q.outs {
-		if out.name != "" && q.byName[out.name] == nil {
-			q.byName[out.name] = out
-		}
-	}
-}
-
-// newChecker returns a checker for an expression of the query in place, whose names
-// resolve with column.
-func (q *queryCompiler) newChecker(st *stmt, place string, column func(*stmt, *sql.ColumnRef) operand) *checker {
-	return &checker{st: st, guards: q.guards, env: env{
-		place:  place,
-		column: func(ref *sql.ColumnRef) operand { return column(st, ref) },
-		param:  func(p *sql.Param, role paramRole) operand { return q.param(st, p, role) },
-	}}
-}
-
-// sourceColumn resolves a column of the rows the query reads. found is false when ref
-// names none.
-func (q *queryCompiler) sourceColumn(ref *sql.ColumnRef) (operand, bool) {
-	if q.src == nil || q.src.bad[ref.Name] || q.elements[ref.Name] {
-		return badOperand(), true
-	}
-	t, ok := q.src.columns[ref.Name]
-	if !ok {
-		return operand{}, false
-	}
-	return operand{ir: catalog.Expr{Op: catalog.OpColumn, Type: t, Name: ref.Name}, node: ref}, true
-}
-
-// selectColumn resolves a name inside a SELECT item, where only source columns resolve
-// (DF5105).
-func (q *queryCompiler) selectColumn(st *stmt, ref *sql.ColumnRef) operand {
-	if o, ok := q.sourceColumn(ref); ok {
-		return o
-	}
-	if isAlias(q.byName[ref.Name]) {
-		return aliasInSelect(st, ref)
-	}
-	return unknownColumn(st, ref, q.visible(false))
-}
-
 // whereColumn resolves a name in WHERE: a source column, or an alias, which stands for its
 // expression (sql.md §5.3).
-func (q *queryCompiler) whereColumn(st *stmt, ref *sql.ColumnRef) operand {
-	if o, ok := q.sourceColumn(ref); ok {
+func (q *queryCompiler) whereColumn(c *checker, ref *sql.ColumnRef) operand {
+	if o, ok := q.source(c.st, ref); ok {
 		return o
 	}
 	out := q.byName[ref.Name]
 	if out == nil {
-		return unknownColumn(st, ref, q.visible(true))
+		return unknownColumn(c.st, ref, q.visible(true))
 	}
-	return q.aliasValue(st, ref, out, "WHERE")
+	return q.aliasValue(c.st, ref, out, "WHERE")
 }
 
 // aliasValue returns the expression of an alias used in place, which can't hold an
@@ -89,19 +36,19 @@ func (q *queryCompiler) aliasValue(st *stmt, ref *sql.ColumnRef, out *output, pl
 		st.errorf(ref.Pos, "DF5204", "", "aggregate %s is not allowed in %s", call.Name.Name, place)
 		return badOperand()
 	}
-	quiet := &stmt{d: &diags{}, f: st.f, name: st.name}
-	o := q.newChecker(quiet, place, q.selectColumn).value(out.item.X)
+	o := q.checker(st.quiet(), place, q.selectColumn).value(out.item.X)
 	o.node = ref
 	return o
 }
 
 // groupedColumn resolves a name inside a SELECT item of an aggregating query, outside
 // aggregates: only GROUP BY keys are known per row (DF4207).
-func (q *queryCompiler) groupedColumn(st *stmt, ref *sql.ColumnRef) operand {
-	o, found := q.sourceColumn(ref)
+func (q *queryCompiler) groupedColumn(c *checker, ref *sql.ColumnRef) operand {
+	st := c.st
+	o, found := q.source(st, ref)
 	switch {
 	case !found:
-		return q.selectColumn(st, ref)
+		return q.selectColumn(c, ref)
 	case o.bad:
 		return o
 	case q.isGroupKey(ref.Name):
@@ -125,19 +72,6 @@ func (q *queryCompiler) groupedKey(name string) operand {
 	return operand{ir: catalog.Expr{Op: catalog.OpColumn, Type: k.typ(), Name: name}}
 }
 
-// visible returns the names that an unknown column's suggestion comes from: the source
-// columns, and the SELECT aliases when they resolve.
-func (q *queryCompiler) visible(aliases bool) []string {
-	var names []string
-	if q.src != nil {
-		names = slices.AppendSeq(names, maps.Keys(q.src.columns))
-	}
-	if aliases {
-		names = slices.AppendSeq(names, maps.Keys(q.byName))
-	}
-	return names
-}
-
 // where checks WHERE term by term, each guarding the divisors of the terms after it, and
 // keeps the divisors it guards for the rest of the query.
 func (q *queryCompiler) where() {
@@ -145,15 +79,19 @@ func (q *queryCompiler) where() {
 	if w == nil {
 		return
 	}
-	c := q.newChecker(q.st, "WHERE", q.whereColumn)
-	for _, x := range andTerms(w.X) {
-		o := c.condition(x)
-		q.terms = append(q.terms, whereTerm{x: x, o: o})
-		if o.bad {
+	c := q.checker(q.st, "WHERE", q.whereColumn)
+	q.byColumn = map[string]*columnTerms{}
+	for i, x := range andTerms(w.X) {
+		t := whereTerm{x: x, o: c.condition(x)}
+		q.terms = append(q.terms, t)
+		if t.o.bad {
 			q.whereBad = true
 			continue
 		}
-		c.guards = append(c.guards, nonZeroIfTrue(o.ir)...)
+		c.guards = append(c.guards, nonZeroIfTrue(t.o.ir)...)
+		if q.src != nil {
+			q.fileKeyTerm(i, t)
+		}
 	}
 	q.guards = c.guards
 }
@@ -185,6 +123,11 @@ func (q *queryCompiler) groupBy() {
 	q.groupOK = ok
 	for _, ref := range refs {
 		k := q.groupKey(ref)
+		if t := k.typ(); !k.bad && t.Array {
+			q.st.errorf(ref.Pos, "DF4208", "to group by its elements, ARRAY JOIN it in a view",
+				"can't group by %s of type %s", ref.Name, t)
+			k = badOperand()
+		}
 		q.groupNames = append(q.groupNames, ref.Name)
 		q.groupKeys[ref.Name] = k
 		q.groupOK = q.groupOK && !k.bad
@@ -192,7 +135,7 @@ func (q *queryCompiler) groupBy() {
 }
 
 func (q *queryCompiler) groupKey(ref *sql.ColumnRef) operand {
-	if o, ok := q.sourceColumn(ref); ok {
+	if o, ok := q.source(q.st, ref); ok {
 		return o
 	}
 	out := q.byName[ref.Name]
@@ -203,7 +146,7 @@ func (q *queryCompiler) groupKey(ref *sql.ColumnRef) operand {
 		return q.aliasValue(q.st, ref, out, "GROUP BY")
 	}
 	out.key = true
-	return q.newChecker(q.st, "SELECT", q.selectColumn).value(out.item.X)
+	return q.checker(q.st, "SELECT", q.selectColumn).value(out.item.X)
 }
 
 // selectItems checks the SELECT items and sets the output columns.
@@ -213,8 +156,8 @@ func (q *queryCompiler) selectItems() {
 		if out.name == "" {
 			continue
 		}
-		if _, seen := q.columns[out.name]; !seen {
-			q.columns[out.name] = o
+		if _, seen := q.outputs[out.name]; !seen {
+			q.outputs[out.name] = o
 		}
 		if !o.bad {
 			q.q.Columns = append(q.q.Columns, catalog.NamedExpr{Name: out.name, Expr: o.ir})
@@ -227,9 +170,9 @@ func (q *queryCompiler) item(out *output) operand {
 		return q.groupedKey(out.name)
 	}
 	if !q.aggregating {
-		return q.newChecker(q.st, "SELECT", q.selectColumn).value(out.item.X)
+		return q.checker(q.st, "SELECT", q.selectColumn).value(out.item.X)
 	}
-	c := q.newChecker(q.st, "SELECT", q.groupedColumn)
+	c := q.checker(q.st, "SELECT", q.groupedColumn)
 	c.env.aggregate = q.aggregate
 	return c.value(out.item.X)
 }

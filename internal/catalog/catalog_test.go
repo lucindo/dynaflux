@@ -5,7 +5,6 @@ package catalog_test
 
 import (
 	"testing"
-	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 )
@@ -29,14 +28,6 @@ func TestCatalogLookups(t *testing.T) {
 	removed := catalog.View{Name: "old", Versions: []catalog.ViewVersion{pageDailyV1()}}
 	if cur, ok := removed.Current(); ok {
 		t.Errorf("Current() of a view with only retained versions = v%d", cur.Number)
-	}
-}
-
-func TestInvocationLifetime(t *testing.T) {
-	t.Parallel()
-	c := catalog.Catalog{TimeoutSeconds: 900}
-	if got, want := c.InvocationLifetime(), 16*time.Minute; got != want {
-		t.Errorf("InvocationLifetime() = %v, want %v", got, want)
 	}
 }
 

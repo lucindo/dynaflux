@@ -1,0 +1,50 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A project with costs.py's three typical views, as a text/template that the parity test
+fills from the inputs of each costs.py scenario. Runtime and capacity settings that costs.py
+doesn't vary keep their defaults: 1,024 MB on arm64, and autoscaling to 70%.
+-- dynaflux.yaml --
+store: analytics
+regions: [{{.Regions}}]
+runtime:
+  timeout_seconds: 60
+  prune_window_seconds: {{.PruneWindow}}
+  batching_window_seconds: {{.Window}}
+{{- if .Provisioned}}
+defaults:
+  capacity: provisioned
+  autoscaling:
+    read: {min: 5, max: 100000}
+    write: {min: 5, max: 100000}
+{{- end}}
+archive:
+  regions: {{.ArchiveRegions}}
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id)
+LOG RETENTION {{.RetentionDays}} DAY;
+-- dynaflux/views.sql --
+-- Shared rows, whose high-water marks grow with the shards.
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+{{- if gt .Split 1}}
+SPLIT {{.Split}}
+{{- end}}
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views, sum(duration_ms) AS total_ms
+FROM page_views
+GROUP BY page, day;
+
+-- A row per user.
+CREATE MATERIALIZED VIEW user_latest
+ORDER BY (user_id)
+AS SELECT user_id, argMax(page, event_time) AS last_page
+FROM page_views
+GROUP BY user_id;
+
+-- A row per user per day, with uniqExact markers.
+CREATE MATERIALIZED VIEW user_daily
+ORDER BY (user_id, day)
+AS SELECT user_id, toStartOfDay(event_time) AS day, count() AS views, uniqExact(page) AS pages
+FROM page_views
+GROUP BY user_id, day;

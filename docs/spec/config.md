@@ -44,6 +44,7 @@ runtime:
   out: cmd/dynaflux-runtime
   arch: arm64                         # arm64 | x86_64
   timeout_seconds: 60
+  prune_window_seconds: 960
   memory_mb: 1024
   batching_window_seconds: 1
   split: store                        # store | stream
@@ -86,7 +87,8 @@ http:
 Commands find `dynaflux.yaml` the way the `go` command finds `go.mod`:
 
 1. Start in the working directory.
-2. If it holds a file named `dynaflux.yaml`, use that file.
+2. If it holds an entry named `dynaflux.yaml`, use it. It must be a regular file or a link
+   to one: a directory, FIFO or other entry of that name stops the command (exit status 2).
 3. Otherwise move to the parent directory and repeat.
 4. If no directory up to the filesystem root holds one, stop with `DF6001` (exit status 2).
 
@@ -106,7 +108,9 @@ lives there too.
 - Anchors (`&a`), aliases (`*a`), merge keys (`<<`) and explicit tags (`!!str`, `!x`) are
   errors (`DF6014`). Write each value out in full.
 - A value of the wrong YAML type is an error (`DF6007`), for example a single string where a
-  list is needed. See [Scalars](#scalars) for the spellings each type accepts.
+  list is needed, or a value that YAML reads as another type, such as `log_retention: 48`
+  (an integer, not a duration). See [Scalars](#scalars) for the spellings each type accepts.
+- Keys are scalars. A list or a mapping used as a key, as in `? [a, b]`, is `DF6007`.
 - A key set to `null`, `~` or nothing (`prefix:`) counts as not set, so its default applies.
   For a required key that is `DF6008`.
 
@@ -199,10 +203,24 @@ backfill functions all run the same binary.
 |-----|------|---------|-------|---------|
 | `runtime.out` | path | `cmd/dynaflux-runtime` | Path rules (`DF6302`, `DF6303`). `main.go` imports the `go.out` package, so if `go.out` has an `internal` segment, `runtime.out` must be inside the directory that holds the last one (`DF6304`). For example, with `go.out: pkg/internal/flux`, `runtime.out` must be under `pkg/`. | `codegen`: writes `main.go` here |
 | `runtime.arch` | string | `arm64` | `arm64` or `x86_64` (`DF6009`). | `infra`, `explain` (Lambda price) |
-| `runtime.timeout_seconds` | integer | `60` | 1 to 900, the Lambda maximum (`DF6010`). | `infra`; `catalog` and `explain`: `timeout_seconds + 60` is the longest invocation lifetime the projector assumes when it prunes high-water marks |
+| `runtime.timeout_seconds` | integer | `60` | 1 to 900, the Lambda maximum (`DF6010`). | `infra` |
+| `runtime.prune_window_seconds` | integer | `960` | 1 to 90000, which is 25 hours (`DF6010`), and at least `timeout_seconds + 60` (`DF6305`). Below 960 it warns (`DF6306`). | `catalog` (when the projector prunes high-water marks), `explain` (row size) |
 | `runtime.memory_mb` | integer | `1024` | 128 to 10240, the Lambda range (`DF6010`). | `infra`, `explain` |
 | `runtime.batching_window_seconds` | integer | `1` | 0 to 300, the event source mapping range (`DF6010`). | `infra` (`MaximumBatchingWindowInSeconds`), `explain` |
 | `runtime.split` | string | `store` | `store`: one projector function for the store. `stream`: one per stream (`DF6009`). | `infra`, `names` |
+
+Each view row keeps a high-water mark per delivery unit
+([sql.md](sql.md#75-state-classes)). `prune_window_seconds` sets how long the projector
+keeps a unit's mark after the unit's progress has passed it. Dropping a mark sooner would
+let an invocation that is still running apply some events twice, so the window must
+outlast every running invocation: its timeout, plus 60 seconds for writes that land late
+and for clock differences between hosts.
+
+- The default, 960, is the 900-second Lambda maximum plus 60, so it is safe for every
+  timeout. A shorter window keeps hot rows smaller: `dynaflux explain` shows the row sizes.
+- With a window below 960 (`DF6306`), lower it together with `timeout_seconds` in two
+  deploys: first the timeout, then, once the old timeout has passed, the window. Lowered in
+  one deploy, invocations that started under the old timeout can outlive the new window.
 
 ### `infra`
 
@@ -322,16 +340,20 @@ its statements (see [sql.md](sql.md)).
 - `**` as a whole segment matches zero or more directories: `dynaflux/**/*.sql` matches both
   `dynaflux/a.sql` and `dynaflux/views/daily/b.sql`. `**` inside a segment, as in
   `dynaflux/**.sql`, is `DF6203`.
-- Wildcards never match a name that starts with `.` or `_`, nor a directory named
-  `testdata`: the same names the `go` command ignores. Write such a name literally to
-  include it, as in `dynaflux/_drafts/*.sql`.
+- A wildcard segment doesn't match a name that starts with `.` or `_`, unless the segment
+  starts with that same character: `dynaflux/*.sql` skips `_draft.sql`, and
+  `dynaflux/_*.sql` matches it. Wildcards never match a directory named `testdata`. These
+  are the names the `go` command ignores. A name written literally always matches, as in
+  `dynaflux/_drafts/*.sql`.
 - Matching is case-sensitive: `*.sql` doesn't match `Q.SQL`.
 - Patterns match regular files and links to regular files. Directories and other entries
   are skipped, even when their names match.
 - Every pattern must match at least one file (`DF6204`). This includes the default pattern,
   so a project needs at least one SQL file.
-- Files are read through the project root only. Links to directories aren't followed, and a
-  file whose link resolves outside the project root is `DF6205`.
+- Files are read through the project root only. Links to directories aren't followed. A
+  matched file that is a link is `DF6205` when the link is absolute or its target leaves the
+  project root. A link whose target leaves the root through another link, such as a link
+  to a directory outside, can't be read: `DF6002`.
 - A file matched by several patterns is read once. Files are processed in byte order of
   their paths, so the output is deterministic.
 
@@ -414,7 +436,7 @@ M4 may add rules on `store` and `prefix` for these names.
 Config diagnostics use the same format as [SQL diagnostics](sql.md#a1-output-format):
 
 ```
-dynaflux.yaml:14:14: error DF6010: runtime.memory_mb is 64; it must be between 128 and 10240
+dynaflux.yaml:15:14: error DF6010: runtime.memory_mb is 64; it must be between 128 and 10240
   hint: Lambda functions take 128 to 10240 MB of memory
 ```
 
@@ -464,7 +486,7 @@ Severity column.
 | DF6004 | error | The file isn't one YAML mapping: it's empty or has only comments, it has more than one document, or its top level is a list or a scalar. | Keep one document of `key: value` lines. |
 | DF6005 | error | Unknown key. | `did you mean "<key>"?` when a known key is close; otherwise the keys allowed there. |
 | DF6006 | error | Duplicate key. | Keep one; the message gives the line of the first. |
-| DF6007 | error | Wrong YAML type, such as a string where a list is needed, `yes` for a boolean, or a null list entry. See [Scalars](#scalars). | The expected form, such as `regions: [us-east-1]`. |
+| DF6007 | error | Wrong YAML type, such as a string where a list is needed, `yes` for a boolean, `48` for a duration, a null list entry, or a list or a mapping as a key. See [Scalars](#scalars). | The expected form, such as `regions: [us-east-1]`. |
 | DF6008 | error | A required key is missing. | An example value. |
 | DF6009 | error | The value isn't one of the allowed values. | The allowed values. |
 | DF6010 | error | An integer is out of range. | The range and where it comes from, such as the Lambda limit. |
@@ -481,11 +503,13 @@ Severity column.
 | DF6202 | error | An `sql` pattern has bad syntax, such as an unclosed `[`, or is empty or ends in `/`. | Patterns use `*`, `?`, `[a-z]`, and `**` for any number of directories. |
 | DF6203 | error | `**` is part of a path segment, as in `dynaflux/**.sql`. | Write `dynaflux/**/*.sql`. |
 | DF6204 | error | An `sql` pattern matches no files. | Patterns are relative to the project root (the message gives it), and wildcards skip names that start with `.` or `_`, and `testdata`. |
-| DF6205 | error | A matched file's link resolves outside the project root. | Move the file into the project. |
+| DF6205 | error | A matched file is a link that is absolute, or whose target leaves the project root. A link that leaves through another link is `DF6002`. | Move the file into the project. |
 | DF6301 | error | `go.package` isn't a valid package name, or is `dynaflux` or `runtime`. | Use a short lowercase name such as `flux`. |
 | DF6302 | error | An output path is empty or absolute, contains `\` or a `..` segment, or is the project root. | Use a directory below the project root, such as `internal/flux`. |
 | DF6303 | error | Two of `go.out`, `runtime.out` and `infra.out` are the same directory. | Give each output its own directory. |
 | DF6304 | error | `runtime.out` can't import `go.out`: `go.out` has an `internal` segment, and `runtime.out` is outside the directory that holds it. | Move `runtime.out` inside that directory (the message names it), or move `go.out`. |
+| DF6305 | error | `runtime.prune_window_seconds` is less than `runtime.timeout_seconds` + 60. The projector could drop a high-water mark that a running invocation still needs, and count some events twice. | Set it to at least `timeout_seconds` + 60 (the message gives the number), or remove it to use the default, 960. |
+| DF6306 | warning | `runtime.prune_window_seconds` is less than 960. If you later lower it together with `timeout_seconds` in one deploy, invocations started under the old timeout can outlive the new window. | Remove it to use the default, 960, which is safe for every timeout. |
 | DF6401 | error | A value isn't a valid duration. | Write a whole number and one unit, such as `36h`, `2d` or `1w`, or write `forever`. |
 | DF6402 | error | `defaults.log_retention` is shorter than 1 day (`24h`) or longer than 36525 days (`36525d`). DynamoDB deletes expired items lazily, often days late, and a region cut off from the others may delete events before they replicate, so shorter windows are refused. | Use at least `1d`. For more than 36525 days, use `forever`. |
 | DF6403 | warning | At least one stream inherits `defaults.log_retention: forever`. Every event stays in DynamoDB, so the table, and the cost of projecting it, keep growing. The message lists the streams. | Keep a short log (the default is `2d`) and use the archive as the permanent record. `dynaflux explain` shows the cost. |
@@ -507,16 +531,16 @@ Severity column.
 
 ## Implementation notes
 
-- `internal/config` first parses `dynaflux.yaml` with `go.yaml.in/yaml/v4` into a
-  `yaml.Node` tree and walks it to find duplicate keys, anchors, aliases, merge keys and
-  tags. `yaml.WithKnownFields()` can't do this: it accepts merge keys and tags silently, and
-  a duplicate key can hide the other errors in the file.
-- Then it decodes the tree with `yaml.WithKnownFields()`, which reports unknown keys and
-  type errors with their positions, in one pass. A custom `UnmarshalYAML` must call
-  `n.Load(v, yaml.WithKnownFields())`, never `n.Decode`, which drops strict mode.
-- Small scalar types enforce the [scalar rules](#scalars): their `UnmarshalYAML` checks the
-  node's tag, style and value. The library alone decodes `yes` as `true`, `1024.0` and
-  `0x400` as `1024`, and a plain `123` into a string.
+- `internal/config` parses `dynaflux.yaml` with `go.yaml.in/yaml/v4` into a `yaml.Node`
+  tree, with `yaml.WithUniqueKeys(false)` so that a duplicate key is `DF6006`, not a syntax
+  error. It walks the tree to find duplicate keys, anchors, aliases, merge keys and tags,
+  and stops if it finds any.
+- Then it walks the tree again and reads every key by hand. Decoding into structs with
+  `yaml.WithKnownFields()` doesn't work: the library's errors carry no `DF6xxx` code and
+  don't list the keys allowed where an unknown key is, and the library accepts spellings
+  the [scalar rules](#scalars) reject. It decodes `yes` as `true`, `1024.0` and `0x400` as
+  `1024`, and a plain `123` into a string. The walk checks each scalar's tag, style and
+  value instead.
 - The `sql` walk runs on `root.FS()` of an `os.Root` opened at the project root, which
   refuses paths and links that escape it.
 - No check calls AWS.

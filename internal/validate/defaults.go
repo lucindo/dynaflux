@@ -6,7 +6,6 @@ package validate
 import (
 	"math"
 	"math/big"
-	"strconv"
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -51,7 +50,7 @@ func defaultChecker(st *stmt, clause *sql.ExprClause) *checker {
 	reported := false
 	return &checker{st: st, env: env{
 		place: "DEFAULT",
-		column: func(*sql.ColumnRef) operand {
+		column: func(*checker, *sql.ColumnRef) operand {
 			if !reported {
 				st.errorf(clause.Pos, "DF2003", "write the value, such as DEFAULT '' or DEFAULT 0",
 					"DEFAULT must be a constant expression")
@@ -160,7 +159,7 @@ func fitNumber(r *big.Rat, t catalog.Type) (catalog.Expr, bool) {
 	if !m.IsInt() || new(big.Int).Abs(m.Num()).Cmp(pow10(t.Precision)) >= 0 {
 		return catalog.Expr{}, false
 	}
-	return literal(t, formatDecimal(m.Num(), t.Scale)), true
+	return literal(t, r.FloatString(t.Scale)), true
 }
 
 // floatInRange reports whether DynamoDB can store f (sql.md §4.3): 0, or a magnitude
@@ -188,9 +187,4 @@ func fitTime(v cval, vt, t catalog.Type) (catalog.Expr, bool) {
 	}
 	ok = ok && tm.Equal(tm.Truncate(step)) && inRange(tm, t)
 	return literal(t, formatTime(tm, t)), ok
-}
-
-// retentionText writes an interval as diagnostics show it: n UNIT, such as 2 DAY.
-func retentionText(i catalog.Interval) string {
-	return strconv.Itoa(i.N) + " " + string(i.Unit)
 }

@@ -39,7 +39,7 @@ func (p *project) configErrorf(pos diag.Pos, code, hint, format string, args ...
 // nameHint suggests a defined name close to name, or lists the names of the given kinds.
 func (p *project) nameHint(name string, kinds ...declKind) string {
 	names := p.tableNames(kinds...)
-	if c, ok := suggest(name, names); ok {
+	if c, ok := diag.Suggest(name, names); ok {
 		return fmt.Sprintf("did you mean %q?", c)
 	}
 	if len(names) == 0 {
@@ -107,9 +107,9 @@ func (p *project) checkInheritedForever() {
 		return
 	}
 	var names []string
-	for _, s := range p.compiledStreams() {
-		if s.inherited {
-			names = append(names, s.stream.Name)
+	for _, d := range p.decls {
+		if d.stream != nil && d.stream.inherited {
+			names = append(names, d.name)
 		}
 	}
 	if len(names) == 0 {
@@ -126,15 +126,18 @@ func (p *project) checkInheritedForever() {
 
 // checkUnarchived warns about streams with a limited log that aren't archived (DF6504).
 func (p *project) checkUnarchived() {
-	for _, s := range p.compiledStreams() {
-		period, limited := s.stream.LogRetention.Period()
-		if s.stream.Archive != nil || !limited {
+	for _, d := range p.decls {
+		if d.stream == nil {
 			continue
 		}
-		d := s.decl
+		s := &d.stream.stream
+		period, limited := s.LogRetention.Period()
+		if s.Archive != nil || !limited {
+			continue
+		}
 		const hint = "archive the stream, or give it LOG RETENTION FOREVER"
 		msg := fmt.Sprintf("stream %s keeps events for %s and isn't archived, so older events are deleted for good",
-			d.name, retentionText(period))
+			d.name, period)
 		i := slices.IndexFunc(p.cfg.Archive.Streams, func(a config.ArchiveStream) bool { return a.Name == d.name })
 		if i >= 0 {
 			p.d.add(diag.SeverityWarning, "", p.cfg.Archive.Streams[i].EnabledPos, "DF6504", hint, msg)

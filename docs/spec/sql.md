@@ -138,7 +138,8 @@ statement = create_stream | create_view | select ;
 ### 3.1 Whitespace and comments
 
 - Whitespace is space, tab, carriage return and line feed. A line ends at a line feed; a
-  carriage return before it is ignored.
+  carriage return before it is ignored. Inside a string or quoted name, any other carriage
+  return is an ordinary character.
 - `--` starts a comment that runs to the end of the line.
 - `/* … */` is a block comment. Block comments nest: `/* a /* b */ c */` is one comment. An
   unclosed block comment is an error (DF1004).
@@ -184,7 +185,8 @@ Rules:
   or before an empty statement (`;`) is an error (DF1203).
 - An annotation on the wrong kind of statement is an error (DF1204), and so is the same key
   twice on one statement (DF1205).
-- Query names are unique in the store (DF1303).
+- Query names are unique in the store (DF1303). A repeated name gets DF1303 only, not
+  DF1207 for the Go names it repeats.
 - Text inside `/* */` is never an annotation.
 
 Generated Go names must be unique in the store (DF1207). The check covers every generated
@@ -391,8 +393,8 @@ the `Decimal` and `Float64` limits come from. Key encoding is specified in
 - `Array(T)` holds a list of values. `T` must be a non-Nullable scalar type (DF5007), so
   arrays don't nest and can't hold `NULL`. An array itself can't be `NULL`; use `[]`.
 - Arrays can be used in `ARRAY JOIN` ([§9.5](#95-array-join)), in `length`, as `DEFAULT`
-  values, and as stream query outputs. They can't be keys, be compared, or be passed to
-  aggregates (DF5203, DF5301).
+  values, and as stream query outputs. They can't be keys (DF2105, DF3104, DF4208), be
+  compared, or be passed to aggregates (DF5203, DF5301).
 - `LowCardinality(String)` and `LowCardinality(Nullable(String))` are accepted for
   familiarity. They mean exactly `String` and `Nullable(String)` everywhere, including
   inside `Array`. Any other `LowCardinality(T)` is an error (DF5008).
@@ -473,8 +475,9 @@ used as a `DEFAULT` converts as follows:
 - An integer literal stands for its exact value. A float literal stands for the `Float64`
   nearest to its text (ties to even). Numbers then compare by exact value, as in
   ClickHouse: `f = 0.1` is true when `f` holds 0.1, and the `UInt64` 9007199254740993 isn't
-  equal to `9007199254740992.0`. The one exception is a float literal compared with a
-  `Decimal`: it stands for its exact decimal text (Dev 7).
+  equal to `9007199254740992.0`. The one exception is a `Decimal`: a float literal compared
+  with a `Decimal`, or used as the `DEFAULT` of a `Decimal` column, stands for its exact
+  decimal text (Dev 7).
 - A number literal compared with a `Decimal` is an error when its exact value needs more
   than 38 digits, so that no `Decimal(38, S)` holds it (DF5406): `d < 1e40` and
   `d = 1e-40` are errors.
@@ -650,11 +653,11 @@ Examples: `UInt8 + UInt8` is `UInt16`, `UInt32 - UInt32` is `Int64`, `Int8 % UIn
   are the same on every CPU architecture.
 - A divisor of `/`, `%` or `intDiv` that is a number literal with value 0, such as `0`, `-0`
   or `0.0`, is an error (DF5313).
-- Any other divisor `d` gets a warning (DF5501), because a zero is an evaluation error
-  ([§5.8](#58-evaluation-errors)). Parameters count as non-constant. There is no warning
-  when a guard rules zero out. A guard is a term `d != 0`, `d <> 0` or `d > 0`, written
-  either way round (`0 < d`), with `d` the same expression after aliases are resolved. It
-  must be a top-level `AND` term of one of these:
+- Any divisor `d` other than a non-zero number literal gets a warning (DF5501), because a
+  zero is an evaluation error ([§5.8](#58-evaluation-errors)). Parameters count as
+  non-constant. There is no warning when a guard rules zero out. A guard is a term
+  `d != 0`, `d <> 0` or `d > 0`, written either way round (`0 < d`), with `d` the same
+  expression after aliases are resolved. It must be a top-level `AND` term of one of these:
   - the condition of the `if` or `multiIf` branch that holds the division, or `d = 0` for
     the branch taken when that condition is false
   - the condition of the `-If` aggregate whose arguments hold the division
@@ -959,7 +962,7 @@ aggregate it either way:
 
   | Query aggregate | Column defined by | Code |
   |-----------------|-------------------|------|
-  | `uniqExact(c)`, `uniqExactMerge(c)` | `uniqExact`: exact distinct sets of different rows can't be combined | DF4201 |
+  | `uniqExact(c)`, `uniqExactMerge(c)`, `uniqMerge(c)` | `uniqExact`: exact distinct sets of different rows can't be combined | DF4201 |
   | `avg(c)` | `avg`: an average of averages ignores how many events each row holds | DF4202 |
   | `uniq(c)` | `uniq`: counts distinct estimates, not distinct values | DF4203 |
   | `quantile(level)(c)`, `quantileDD(…)(c)` | `quantile`, `quantileDD`: a quantile of quantiles | DF4204 |
@@ -1032,7 +1035,8 @@ stream_clause = "PRIMARY" "KEY" name_list
               | "ACCEPT" expr
               | "SHARDS" integer
               | "CONSISTENCY" "=" string ;
-interval      = "INTERVAL" [ "-" ] ( number | string ) identifier [ "TO" identifier ] ;
+interval      = "INTERVAL" [ "-" ] ( number identifier | string [ identifier ] )
+                [ "TO" identifier ] ;
                 (* valid only as "INTERVAL" integer unit; the rest is DF5404 *)
 unit          = "SECOND" | "SECONDS" | "MINUTE" | "MINUTES" | "HOUR" | "HOURS"
               | "DAY" | "DAYS" | "WEEK" | "WEEKS" | "MONTH" | "MONTHS"
@@ -1303,6 +1307,8 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
 - `TTL <key> [+ INTERVAL n unit]` sets when a row expires. Any other expression is DF3301.
   `<key>` is a view key of type `Date`, `DateTime` or `DateTime64` (DF3302). A row expires
   at the moment the expression gives.
+- An invalid interval in that form, such as `TTL day + INTERVAL 1 M`, is DF5404 only
+  ([§8.1](#81-grammar)), not DF3301.
 - Without `TTL`, rows are kept forever.
 - Queries never return expired rows, even before DynamoDB deletes them, so every region
   returns the same rows (Dev 10):
@@ -1357,8 +1363,9 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
 - `SPLIT n` stores each view row as n items, with n from 2 to 16 (DF3306).
 - The projector writes an event to the item chosen by a hash of the delivery unit that
   delivered it ([§7.5](#75-state-classes)), so each item is written by fewer delivery units
-  and carries a smaller high-water mark. That keeps hot rows small: `dynaflux explain`
-  suggests `SPLIT` when a row would grow past 1 KB.
+  and carries a smaller high-water mark. That keeps hot rows small. When high-water marks
+  add write units to a row's writes, `dynaflux explain` warns and names the smallest
+  `SPLIT` that removes the extra units, if there is one.
 - Queries read all n items of a row and combine them, so results are the same as without
   `SPLIT`. `uniqExact` counts stay exact. Reads cost n times more.
 
@@ -1496,11 +1503,12 @@ set by the key binding and `LIMIT` ([§10.8](#108-order-by-and-limit)), and
 A query may aggregate the rows it reads, one level deep:
 
 - `GROUP BY` items are names (DF5107), each once (DF5108): source columns or `SELECT`
-  aliases of expressions without aggregates.
+  aliases of expressions without aggregates. An `Array` can't be a key (DF4208).
 - Each `SELECT` item is a `GROUP BY` key, an aggregate, or an expression over them,
   constants and parameters (DF4207), such as `if(sum(views) > 1000, 'hot', 'cold') AS heat`.
 - Aggregates follow [§7.4](#74-read-time-aggregation-and--merge): plain aggregates over
   finalized values, `-Merge` over stored states, and the guardrails DF4201 to DF4206.
+- The query's aggregates keep the order in which they appear in it, also in the catalog.
 - Without `GROUP BY`, aggregates produce exactly one row, even over zero rows: `count()` is
   0, as in ClickHouse.
 - A typical pattern counts entities by their latest state: a view grouped by
@@ -1516,8 +1524,10 @@ A query may aggregate the rows it reads, one level deep:
   ClickHouse; `NULLS FIRST` and `NULLS LAST` are accepted.
 - `UUID` and `Array` columns can't be ordered (DF4302).
 - Ties are broken by the row key: the view key for a view query, `(event_time, event_id)`
-  for a stream query, or the `GROUP BY` keys after aggregation, ascending. Without
-  `ORDER BY`, rows come in that key order. So the result order is the same in every region
+  for a stream query, or the `GROUP BY` keys after aggregation. The key columns that
+  `ORDER BY` doesn't name follow in the direction of the last `ORDER BY` item, so
+  `ORDER BY event_time DESC` reads the key in reverse. Without `ORDER BY`, rows come in
+  ascending key order. So the result order is the same in every region
   and every run (Dev 11). In this order only, `UUID` values compare by their 16 bytes (the
   order of their hex text), and `NULL` groups come last.
 - Without read-time aggregation or residual filters, and with an `ORDER BY` that follows
@@ -1889,6 +1899,8 @@ test.
 ### A.2 Codes
 
 Placeholders are in angle brackets. Messages after the statement name are shown without it.
+The article before a placeholder fits the word that replaces it: `an avg column`,
+`a uniq column`.
 
 #### Files, lexical structure and syntax
 
@@ -1962,8 +1974,8 @@ Placeholders are in angle brackets. Messages after the statement name are shown 
 | DF3006 | error | a view SELECT can't have <ORDER BY or LIMIT> | set the key order with the view's ORDER BY clause, before AS |
 | DF3007 | error | view has no ORDER BY | add ORDER BY (<GROUP BY keys>) before AS |
 | DF3101 | error | ORDER BY must list exactly the GROUP BY keys: <missing or extra> | |
-| DF3102 | error | Primary key must be a prefix of the sorting key, but the column in the position <i> is <ORDER BY column>, not <PRIMARY KEY column> | |
-| DF3103 | error | key <key> is Nullable | group by coalesce(<expr>, <default>) AS <key> |
+| DF3102 | error | Primary key must be a prefix of the sorting key, but the column in the position <i> is <ORDER BY column>, not <PRIMARY KEY column>. When PRIMARY KEY has more columns, it reads: Primary key must be a prefix of the sorting key, but its length: <n> is greater than the sorting key length: <m> | |
+| DF3103 | error | key <key> is Nullable | group by coalesce(<expr>, <default>) AS <key>, or AS <key>_key when the key is a column, such as coalesce(x, '') AS x_key. For a UUID key: use a non-Nullable UUID: coalesce can't turn a string into a UUID |
 | DF3104 | error | key <key> has type <type>, which can't be a view key | |
 | DF3105 | error | <aggregate> is not allowed in a view | write the plain aggregate; views store aggregate states themselves |
 | DF3106 | error | UUID key <key> must be in PRIMARY KEY | ClickHouse orders UUIDs differently from other systems, so they can't be in the sort key |
@@ -1979,7 +1991,7 @@ Placeholders are in angle brackets. Messages after the statement name are shown 
 | DF3306 | error | SPLIT must be between 2 and 16 | |
 | DF3501 | warning | MODE SYNC on a view whose rows many partition keys of <stream> share; concurrent appends will conflict | add the stream's PRIMARY KEY columns to GROUP BY, or use MODE ASYNC |
 | DF3502 | warning | <aggregate> over Float64 converges only up to rounding; regions may differ in the last bits | use Decimal(P, S) for exact totals |
-| DF3503 | warning | <aggregate> skips rows where <arg> is NULL, so NULL never replaces a value | use a sentinel: <fn>(coalesce(<arg>, <default>), <val>) |
+| DF3503 | warning | <aggregate> skips rows where <arg> is NULL, so NULL never replaces a value | use a sentinel: <fn>(coalesce(<arg>, <default>), <val>). A UUID <arg> gets no hint. |
 | DF3504 | warning | view reads <column> from DEDUP stream <stream>; a duplicate accepted in two regions has a different <column> in each | group by event_time instead of ingest_time; avoid origin_region |
 
 #### Queries and parameters
@@ -1992,13 +2004,14 @@ Placeholders are in angle brackets. Messages after the statement name are shown 
 | DF4101 | error | <view or stream> <source> is partitioned by (<columns>), but WHERE does not bind "<column>" with = or IN. Every query must fix the partition key. | add <column> = {<column>:<type>} to WHERE, or declare a view whose PRIMARY KEY matches this query |
 | DF4102 | error | <column> is bound more than once | combine the conditions: one = or IN, or one lower and one upper bound |
 | DF4103 | error | the key binding reads <n> key combinations; the limit is 100 | split the call, or declare a view with a coarser key |
-| DF4201 | error | <aggregate>(<column>) cannot be combined across rows (the query groups by (<keys>) but <view> rows are (<keys>)). Without GROUP BY, the parenthesis reads (the query combines all rows of <view>). | declare a view grouped by (<keys>), or make <column> a uniq() column and use uniqMerge(<column>) for an approximate count |
+| DF4201 | error | <aggregate>(<column>) cannot be combined across rows (the query groups by (<keys>) but <view> rows are (<keys>)). Without GROUP BY, the parenthesis reads (the query combines all rows of <view>). | declare a view grouped by (<keys>), or make <column> a uniq() column and use uniqMerge(<column>) for an approximate count. Without GROUP BY, <keys> are the key columns that the query binds with =; when there are none, the hint has only its second part. |
 | DF4202 | error | avg(<column>) would average the averages of rows with different counts | use avgMerge(<column>) |
 | DF4203 | error | uniq(<column>) would count distinct estimates, not distinct values | use uniqMerge(<column>) |
 | DF4204 | error | <aggregate>(<column>) would take a quantile of quantiles | use quantileMerge(<level>)(<column>), or quantileDDMerge for a quantileDD column |
 | DF4205 | error | <fn>Merge(<column>) needs a <fn> column of a view; <column> is <what> | for a <fn>If column, use <fn>IfMerge(<column>) |
 | DF4206 | error | <fn>MergeIf is not supported | filter the rows with WHERE |
 | DF4207 | error | <expr> must be a GROUP BY key or inside an aggregate | |
+| DF4208 | error | can't group by <name> of type <type> | to group by its elements, ARRAY JOIN it in a view |
 | DF4301 | error | ORDER BY <item> is not an output column | add it to SELECT with an alias and order by the alias |
 | DF4302 | error | can't order by <column> of type <type> | |
 | DF4303 | error | LIMIT must be a whole number of at least 1, or an unsigned integer parameter | |
@@ -2032,13 +2045,13 @@ Placeholders are in angle brackets. Messages after the statement name are shown 
 | DF5107 | error | GROUP BY item must be a name | give the expression an alias in SELECT and group by the alias |
 | DF5108 | error | <name> appears twice in GROUP BY | |
 | DF5201 | error | unknown function <name> | did you mean <name>?, or the replacement from [Table A.2](#table-a2-replacements-for-unknown-functions-df5201) |
-| DF5202 | error | <function> takes <n> arguments, not <m> | |
+| DF5202 | error | <function> takes <n> arguments, not <m>. For multiIf it reads: multiIf takes an odd number of arguments, at least 3, not <m> | |
 | DF5203 | error | <function> doesn't accept <type> as argument <i> | |
 | DF5204 | error | aggregate <function> is not allowed in <place> | |
 | DF5205 | error | invalid parameters for <function>: <reason> | |
-| DF5206 | error | combinator -<name> is not supported | use -If, or -Merge in a query over a view |
+| DF5206 | error | combinator -<name> is not supported. A combinator written twice reads: combinator -<name> is not supported twice | use -If, or -Merge in a query over a view |
 | DF5207 | error | DISTINCT inside <function> is not supported | use uniqExact(x), or uniq(x) for an estimate |
-| DF5208 | error | count(<arg>) is not supported | use count(); for a Nullable <arg>, countIf(<arg> IS NOT NULL) counts its values |
+| DF5208 | error | count(<arg>) is not supported | use count(); for a Nullable <arg>, countIf(<arg> IS NOT NULL) counts its values. For count(*), the hint is: use count() |
 | DF5209 | error | <function> takes one argument in v1 | |
 | DF5210 | error | time zone arguments are not supported | all times are UTC; remove the argument |
 | DF5211 | error | toStartOfWeek mode must be a whole number from 0 to 9 | 0 starts weeks on Sunday, 1 on Monday |
@@ -2050,7 +2063,7 @@ Placeholders are in angle brackets. Messages after the statement name are shown 
 | DF5303 | error | condition <expr> can't be used as a value | if(<expr>, 1, 0) |
 | DF5304 | error | comparisons can't be chained | combine them with AND, or add parentheses |
 | DF5305 | error | a comparison with NULL is never true | for = and !=, use <expr> IS [NOT] NULL |
-| DF5306 | error | <expr> is not Nullable, so IS NULL is always false | |
+| DF5306 | error | <expr> is not Nullable, so IS NULL is always false. For IS NOT NULL it reads: <expr> is not Nullable, so IS NOT NULL is always true. | |
 | DF5307 | error | NULL in an IN list never matches | |
 | DF5308 | error | <type> and <type> have no common type | for Decimals, use one scale |
 | DF5309 | error | can't combine Decimal and Float64 | use Decimal values, and scale with integers: x * 11 / 10 |

@@ -33,7 +33,7 @@ func TestFind(t *testing.T) {
 	mkdir("outer/project/dynaflux/views")
 	outerFile := write("outer/" + config.FileName)
 	projectFile := write("outer/project/" + config.FileName)
-	mkdir("outer/project/nested/" + config.FileName) // a directory doesn't count
+	mkdir("outer/project/nested/" + config.FileName)
 	mkdir("elsewhere")
 
 	tests := []struct {
@@ -43,7 +43,6 @@ func TestFind(t *testing.T) {
 	}{
 		{"in the directory", filepath.Join(root, "outer/project"), projectFile},
 		{"nearest parent wins", filepath.Join(root, "outer/project/dynaflux/views"), projectFile},
-		{"past a directory of the same name", filepath.Join(root, "outer/project/nested"), projectFile},
 		{"outer project", filepath.Join(root, "outer"), outerFile},
 	}
 	for _, tt := range tests {
@@ -69,6 +68,14 @@ func TestFind(t *testing.T) {
 		got, err := config.Find(filepath.Join(root, "outer/project/missing"))
 		if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, config.ErrNotFound) {
 			t.Errorf("Find = %q, %v; want fs.ErrNotExist", got, err)
+		}
+	})
+	// Walking past it would select the project of a parent.
+	t.Run("directory named dynaflux.yaml", func(t *testing.T) {
+		t.Parallel()
+		got, err := config.Find(filepath.Join(root, "outer/project/nested"))
+		if err == nil || errors.Is(err, config.ErrNotFound) {
+			t.Errorf("Find = %q, %v; want an error other than ErrNotFound", got, err)
 		}
 	})
 	t.Run("file instead of a directory", func(t *testing.T) {

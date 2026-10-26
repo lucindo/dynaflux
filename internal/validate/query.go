@@ -4,6 +4,7 @@
 package validate
 
 import (
+	"maps"
 	"slices"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -41,6 +42,10 @@ type querySource struct {
 
 // queryCompiler is the state of compiling one named query.
 type queryCompiler struct {
+	// scope holds the source's columns. Its bad columns include the ARRAY JOIN aliases,
+	// which DF4003 reports.
+	scope
+
 	d   *decl
 	st  *stmt
 	sel *sql.Select
@@ -48,15 +53,11 @@ type queryCompiler struct {
 	// its columns is checked.
 	src    *querySource
 	params paramTable
-	// elements are the ARRAY JOIN aliases, which DF4003 already reports.
-	elements map[string]bool
-	outs     []*output
-	byName   map[string]*output
-	// columns are the output columns by name, as Columns and ORDER BY see them.
-	columns map[string]operand
-	// guards are the divisors that WHERE rules out zero for (DF5501).
-	guards []catalog.Expr
-	terms  []whereTerm
+	// outputs are the checked output columns by name, as Columns and ORDER BY see them.
+	outputs map[string]operand
+	terms   []whereTerm
+	// byColumn are the WHERE terms that bind each key column.
+	byColumn map[string]*columnTerms
 	// whereBad is set when a WHERE term has an error, which may hide a key binding.
 	whereBad bool
 	// aggregating is set for a read-time aggregation (sql.md §10.7).
@@ -76,13 +77,18 @@ type queryCompiler struct {
 func (p *project) compileQuery(d *decl, s *sql.Query) {
 	q := &queryCompiler{
 		d: d, st: d.st, sel: s.Select,
-		elements: map[string]bool{}, byName: map[string]*output{}, columns: map[string]operand{},
-		groupKeys: map[string]operand{}, groupOK: true,
+		outputs: map[string]operand{}, groupKeys: map[string]operand{}, groupOK: true,
 	}
+	q.param = q.resolveParam
 	q.src = p.querySource(d.st, s.Select.From)
+	q.bad = map[string]bool{}
+	if q.src != nil {
+		q.columns = q.src.columns
+		maps.Copy(q.bad, q.src.bad)
+	}
 	q.params = collectParams(d.st, s.Select)
+	q.outs, q.byName = selectOutputs(q.st, q.sel.Items, q.sel.From.Name, q.isColumn)
 	q.arrayJoins()
-	q.nameOutputs()
 	q.where()
 	q.aggregating = q.isAggregating()
 	q.groupBy()
@@ -92,7 +98,9 @@ func (p *project) compileQuery(d *decl, s *sql.Query) {
 	q.q.Limit = q.limit()
 	q.checkCardinality()
 	q.warnRetention()
-	p.queryInfos[d] = &queryInfo{query: q.catalogQuery(), params: q.params.first, outs: q.outs}
+	if d.defines && d.earlier == nil {
+		d.query = &queryInfo{query: q.catalogQuery(), params: q.params.first, outs: q.outs}
+	}
 }
 
 // querySource resolves FROM (sql.md §10.1). It returns nil for a qualified name (DF5102),
@@ -101,15 +109,15 @@ func (p *project) querySource(st *stmt, from sql.Ident) *querySource {
 	if qualified(st, from) {
 		return nil
 	}
-	if v, ok := p.views[from.Name]; ok {
-		return viewSource(v)
-	}
-	if s, ok := p.streams[from.Name]; ok {
-		return streamSource(s)
-	}
-	if _, ok := p.tables[from.Name]; !ok {
+	d, ok := p.tables[from.Name]
+	switch {
+	case !ok:
 		st.errorf(from.Pos, "DF4001", didYouMean(from.Name, p.tableNames(declStream, declView)),
 			"%s is not a view or a stream", from.Name)
+	case d.view != nil:
+		return viewSource(d.view)
+	case d.stream != nil:
+		return streamSource(d.stream)
 	}
 	return nil
 }
@@ -132,11 +140,8 @@ func viewSource(v *viewInfo) *querySource {
 
 func streamSource(s *streamInfo) *querySource {
 	src := &querySource{
-		kind: catalog.SourceStream, name: s.stream.Name, stream: s, columns: map[string]catalog.Type{},
+		kind: catalog.SourceStream, name: s.stream.Name, stream: s, columns: streamColumnTypes(&s.stream),
 		bad: s.badColumns, keys: s.stream.PrimaryKey, partition: len(s.stream.PrimaryKey), keysOK: true,
-	}
-	for _, c := range slices.Concat(s.stream.Columns, catalog.ImplicitColumns()) {
-		src.columns[c.Name] = c.Type
 	}
 	for _, k := range src.keys {
 		if _, ok := src.columns[k]; !ok || src.bad[k] {
@@ -164,7 +169,7 @@ func (q *queryCompiler) arrayJoins() {
 		q.st.errorf(aj.Pos, "DF4003", "put the ARRAY JOIN in a view", "ARRAY JOIN is not allowed in queries")
 		for _, item := range aj.Items {
 			if item.Alias != nil {
-				q.elements[item.Alias.Name] = true
+				q.bad[item.Alias.Name] = true
 			}
 		}
 	}
@@ -183,7 +188,7 @@ func (q *queryCompiler) warnRetention() {
 	}
 	q.st.warnf(q.sel.From.Pos, "DF4501", "query older events with Athena, or aggregate them in a view",
 		"reads stream %s, which keeps events for %s after ingestion (LOG RETENTION). Older events are only in the archive.",
-		s.Name, retentionText(period))
+		s.Name, period)
 }
 
 // catalogQuery fills in the parts of the compiled query that need no more checks.

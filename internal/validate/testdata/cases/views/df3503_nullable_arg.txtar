@@ -1,12 +1,15 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-argMax with a Nullable arg gets a warning; with coalesce as a sentinel it doesn't.
+argMax with a Nullable arg gets a warning; with coalesce as a sentinel it doesn't. A UUID
+has no sentinel to coalesce with, since coalesce never converts a string literal, so its
+warning has no hint.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
     page        String,
     referrer    Nullable(String),
+    request_id  Nullable(UUID),
     tags        Array(String),
     duration_ms UInt32
 )
@@ -17,8 +20,14 @@ ORDER BY (user_id)
 AS SELECT
     user_id,
     argMax(referrer, event_time) AS last_referrer,
-    argMax(coalesce(referrer, ''), event_time) AS last_referrer_or_empty
+    argMax(coalesce(referrer, ''), event_time) AS last_referrer_or_empty,
+    argMin(request_id, event_time) AS first_request
 FROM page_views
 GROUP BY user_id;
 -- want --
 dynaflux/views.sql:5:5: warning DF3503
+dynaflux/views.sql:7:5: warning DF3503
+-- want-text --
+dynaflux/views.sql:5:5: warning DF3503: user_latest: argMax skips rows where referrer is NULL, so NULL never replaces a value
+  hint: use a sentinel: argMax(coalesce(referrer, ''), event_time)
+dynaflux/views.sql:7:5: warning DF3503: user_latest: argMin skips rows where request_id is NULL, so NULL never replaces a value

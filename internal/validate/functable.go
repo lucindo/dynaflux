@@ -4,6 +4,7 @@
 package validate
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -29,12 +30,12 @@ type funcRef struct {
 	code, hint, msg string
 }
 
-// aggregateFunc is an aggregate function with its combinators, such as sumIf.
+// aggregateFunc is an aggregate function with the combinators the rules know: -If,
+// -Merge and -State, each at most once. mergeIf marks -If written after -Merge, as in
+// sumMergeIf, which filters merged states.
 type aggregateFunc struct {
-	fn catalog.AggFunc
-	// combinators are the suffixes in the order written, such as If and Merge for
-	// sumIfMerge. Only If, Merge and State are known to the rules; the others are DF5206.
-	combinators []string
+	fn                            catalog.AggFunc
+	withIf, merge, state, mergeIf bool
 }
 
 // Combinators that the rules handle.
@@ -48,7 +49,7 @@ const (
 // arg is the text of its first argument, which hints quote.
 func resolveFunc(x *sql.Call, arg string) funcRef {
 	name := x.Name.Name
-	if check, ok := scalarFunc(name); ok {
+	if check, ok := scalarCheck(name); ok {
 		return funcRef{kind: fnScalar, check: check}
 	}
 	if strings.EqualFold(name, "now") {
@@ -57,9 +58,20 @@ func resolveFunc(x *sql.Call, arg string) funcRef {
 	if ref, ok := unsupportedAggregate(x, arg); ok {
 		return ref
 	}
-	if agg, ok := parseAggregate(name); ok {
-		for _, comb := range agg.combinators {
-			if comb != combIf && comb != combMerge && comb != combState {
+	if fn, combs, ok := parseAggregate(name); ok {
+		agg := aggregateFunc{fn: fn}
+		for i, comb := range combs {
+			if slices.Contains(combs[:i], comb) {
+				return funcRef{code: "DF5206", hint: hintCombinator, msg: "combinator -" + comb + " is not supported twice"}
+			}
+			switch comb {
+			case combIf:
+				agg.withIf, agg.mergeIf = true, agg.merge
+			case combMerge:
+				agg.merge = true
+			case combState:
+				agg.state = true
+			default:
 				return funcRef{code: "DF5206", hint: hintCombinator, msg: "combinator -" + comb + " is not supported"}
 			}
 		}
@@ -72,89 +84,82 @@ func resolveFunc(x *sql.Call, arg string) funcRef {
 	return funcRef{code: "DF5201", hint: hint, msg: "unknown function " + name}
 }
 
-// scalarFunc returns the checker of a scalar function (sql.md §6).
-func scalarFunc(name string) (func(*checker, *sql.Call) operand, bool) {
-	switch strings.ToLower(name) {
-	case "if":
-		return (*checker).ifCall, true
-	case "coalesce":
-		return (*checker).coalesce, true
-	case "lower":
-		return unaryFunc(catalog.OpLower, false, stringArg), true
-	case "upper":
-		return unaryFunc(catalog.OpUpper, false, stringArg), true
-	case "concat":
-		return (*checker).concat, true
-	case "length":
-		return unaryFunc(catalog.OpLength, false, lengthArg), true
+// scalarFunc is a scalar function (sql.md §6).
+type scalarFunc struct {
+	name string
+	// caseFree marks a name that matches in any letter case, as in ClickHouse.
+	caseFree bool
+	// alias marks a second spelling, which suggestions leave out.
+	alias bool
+	check func(*checker, *sql.Call) operand
+}
+
+func scalarFuncs() []scalarFunc {
+	return []scalarFunc{
+		{name: "if", caseFree: true, check: (*checker).ifCall},
+		{name: "coalesce", caseFree: true, check: (*checker).coalesce},
+		{name: "lower", caseFree: true, check: unaryFunc(catalog.OpLower, false, stringArg)},
+		{name: "upper", caseFree: true, check: unaryFunc(catalog.OpUpper, false, stringArg)},
+		{name: "concat", caseFree: true, check: (*checker).concat},
+		{name: "length", caseFree: true, check: unaryFunc(catalog.OpLength, false, lengthArg)},
+		{name: "multiIf", check: (*checker).multiIf},
+		{name: "intDiv", check: (*checker).intDiv},
+		{name: "toDate", check: (*checker).toDate},
+		{name: "toStartOfMinute", check: unaryFunc(catalog.OpToStartOfMinute, true, timeArg)},
+		{name: "toStartOfFiveMinutes", check: unaryFunc(catalog.OpToStartOfFiveMinutes, true, timeArg)},
+		{name: "toStartOfFiveMinute", alias: true, check: unaryFunc(catalog.OpToStartOfFiveMinutes, true, timeArg)},
+		{name: "toStartOfHour", check: unaryFunc(catalog.OpToStartOfHour, true, timeArg)},
+		{name: "toStartOfDay", check: unaryFunc(catalog.OpToStartOfDay, true, temporalArg(catalog.KindDateTime))},
+		{name: "toStartOfWeek", check: (*checker).toStartOfWeek},
+		{name: "toStartOfMonth", check: unaryFunc(catalog.OpToStartOfMonth, true, temporalArg(catalog.KindDate))},
+		{name: "toYYYYMM", check: unaryFunc(catalog.OpToYYYYMM, true, temporalArg(catalog.KindUInt32))},
 	}
-	switch name {
-	case "multiIf":
-		return (*checker).multiIf, true
-	case "intDiv":
-		return (*checker).intDiv, true
-	case "toDate":
-		return (*checker).toDate, true
-	case "toStartOfMinute":
-		return unaryFunc(catalog.OpToStartOfMinute, true, timeArg), true
-	case "toStartOfFiveMinutes", "toStartOfFiveMinute":
-		return unaryFunc(catalog.OpToStartOfFiveMinutes, true, timeArg), true
-	case "toStartOfHour":
-		return unaryFunc(catalog.OpToStartOfHour, true, timeArg), true
-	case "toStartOfDay":
-		return unaryFunc(catalog.OpToStartOfDay, true, temporalArg(catalog.KindDateTime)), true
-	case "toStartOfWeek":
-		return (*checker).toStartOfWeek, true
-	case "toStartOfMonth":
-		return unaryFunc(catalog.OpToStartOfMonth, true, temporalArg(catalog.KindDate)), true
-	case "toYYYYMM":
-		return unaryFunc(catalog.OpToYYYYMM, true, temporalArg(catalog.KindUInt32)), true
+}
+
+// scalarCheck returns the checker of the scalar function name names.
+func scalarCheck(name string) (func(*checker, *sql.Call) operand, bool) {
+	for _, f := range scalarFuncs() {
+		if name == f.name || f.caseFree && strings.ToLower(name) == f.name {
+			return f.check, true
+		}
 	}
 	return nil, false
 }
 
 type aggName struct {
-	name string
-	fn   catalog.AggFunc
+	name     string
+	fn       catalog.AggFunc
+	caseFree bool // the plain name matches in any letter case
 }
 
 // aggregateNames lists the aggregate names, longest first where one is a prefix of
 // another, so that uniqExact isn't read as uniq with a suffix.
 func aggregateNames() []aggName {
 	return []aggName{
-		{"uniqExact", catalog.AggUniqExact}, {"uniqHLL12", catalog.AggUniq}, {"uniq", catalog.AggUniq},
-		{"quantileDD", catalog.AggQuantileDD}, {"quantile", catalog.AggQuantile},
-		{"argMax", catalog.AggArgMax}, {"argMin", catalog.AggArgMin},
-		{"count", catalog.AggCount}, {"sum", catalog.AggSum}, {"min", catalog.AggMin}, {"max", catalog.AggMax},
-		{"avg", catalog.AggAvg}, {"any", catalog.AggAny},
+		{"uniqExact", catalog.AggUniqExact, false}, {"uniqHLL12", catalog.AggUniq, false}, {"uniq", catalog.AggUniq, false},
+		{"quantileDD", catalog.AggQuantileDD, false}, {"quantile", catalog.AggQuantile, false},
+		{"argMax", catalog.AggArgMax, false}, {"argMin", catalog.AggArgMin, false},
+		{"count", catalog.AggCount, true}, {"sum", catalog.AggSum, true}, {"min", catalog.AggMin, true},
+		{"max", catalog.AggMax, true}, {"avg", catalog.AggAvg, true}, {"any", catalog.AggAny, false},
 	}
 }
 
-func parseAggregate(name string) (aggregateFunc, bool) {
+// parseAggregate splits name into an aggregate function and its combinators, in the
+// order written.
+func parseAggregate(name string) (catalog.AggFunc, []string, bool) {
 	for _, b := range aggregateNames() {
-		if strings.EqualFold(name, b.name) && isCaseFreeAggregate(b.fn) {
-			return aggregateFunc{fn: b.fn}, true
+		if b.caseFree && strings.EqualFold(name, b.name) {
+			return b.fn, nil, true
 		}
 		rest, found := strings.CutPrefix(name, b.name)
 		if !found {
 			continue
 		}
 		if combs, ok := parseCombinators(rest); ok {
-			return aggregateFunc{fn: b.fn, combinators: combs}, true
+			return b.fn, combs, true
 		}
 	}
-	return aggregateFunc{}, false
-}
-
-// isCaseFreeAggregate reports whether the plain name of f matches in any letter case.
-func isCaseFreeAggregate(f catalog.AggFunc) bool {
-	switch f {
-	case catalog.AggCount, catalog.AggSum, catalog.AggMin, catalog.AggMax, catalog.AggAvg:
-		return true
-	case catalog.AggArgMax, catalog.AggArgMin, catalog.AggAny, catalog.AggUniq, catalog.AggUniqExact,
-		catalog.AggQuantile, catalog.AggQuantileDD:
-	}
-	return false
+	return "", nil, false
 }
 
 // parseCombinators splits a suffix such as IfMerge into ClickHouse combinators.
@@ -219,81 +224,69 @@ func unsupportedBase(name string, bases []string) string {
 	return ""
 }
 
-// replacement returns the hint for a ClickHouse function that Dynaflux replaces
-// (sql.md Table A.2 and §7.6).
-func replacement(name string) (string, bool) {
-	prefixes := []struct{ prefix, hint string }{
-		{"median", hintQuantile}, {"quantiles", hintQuantile}, {"quantileExact", hintQuantile},
-		{"quantileTiming", hintQuantile}, {"quantileTDigest", hintQuantile}, {"quantileBFloat16", hintQuantile},
-		{"quantileDeterministic", hintQuantile},
-		{"uniqCombined", hintUniq}, {"uniqTheta", hintUniq}, {"uniqUpTo", hintUniq},
-		{"sumWithOverflow", "use sum(x)"}, {"sumKahan", "use sum(x)"}, {"sumCount", "use sum(x) and count()"},
-		{"avgWeighted", "use avg(x)"},
-		{"toInt", hintNoConversions}, {"toUInt", hintNoConversions}, {"toFloat", hintNoConversions},
-		{"toDecimal", hintNoConversions}, {"toDateTime", hintNoConversions}, {"parseDateTime", hintNoConversions},
-	}
-	for _, p := range prefixes {
-		if strings.HasPrefix(name, p.prefix) {
-			return p.hint, true
-		}
-	}
-	switch name {
-	case "toStartOfInterval", "toStartOfQuarter", "toStartOfYear", "toMonday":
-		return "use toStartOfMinute … toStartOfMonth; toStartOfWeek(t, 1) for Monday", true
-	case "lowerUTF8", "upperUTF8":
-		return "use lower or upper (ASCII only)", true
-	case "lengthUTF8":
-		return "use length (bytes)", true
-	case "isNull", "isNotNull":
-		return "use x IS NULL or x IS NOT NULL", true
-	case "ifNull", "nullIf":
-		return "use coalesce or if", true
-	case "toString":
-		return hintNoConversions, true
-	case "arrayJoin":
-		return "use ARRAY JOIN <array> AS <element> in a view", true
-	}
-	if op, ok := operatorFunc(strings.ToLower(name)); ok {
-		return "use the operator " + op, true
-	}
-	return "", false
-}
-
 const (
 	hintCombinator    = "use -If, or -Merge in a query over a view"
 	hintNoConversions = "no conversions in v1; compare with a literal or a parameter"
 	hintQuantile      = "use quantile(level)(x)"
 	hintUniq          = "use uniq(x)"
+	hintStartOf       = "use toStartOfMinute … toStartOfMonth; toStartOfWeek(t, 1) for Monday"
 )
 
-func operatorFunc(name string) (string, bool) {
-	switch name {
-	case "plus":
-		return opPlus, true
-	case "minus":
-		return opMinus, true
-	case "multiply":
-		return opTimes, true
-	case "divide":
-		return opDivide, true
-	case "modulo":
-		return opModulo, true
-	case "equals":
-		return "=", true
-	case "and":
-		return "AND", true
-	case "or":
-		return "OR", true
+// nameMatch is how a replaced function's name matches.
+type nameMatch uint8
+
+const (
+	matchPrefix  nameMatch = iota + 1 // the start of the name, with any suffix
+	matchExact                        // the whole name
+	matchAnyCase                      // the whole name, in any letter case
+)
+
+// replacement returns the hint for a ClickHouse function that Dynaflux replaces
+// (sql.md Table A.2 and §7.6).
+func replacement(name string) (string, bool) {
+	for _, r := range []struct {
+		name  string
+		match nameMatch
+		hint  string
+	}{
+		{"median", matchPrefix, hintQuantile}, {"quantiles", matchPrefix, hintQuantile},
+		{"quantileExact", matchPrefix, hintQuantile}, {"quantileTiming", matchPrefix, hintQuantile},
+		{"quantileTDigest", matchPrefix, hintQuantile}, {"quantileBFloat16", matchPrefix, hintQuantile},
+		{"quantileDeterministic", matchPrefix, hintQuantile},
+		{"uniqCombined", matchPrefix, hintUniq}, {"uniqTheta", matchPrefix, hintUniq}, {"uniqUpTo", matchPrefix, hintUniq},
+		{"sumWithOverflow", matchPrefix, "use sum(x)"}, {"sumKahan", matchPrefix, "use sum(x)"},
+		{"sumCount", matchPrefix, "use sum(x) and count()"}, {"avgWeighted", matchPrefix, "use avg(x)"},
+		{"toInt", matchPrefix, hintNoConversions}, {"toUInt", matchPrefix, hintNoConversions},
+		{"toFloat", matchPrefix, hintNoConversions}, {"toDecimal", matchPrefix, hintNoConversions},
+		{"toDateTime", matchPrefix, hintNoConversions}, {"parseDateTime", matchPrefix, hintNoConversions},
+		{"toStartOfInterval", matchExact, hintStartOf}, {"toStartOfQuarter", matchExact, hintStartOf},
+		{"toStartOfYear", matchExact, hintStartOf}, {"toMonday", matchExact, hintStartOf},
+		{"lowerUTF8", matchExact, "use lower or upper (ASCII only)"}, {"upperUTF8", matchExact, "use lower or upper (ASCII only)"},
+		{"lengthUTF8", matchExact, "use length (bytes)"},
+		{"isNull", matchExact, "use x IS NULL or x IS NOT NULL"}, {"isNotNull", matchExact, "use x IS NULL or x IS NOT NULL"},
+		{"ifNull", matchExact, "use coalesce or if"}, {"nullIf", matchExact, "use coalesce or if"},
+		{"toString", matchExact, hintNoConversions},
+		{"arrayJoin", matchExact, "use ARRAY JOIN <array> AS <element> in a view"},
+		{"plus", matchAnyCase, "use the operator " + opPlus}, {"minus", matchAnyCase, "use the operator " + opMinus},
+		{"multiply", matchAnyCase, "use the operator " + opTimes}, {"divide", matchAnyCase, "use the operator " + opDivide},
+		{"modulo", matchAnyCase, "use the operator " + opModulo}, {"equals", matchAnyCase, "use the operator ="},
+		{"and", matchAnyCase, "use the operator AND"}, {"or", matchAnyCase, "use the operator OR"},
+	} {
+		if r.match == matchPrefix && strings.HasPrefix(name, r.name) || r.match == matchExact && name == r.name ||
+			r.match == matchAnyCase && strings.ToLower(name) == r.name {
+			return r.hint, true
+		}
 	}
 	return "", false
 }
 
 // knownFunctions lists the names that an unknown function's suggestion comes from.
 func knownFunctions() []string {
-	names := []string{
-		"if", "multiIf", "coalesce", "lower", "upper", "concat", "length", "now", "intDiv", "toDate",
-		"toStartOfMinute", "toStartOfFiveMinutes", "toStartOfHour", "toStartOfDay", "toStartOfWeek",
-		"toStartOfMonth", "toYYYYMM",
+	names := []string{"now"}
+	for _, f := range scalarFuncs() {
+		if !f.alias {
+			names = append(names, f.name)
+		}
 	}
 	for _, b := range aggregateNames() {
 		names = append(names, b.name, b.name+combIf, b.name+combMerge, b.name+combIf+combMerge)

@@ -1,7 +1,9 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-uniqExact columns can't be combined across rows, with or without GROUP BY.
+uniqExact columns can't be combined across rows, with or without GROUP BY. Without GROUP
+BY, the hint suggests a view grouped by the key columns that WHERE binds with =, and only
+uniq when there are none.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
@@ -34,6 +36,19 @@ GROUP BY page;
 SELECT uniqExactMerge(visitors) AS unique_visitors
 FROM page_daily
 WHERE page = {page:String};
+
+-- name: VisitorsOfPages :one
+SELECT uniqExactMerge(visitors) AS unique_visitors
+FROM page_daily
+WHERE page IN {pages:Array(String)};
 -- want --
 dynaflux/queries.sql:2:14: error DF4201
 dynaflux/queries.sql:8:8: error DF4201
+dynaflux/queries.sql:13:8: error DF4201
+-- want-text --
+dynaflux/queries.sql:2:14: error DF4201: TopPagesByVisitors: uniqExact(visitors) cannot be combined across rows (the query groups by (page) but page_daily rows are (page, day)).
+  hint: declare a view grouped by (page), or make visitors a uniq() column and use uniqMerge(visitors) for an approximate count
+dynaflux/queries.sql:8:8: error DF4201: PageVisitors: uniqExactMerge(visitors) cannot be combined across rows (the query combines all rows of page_daily).
+  hint: declare a view grouped by (page), or make visitors a uniq() column and use uniqMerge(visitors) for an approximate count
+dynaflux/queries.sql:13:8: error DF4201: VisitorsOfPages: uniqExactMerge(visitors) cannot be combined across rows (the query combines all rows of page_daily).
+  hint: make visitors a uniq() column and use uniqMerge(visitors) for an approximate count

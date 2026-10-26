@@ -44,25 +44,25 @@ func (q *queryCompiler) bindKeys() {
 	if q.src == nil || !q.src.keysOK {
 		return
 	}
-	byColumn := map[string]*columnTerms{}
-	for i, t := range q.terms {
-		if t.o.bad {
-			continue
-		}
-		if kt, ok := q.classify(t); ok {
-			kt.term = i
-			ct := byColumn[kt.column]
-			if ct == nil {
-				ct = &columnTerms{}
-				byColumn[kt.column] = ct
-			}
-			ct.add(&kt)
-		}
-	}
-	q.boundTwice(byColumn)
-	used := q.plan(byColumn)
+	q.boundTwice(q.byColumn)
+	used := q.plan(q.byColumn)
 	q.checkCombinations()
 	q.q.Filter = q.residual(used)
+}
+
+// fileKeyTerm files WHERE term i under the key column it binds, if it binds one.
+func (q *queryCompiler) fileKeyTerm(i int, t whereTerm) {
+	kt, ok := q.classify(t)
+	if !ok {
+		return
+	}
+	kt.term = i
+	ct := q.byColumn[kt.column]
+	if ct == nil {
+		ct = &columnTerms{}
+		q.byColumn[kt.column] = ct
+	}
+	ct.add(&kt)
 }
 
 func (ct *columnTerms) add(kt *keyTerm) {
@@ -106,6 +106,14 @@ func (q *queryCompiler) classify(t whereTerm) (keyTerm, bool) {
 		}
 	}
 	return keyTerm{}, false
+}
+
+// equalityKeys returns the key columns that a WHERE term binds with =, in key order.
+func (q *queryCompiler) equalityKeys() []string {
+	return slices.DeleteFunc(slices.Clone(q.src.keys), func(k string) bool {
+		ct := q.byColumn[k]
+		return ct == nil || !slices.ContainsFunc(ct.sets, func(kt *keyTerm) bool { return kt.kind == bindEq })
+	})
 }
 
 // comparisonTerm returns the binding of column op v, or v op column when flipped.
@@ -154,11 +162,23 @@ func allConstant(es []catalog.Expr) bool {
 func distinct(values []catalog.Expr) []catalog.Expr {
 	var out []catalog.Expr
 	for _, v := range values {
-		if !slices.ContainsFunc(out, func(o catalog.Expr) bool { return reflect.DeepEqual(o, v) }) {
+		if !slices.ContainsFunc(out, func(o catalog.Expr) bool { return sameValue(o, v) }) {
 			out = append(out, v)
 		}
 	}
 	return out
+}
+
+// sameValue reports whether a and b are the same value. Number literals compare by exact
+// value, so the UInt8 1 and the Float64 1.0 are one value.
+func sameValue(a, b catalog.Expr) bool {
+	numbers := a.Op == catalog.OpLiteral && b.Op == catalog.OpLiteral && isNumeric(a.Type) && isNumeric(b.Type)
+	if !numbers {
+		return reflect.DeepEqual(a, b)
+	}
+	av, aErr := parseLiteral(a)
+	bv, bErr := parseLiteral(b)
+	return aErr == nil && bErr == nil && num(av, a.Type).Cmp(num(bv, b.Type)) == 0
 }
 
 // boundTwice reports a key column bound by two equalities or sets, or by two lower or two

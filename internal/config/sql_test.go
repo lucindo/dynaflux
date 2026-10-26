@@ -72,6 +72,9 @@ func TestSQLFiles(t *testing.T) {
 		{"literal testdata directory", "sql: [dynaflux/testdata/*.sql]\n", []string{"dynaflux/testdata/e.sql"}},
 		{"literal dot file", "sql: [dynaflux/.hidden.sql]\n", []string{"dynaflux/.hidden.sql"}},
 		{"wildcard after a literal underscore", "sql: [dynaflux/_*.sql]\n", []string{"dynaflux/_draft.sql"}},
+		{"escaped literal underscore", "sql: ['dynaflux/\\_draft.sql']\n", []string{"dynaflux/_draft.sql"}},
+		{"wildcard after an escaped underscore", "sql: ['dynaflux/\\_*.sql']\n", []string{"dynaflux/_draft.sql"}},
+		{"escaped literal testdata directory", "sql: ['dynaflux/test\\data/*.sql']\n", []string{"dynaflux/testdata/e.sql"}},
 		{"case-sensitive", "sql: [dynaflux/*.SQL]\n", []string{"dynaflux/Q.SQL"}},
 		{"character class and ?", "sql: ['dynaflux/[a-b].sq?']\n", []string{"dynaflux/a.sql"}},
 		{
@@ -93,9 +96,13 @@ func TestSQLFiles(t *testing.T) {
 
 func TestSQLFilesDiagnostics(t *testing.T) {
 	t.Parallel()
-	escaping := project()
-	escaping["dynaflux/up.sql"] = &fstest.MapFile{Data: []byte("../../secret.sql"), Mode: fs.ModeSymlink}
-	escaping["dynaflux/abs.sql"] = &fstest.MapFile{Data: []byte("/etc/secret.sql"), Mode: fs.ModeSymlink}
+	// Each case gets its own map: the subtests write dynaflux.yaml into it in parallel.
+	escaping := func() fstest.MapFS {
+		fsys := project()
+		fsys["dynaflux/up.sql"] = &fstest.MapFile{Data: []byte("../../secret.sql"), Mode: fs.ModeSymlink}
+		fsys["dynaflux/abs.sql"] = &fstest.MapFile{Data: []byte("/etc/secret.sql"), Mode: fs.ModeSymlink}
+		return fsys
+	}
 	tests := []struct {
 		name       string
 		fsys       fstest.MapFS
@@ -113,9 +120,10 @@ func TestSQLFilesDiagnostics(t *testing.T) {
 		{"DF6204 ** matches directories only", project(), "", "sql: ['other/**']\n", []string{"3:7 error DF6204"}, nil},
 		{
 			"DF6205 links out of the root",
-			escaping, "", "sql: [dynaflux/*.sql]\n",
+			escaping(), "", "sql: [dynaflux/*.sql]\n",
 			[]string{"3:7 error DF6205", "3:7 error DF6205"}, []string{"dynaflux/a.sql", "dynaflux/link.sql"},
 		},
+		{"DF6205 hides DF6204", escaping(), "", "sql: [dynaflux/up.sql]\n", []string{"3:7 error DF6205"}, nil},
 		{
 			"DF6002 unreadable directory",
 			project(), "dynaflux/views", "sql: [dynaflux/views/*/*.sql, other/*.sql]\n",
@@ -139,38 +147,91 @@ func TestSQLFilesDiagnostics(t *testing.T) {
 }
 
 // The CLI expands the patterns on an [os.Root], whose links behave unlike those of
-// [fstest.MapFS].
-func TestSQLFilesOnRoot(t *testing.T) {
+// [fstest.MapFS]. The link rules don't depend on the file system: [os.DirFS] follows links
+// out of the root, and the same links are DF6205 there.
+func TestSQLFilesOnDisk(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	dir := filepath.Join(tmp, "project")
-	if err := os.MkdirAll(filepath.Join(dir, "dynaflux/views"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	files := map[string]string{
+	absTarget := filepath.Join(dir, "dynaflux/a.sql")
+	tree(t, tmp, map[string]string{
 		"secret.sql":                   "",
 		"project/dynaflux/a.sql":       "",
 		"project/dynaflux/views/b.sql": "",
 		"project/" + config.FileName:   base + "sql: [dynaflux/*.sql]\n",
+	}, map[string]string{
+		"project/dynaflux/link.sql":   "a.sql",
+		"project/dynaflux/up.sql":     "../../secret.sql",
+		"project/dynaflux/abs.sql":    absTarget, // os.Root refuses absolute links, even inside the root
+		"project/dynaflux/views.sql":  "views",
+		"project/dynaflux/broken.sql": "missing.sql",
+	})
+	root, cfg := loadRoot(t, dir)
+	const rule = "; links must be relative and stay inside the project root"
+	want := []string{
+		`dynaflux.yaml:3:7: error DF6205: "dynaflux/abs.sql" links to "` + absTarget + `"` + rule,
+		`dynaflux.yaml:3:7: error DF6205: "dynaflux/up.sql" links to "../../secret.sql"` + rule,
 	}
+	wantFiles := []string{"dynaflux/a.sql", "dynaflux/link.sql"}
+	for name, fsys := range map[string]fs.FS{"os.Root": root.FS(), "os.DirFS": os.DirFS(dir)} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, ds := cfg.SQLFiles(fsys, dir)
+			var lines []string
+			for _, d := range ds {
+				line, _, _ := strings.Cut(d.String(), "\n")
+				lines = append(lines, line)
+			}
+			if !slices.Equal(got, wantFiles) || !slices.Equal(lines, want) {
+				t.Errorf("SQLFiles = %q,\n%s\nwant %q,\n%s", got, strings.Join(lines, "\n"), wantFiles, strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+// A link whose own target stays inside the root, but resolves through a link to a directory
+// outside, can't be read through an [os.Root]. The read error stops the pattern.
+func TestSQLFilesLinkThroughLink(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	tree(t, tmp, map[string]string{
+		"outside/s.sql":              "",
+		"project/dynaflux/a.sql":     "",
+		"project/" + config.FileName: base + "sql: [dynaflux/*.sql]\n",
+	}, map[string]string{
+		"project/dynaflux/ext":     "../../outside",
+		"project/dynaflux/via.sql": "ext/s.sql",
+	})
+	root, cfg := loadRoot(t, filepath.Join(tmp, "project"))
+	got, ds := cfg.SQLFiles(root.FS(), "/project")
+	if !slices.Equal(render(ds), []string{"3:7 error DF6002"}) || !strings.Contains(ds[0].Message, "dynaflux/via.sql") ||
+		len(got) != 0 {
+		t.Errorf("SQLFiles = %q, %v; want no files and DF6002 for dynaflux/via.sql", got, ds)
+	}
+}
+
+// tree creates files and links below dir, and skips the test where links can't be made.
+func tree(t *testing.T, dir string, files, links map[string]string) {
+	t.Helper()
 	for name, data := range files {
-		if err := os.WriteFile(filepath.Join(tmp, name), []byte(data), 0o600); err != nil {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
 			t.Fatal(err)
 		}
-	}
-	absTarget := filepath.Join(dir, "dynaflux/a.sql")
-	links := map[string]string{
-		"dynaflux/link.sql":   "a.sql",
-		"dynaflux/up.sql":     "../../secret.sql",
-		"dynaflux/abs.sql":    absTarget, // os.Root refuses absolute links, even inside the root
-		"dynaflux/views.sql":  "views",
-		"dynaflux/broken.sql": "missing.sql",
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for name, target := range links {
 		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
 			t.Skipf("can't create links: %v", err)
 		}
 	}
+}
+
+// loadRoot opens an [os.Root] at dir and loads its config.
+func loadRoot(t *testing.T, dir string) (*os.Root, *config.Config) {
+	t.Helper()
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -180,21 +241,7 @@ func TestSQLFilesOnRoot(t *testing.T) {
 	if cfg == nil {
 		t.Fatalf("Load: %v", ds)
 	}
-
-	got, ds := cfg.SQLFiles(root.FS(), dir)
-	const rule = "; links must be relative and stay inside the project root"
-	want := []string{
-		"dynaflux.yaml:3:7: error DF6205: dynaflux/abs.sql links to " + absTarget + rule,
-		"dynaflux.yaml:3:7: error DF6205: dynaflux/up.sql links to ../../secret.sql" + rule,
-	}
-	var lines []string
-	for _, d := range ds {
-		line, _, _ := strings.Cut(d.String(), "\n")
-		lines = append(lines, line)
-	}
-	if wantFiles := []string{"dynaflux/a.sql", "dynaflux/link.sql"}; !slices.Equal(got, wantFiles) || !slices.Equal(lines, want) {
-		t.Errorf("SQLFiles = %q,\n%s\nwant %q,\n%s", got, strings.Join(lines, "\n"), wantFiles, strings.Join(want, "\n"))
-	}
+	return root, cfg
 }
 
 // A pasted pattern must not hang validate. Backtracking over ** would try every way to split

@@ -24,12 +24,14 @@ const (
 	defaultRuntimeOut      = "cmd/dynaflux-runtime"
 	defaultInfraOut        = "infra/dynaflux"
 	defaultTimeoutSeconds  = 60
+	defaultPruneWindow     = maxTimeoutSeconds + lifetimeMargin // safe for every timeout
 	defaultMemoryMB        = 1024
 	defaultBatchingSeconds = 1
 	defaultLogRetentionDay = 2
 	defaultTargetPercent   = 70
 
 	maxTimeoutSeconds  = 900   // Lambda maximum
+	lifetimeMargin     = 60    // for writes that land late and clock skew between hosts
 	minMemoryMB        = 128   // Lambda minimum
 	maxMemoryMB        = 10240 // Lambda maximum
 	maxBatchingSeconds = 300   // event source mapping maximum
@@ -51,13 +53,13 @@ func decode(root *yaml.Node) (*Config, []diag.Diagnostic) {
 	named := d.identity(top, c)
 	d.regions(top, c)
 	d.sqlPatterns(top, c)
-	d.outputs(top, c)
+	splitKnown := d.outputs(top, c)
 	d.defaults(top, c)
 	d.tables(top, c)
 	d.archive(top, c)
 	d.http(top, c)
 	if named {
-		d.storeNames(c, top.at("store"))
+		d.storeNames(c, top.at("store"), splitKnown)
 	}
 	return c, d.diags
 }
@@ -119,12 +121,14 @@ func isRegion(s string) bool {
 		!slices.ContainsFunc(words, func(w string) bool { return w == "" || !consists(w, lower) })
 }
 
-func (d *decoder) outputs(top object, c *Config) {
+// outputs reads go, runtime and infra, and reports whether runtime.split is known.
+func (d *decoder) outputs(top object, c *Config) bool {
 	c.Go = Go{Package: defaultGoPackage, Out: defaultGoOut}
 	c.Runtime = Runtime{
 		Out:                   defaultRuntimeOut,
 		Arch:                  ArchARM64,
 		TimeoutSeconds:        defaultTimeoutSeconds,
+		PruneWindowSeconds:    defaultPruneWindow,
 		MemoryMB:              defaultMemoryMB,
 		BatchingWindowSeconds: defaultBatchingSeconds,
 		Split:                 SplitStore,
@@ -137,11 +141,9 @@ func (d *decoder) outputs(top object, c *Config) {
 		d.goPackage(g, &c.Go)
 	}
 	r, rOK := d.object("runtime", top.vals["runtime"], top.at("runtime"),
-		"out", "arch", "timeout_seconds", "memory_mb", "batching_window_seconds", "split")
+		"out", "arch", "timeout_seconds", "prune_window_seconds", "memory_mb", "batching_window_seconds", "split")
 	runtimeOut := rOK && d.dir(r, "out", &c.Runtime.Out)
-	if rOK {
-		d.runtime(r, &c.Runtime)
-	}
+	splitKnown := rOK && d.runtime(r, &c.Runtime)
 	i, iOK := d.object("infra", top.vals["infra"], top.at("infra"), "format", "out")
 	infraOut := iOK && d.dir(i, "out", &c.Infra.Out)
 	if iOK {
@@ -163,6 +165,7 @@ func (d *decoder) outputs(top object, c *Config) {
 	if goOut && runtimeOut {
 		d.importable(c, g, r)
 	}
+	return splitKnown
 }
 
 func (d *decoder) goPackage(g object, dst *Go) {
@@ -177,15 +180,42 @@ func (d *decoder) goPackage(g object, dst *Go) {
 	dst.Package = s
 }
 
-func (d *decoder) runtime(r object, rt *Runtime) {
+// runtime reads the runtime mapping r, and reports whether runtime.split is known.
+func (d *decoder) runtime(r object, rt *Runtime) bool {
 	enum(d, r, "arch", &rt.Arch, ArchARM64, ArchX8664)
-	d.integer(r, "timeout_seconds", &rt.TimeoutSeconds,
-		bounds{1, maxTimeoutSeconds, "Lambda functions run for 1 to 900 seconds"})
+	timeoutOK := d.integer(r, "timeout_seconds", &rt.TimeoutSeconds,
+		bounds{1, maxTimeoutSeconds, "Lambda functions run for 1 to 900 seconds"}) || !r.has("timeout_seconds")
+	windowSet := d.integer(r, "prune_window_seconds", &rt.PruneWindowSeconds,
+		bounds{1, catalog.MaxPruneWindowSeconds,
+			fmt.Sprintf("the prune window is at most %d seconds (25 hours)", catalog.MaxPruneWindowSeconds)})
+	if timeoutOK && windowSet {
+		d.pruneWindow(r, rt)
+	}
 	d.integer(r, "memory_mb", &rt.MemoryMB,
 		bounds{minMemoryMB, maxMemoryMB, "Lambda functions take 128 to 10240 MB of memory"})
 	d.integer(r, "batching_window_seconds", &rt.BatchingWindowSeconds,
 		bounds{0, maxBatchingSeconds, "event source mappings batch for 0 to 300 seconds"})
-	enum(d, r, "split", &rt.Split, SplitStore, SplitStream)
+	return enum(d, r, "split", &rt.Split, SplitStore, SplitStream) || !r.has("split")
+}
+
+// pruneWindow checks runtime.prune_window_seconds against the timeout. Pruning is exact
+// only while the window outlasts every invocation that may still be running.
+func (d *decoder) pruneWindow(r object, rt *Runtime) {
+	least := rt.TimeoutSeconds + lifetimeMargin
+	switch {
+	case rt.PruneWindowSeconds < least:
+		d.errorf(r.at("prune_window_seconds"), "DF6305",
+			fmt.Sprintf("set it to at least %d, or remove it to use the default, %d", least, defaultPruneWindow),
+			"runtime.prune_window_seconds is %d, less than runtime.timeout_seconds + %d = %d: the projector could "+
+				"drop a high-water mark that a running invocation still needs, and count some events twice",
+			rt.PruneWindowSeconds, lifetimeMargin, least)
+	case rt.PruneWindowSeconds < defaultPruneWindow:
+		d.warnf(r.at("prune_window_seconds"), "DF6306",
+			fmt.Sprintf("remove it to use the default, %d, which is safe for every timeout", defaultPruneWindow),
+			"runtime.prune_window_seconds is %d, less than %d: if you later lower it with runtime.timeout_seconds in "+
+				"one deploy, invocations started under the old timeout can outlive the new window",
+			rt.PruneWindowSeconds, defaultPruneWindow)
+	}
 }
 
 // goPackageProblem says why s can't be go.package, or returns "".
@@ -261,7 +291,7 @@ func (d *decoder) distinctOutputs(outs []output) {
 				first, second = b, a
 			}
 			d.errorf(second.pos(), "DF6303", "give each output its own directory",
-				"%s and %s are the same directory, %s", first.key, second.key, a.dir)
+				"%s and %s are the same directory, %q", first.key, second.key, a.dir)
 			break
 		}
 	}
@@ -310,7 +340,7 @@ func (d *decoder) defaults(top object, c *Config) {
 	}
 }
 
-// retention reads log_retention: forever, or a duration from 1 day to 36525 days.
+// retention reads log_retention: forever, or a duration from 1 day to 100 years.
 func (d *decoder) retention(o object) (catalog.Retention, bool) {
 	s, ok := d.str(o, "log_retention", hintDuration)
 	if !ok {
@@ -328,8 +358,9 @@ func (d *decoder) retention(o object) (catalog.Retention, bool) {
 	// The catalog holds the bounds that LOG RETENTION shares.
 	var r catalog.Retention
 	if err := r.UnmarshalText([]byte(n + " " + string(unit))); err != nil {
-		d.errorf(o.at("log_retention"), "DF6402", "use at least 1d; for more than 36525 days, use forever",
-			"%s is %q; it must be between 1 day and 36525 days", o.key("log_retention"), s)
+		maxDays := catalog.UnitDay.Max()
+		d.errorf(o.at("log_retention"), "DF6402", fmt.Sprintf("use at least 1d; for more than %d days, use forever", maxDays),
+			"%s is %q; it must be between 1 day and %d days", o.key("log_retention"), s, maxDays)
 		return catalog.Retention{}, false
 	}
 	return r, true
@@ -481,13 +512,13 @@ func (d *decoder) archiveRegions(o object, c *Config) bool {
 			// With regions in error, every entry would be reported.
 			if len(c.Regions) > 0 {
 				d.errorf(at(e), "DF6501", "add it to regions, or remove it from archive.regions",
-					"archive.regions lists %s, which isn't in regions", e.Value)
+					"archive.regions lists %q, which isn't in regions", e.Value)
 			}
 		case !d.repeated(seen, "archive.regions", e.Value, e):
 			c.Archive.Regions = append(c.Archive.Regions, e.Value)
 		}
 	}
-	return false
+	return len(n.Content) == 0
 }
 
 func (d *decoder) http(top object, c *Config) {
@@ -582,11 +613,12 @@ func isDomainName(s string) bool {
 	})
 }
 
-// storeNames checks the resource names that store and prefix alone imply.
-func (d *decoder) storeNames(c *Config, storePos diag.Pos) {
+// storeNames checks the resource names that store and prefix alone imply. Without a known
+// runtime.split, whether a store-wide projector exists is unknown, so its name isn't checked.
+func (d *decoder) storeNames(c *Config, storePos diag.Pos, splitKnown bool) {
 	n := c.Naming()
 	base := len(c.Prefix) + len(c.Store)
-	for _, r := range n.StoreResources(c.Runtime.Split == SplitStream) {
+	for _, r := range n.StoreResources(c.Runtime.Split == SplitStream || !splitKnown) {
 		if !r.TooLong() {
 			continue
 		}

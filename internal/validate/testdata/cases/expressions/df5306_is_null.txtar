@@ -1,7 +1,7 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-IS NULL needs a Nullable operand.
+IS NULL and IS NOT NULL need a Nullable operand: on any other, the result is fixed.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
@@ -29,5 +29,15 @@ SELECT day
 FROM page_daily
 WHERE page = {page:String}
   AND views IS NULL;
+
+-- name: SomeViews :many
+SELECT day
+FROM page_daily
+WHERE page = {page:String}
+  AND views IS NOT NULL;
 -- want --
 dynaflux/queries.sql:5:7: error DF5306
+dynaflux/queries.sql:11:7: error DF5306
+-- want-text --
+dynaflux/queries.sql:5:7: error DF5306: NoViews: views is not Nullable, so IS NULL is always false
+dynaflux/queries.sql:11:7: error DF5306: SomeViews: views is not Nullable, so IS NOT NULL is always true

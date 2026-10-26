@@ -42,9 +42,9 @@ type env struct {
 	// place names the clause, such as WHERE or DEFAULT, for DF5204.
 	place string
 	// column resolves a column reference.
-	column func(ref *sql.ColumnRef) operand
+	column func(c *checker, ref *sql.ColumnRef) operand
 	// param resolves a parameter; nil means parameters aren't allowed (DF4403).
-	param func(p *sql.Param, role paramRole) operand
+	param func(c *checker, p *sql.Param, role paramRole) operand
 	// aggregate checks an aggregate call; nil means aggregates aren't allowed (DF5204).
 	aggregate func(c *checker, call *sql.Call, fn aggregateFunc) operand
 }
@@ -111,11 +111,10 @@ func predicate(ir catalog.Expr, x sql.Expr) operand {
 }
 
 func (c *checker) column(ref *sql.ColumnRef) operand {
-	if len(ref.Qualifier) > 0 {
-		c.st.errorf(ref.Pos, "DF5102", "use the column name alone", "qualified name %s is not supported", c.st.text(ref))
+	if qualified(c.st, ref.Ident) {
 		return badOperand()
 	}
-	return c.env.column(ref)
+	return c.env.column(c, ref)
 }
 
 func (c *checker) param(p *sql.Param, role paramRole) operand {
@@ -123,7 +122,7 @@ func (c *checker) param(p *sql.Param, role paramRole) operand {
 		c.st.errorf(p.Pos, "DF4403", "", "parameters are only allowed in named queries")
 		return badOperand()
 	}
-	return c.env.param(p, role)
+	return c.env.param(c, p, role)
 }
 
 // value checks x where a value is needed: not a predicate (DF5303), and not NULL
@@ -140,7 +139,7 @@ func (c *checker) value(x sql.Expr) operand {
 // valueOrNull checks x where a value or a NULL literal is needed.
 func (c *checker) valueOrNull(x sql.Expr) operand {
 	o := c.expr(x)
-	if o.pred && !o.bad {
+	if o.pred {
 		text := c.st.text(x)
 		c.st.errorf(x.Extent().Pos, "DF5303", "if("+text+", 1, 0)", "condition %s can't be used as a value", text)
 		return badOperand()

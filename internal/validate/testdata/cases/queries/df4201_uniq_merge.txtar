@@ -28,3 +28,6 @@ WHERE workspace_id = {workspace_id:String}
   AND day BETWEEN {from:Date} AND {to:Date};
 -- want --
 dynaflux/activity.sql:18:8: error DF4201
+-- want-text --
+dynaflux/activity.sql:18:8: error DF4201: WorkspaceActiveMembers: uniqMerge(active_members) cannot be combined across rows (the query combines all rows of workspace_daily).
+  hint: declare a view grouped by (workspace_id), or make active_members a uniq() column and use uniqMerge(active_members) for an approximate count

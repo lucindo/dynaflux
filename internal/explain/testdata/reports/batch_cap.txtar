@@ -1,0 +1,48 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+At 1,000 events/s over 20 partitions, a 5-second batching window would gather 250 events
+per shard, but a batch holds at most 100: each shard invokes the projector every 2 seconds,
+10 times a second in all.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1]
+runtime:
+  batching_window_seconds: 5
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id);
+-- explain page_views --
+stream page_views
+  assumptions  --rate 1000  --event-kb 1
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote
+
+layout, in us-east-1
+  table        analytics-stream-page_views: Global Table, on-demand
+  key          pk user_id; sk event_time, event_id
+  log          LOG RETENTION 2 DAY: ~190 GB in ~20 partitions, each a change-stream shard
+  projector    batching window 5 s, batches of at most 100 events: ~10 invocations/s, 100 events each on average
+  marks        a view row keeps a shard's high-water mark for 960 s after the shard's progress passes it (runtime.prune_window_seconds)
+  archive      Firehose to Iceberg in us-east-1
+
+per event, per region             write units  read units
+  event put, local or replicated         1.00
+  progress item, one per batch           0.01
+  total                                  1.01        0.00
+  per second, all events                1,010           0
+
+monthly                        per region  1 region
+  DynamoDB requests                $1,659    $1,659
+    stream and meta tables         $1,659    $1,659
+  DynamoDB storage of the log         $48       $48
+  Lambda, the projector               $86       $86
+  Firehose                           $142      $142
+  S3 archive, year-1 average          $73       $73
+  replication transfer              $0.00     $0.00
+  total                            $2,007    $2,007
+  provisioned capacity at a 70% target would cut requests to $685 per region (-59%), but costs more than on-demand if it must cover peaks over 2.42 times the average
+  not modeled: query reads, view and marker storage, backfills, archive compaction, CloudWatch
+
+warning page_views: at ~50 events/s per shard, a 5 s batching window would gather ~250 events, but a batch holds at most 100 (the event source mapping's BatchSize): batches fill before the window ends
+  hint: a longer runtime.batching_window_seconds won't make batches bigger at this rate

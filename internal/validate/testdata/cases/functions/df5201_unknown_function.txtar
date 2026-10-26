@@ -31,3 +31,8 @@ WHERE page = {page:String};
 -- want --
 dynaflux/queries.sql:2:13: error DF5201
 dynaflux/queries.sql:2:47: error DF5201
+-- want-text --
+dynaflux/queries.sql:2:13: error DF5201: PageDays: unknown function toStartOfQuarter
+  hint: use toStartOfMinute … toStartOfMonth; toStartOfWeek(t, 1) for Monday
+dynaflux/queries.sql:2:47: error DF5201: PageDays: unknown function lowerUTF8
+  hint: use lower or upper (ASCII only)

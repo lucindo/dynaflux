@@ -95,7 +95,7 @@ func (d *decoder) plainTree(n *yaml.Node) {
 			case k.Tag == "!!merge":
 				d.errorf(at(k), "DF6014", hintFullValues, "merge keys (<<) aren't allowed")
 			case dup:
-				d.errorf(at(k), "DF6006", "keep one", "duplicate key %s; the first is on line %d", k.Value, line)
+				d.errorf(at(k), "DF6006", "keep one", "duplicate key %q; the first is on line %d", k.Value, line)
 			case k.Kind == yaml.ScalarNode:
 				firstLine[k.Value] = k.Line
 			}

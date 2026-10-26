@@ -6,7 +6,8 @@
 //
 // The model generalizes the one in testdata/costs.py from its three typical views to any
 // list of views. It's rough (±30%) and uses us-east-1 list prices: a way to compare designs,
-// not a quote.
+// not a quote. [Explain] maps a compiled project onto it and writes the reports of
+// dynaflux explain.
 package explain
 
 import (
@@ -33,7 +34,8 @@ const (
 
 	shardLifeSeconds  = 4 * 3600 // a change-stream shard is replaced after at most 4 hours
 	minPollSeconds    = 0.25     // Lambda polls each shard 4 times a second
-	hwmEntryKB        = 0.029    // 29 bytes for a shard ID hash and a sequence number, in costs.py's KB of 1,000 bytes
+	maxBatchSize      = 10000    // the event source mapping's largest BatchSize
+	hwmEntryKB        = 0.029    // costs.py's figure for a ~29-byte mark; rows are sized in KB of 1,024 bytes, so a mark counts 29.7 B
 	hllKB             = 3        // dense HyperLogLog: 2^12 registers of 6 bits
 	conflictFactor    = 1.1      // conditional writes that lose a race and retry
 	txnFactor         = 2        // a transactional write costs twice the units
@@ -42,6 +44,10 @@ const (
 	archiveOverhead   = 1.2 // archived bytes per event byte
 	compression       = 6.0 // of the archive's Parquet files
 )
+
+// DefaultBatchSize is the BatchSize of an event source mapping from a DynamoDB stream that
+// doesn't set one.
+const DefaultBatchSize = 100
 
 // Arch is a Lambda architecture.
 type Arch string
@@ -64,11 +70,12 @@ type Capacity struct {
 // Store holds the store-wide settings that costs depend on.
 type Store struct {
 	Regions int
-	// BatchingWindow is how long the projector gathers a batch.
+	// BatchingWindow is how long the projector gathers a batch, and BatchSize the most
+	// events a batch holds. Lambda delivers a batch when either is reached.
 	BatchingWindow time.Duration
+	BatchSize      int
 	// HWMWindow is how long a view row keeps a delivery unit's high-water mark after that
-	// unit's last write to it: the invocation lifetime, which is the Lambda timeout plus 60
-	// seconds.
+	// unit's last write to it: the prune window, runtime.prune_window_seconds.
 	HWMWindow time.Duration
 	// MemoryMB and Arch configure the projector function.
 	MemoryMB int
@@ -209,10 +216,10 @@ func Estimate(store Store, s Stream) (StreamCost, error) {
 	c.Partitions = int(max(1, math.Ceil(c.StoredGB/partitionGB), math.Ceil(events*eventUnits/partitionWrites)))
 	units := float64(c.Partitions)
 	window := max(store.BatchingWindow.Seconds(), minPollSeconds)
-	// Poisson arrivals: a delivery unit invokes the projector for each window with an event.
-	// Expm1 keeps the precision that 1 - Exp loses at low rates. Like costs.py, the model
-	// doesn't cap a batch at the event source mapping's BatchSize.
-	perUnit := -math.Expm1(-(events/units)*window) / window
+	// Poisson arrivals: a delivery unit invokes the projector for each window with an event,
+	// or sooner when the batch fills. Expm1 keeps the precision that 1 - Exp loses at low
+	// rates. costs.py has no BatchSize; its batches stay under 100 events.
+	perUnit := max(-math.Expm1(-(events/units)*window)/window, events/units/float64(store.BatchSize))
 	c.Invocations = units * perUnit
 	c.Batch = events / c.Invocations
 
@@ -350,6 +357,8 @@ func check(store Store, s Stream) error {
 		return errors.New("no regions")
 	case store.HWMWindow <= 0:
 		return errors.New("the high-water-mark window must be positive")
+	case store.BatchSize < 1 || store.BatchSize > maxBatchSize:
+		return fmt.Errorf("the batch size must be from 1 to %d, not %d", maxBatchSize, store.BatchSize)
 	case store.MemoryMB < 1:
 		return errors.New("the projector memory must be positive")
 	case store.Arch != ArchARM64 && store.Arch != ArchX86:

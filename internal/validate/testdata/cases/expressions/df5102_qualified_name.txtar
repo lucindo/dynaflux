@@ -1,7 +1,7 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-Qualified names aren't supported.
+Qualified names aren't supported, also for event_time in ACCEPT.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
@@ -29,5 +29,15 @@ SELECT day, views
 FROM page_daily
 WHERE page = {page:String}
   AND page_daily.views > 10;
+-- dynaflux/clicks.sql --
+CREATE STREAM clicks (user_id String)
+PRIMARY KEY (user_id)
+ACCEPT clicks.event_time <= now() + INTERVAL 5 MINUTE;
 -- want --
+dynaflux/clicks.sql:3:8: error DF5102
 dynaflux/queries.sql:5:7: error DF5102
+-- want-text --
+dynaflux/clicks.sql:3:8: error DF5102: clicks: qualified name clicks.event_time is not supported
+  hint: use the column name alone
+dynaflux/queries.sql:5:7: error DF5102: BusyDays: qualified name page_daily.views is not supported
+  hint: use the column name alone

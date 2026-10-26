@@ -6,6 +6,7 @@ package validate
 import (
 	"slices"
 
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/diag"
 	"github.com/lucindo/dynaflux/internal/sql"
 )
@@ -44,6 +45,11 @@ type decl struct {
 	defines bool
 	// earlier is the first definition of name when this statement repeats it (DF1303).
 	earlier *decl
+	// stream, view and query are the compiled statement, kept only on the first
+	// definition of a name.
+	stream *streamInfo
+	view   *viewInfo
+	query  *queryInfo
 }
 
 func (d *decl) broken() bool {
@@ -107,7 +113,7 @@ func checkNames(d *decl) {
 	checkAnnotations(d)
 	if e := d.earlier; e != nil {
 		d.st.errorf(d.pos, "DF1303", "streams and views share one set of names, and queries have their own; rename one",
-			"%s is already defined at %s:%d", d.name, e.pos.File, e.pos.Line)
+			"%s is already defined at %s", d.name, posLine(e.pos))
 	}
 }
 
@@ -116,30 +122,16 @@ func checkNames(d *decl) {
 // besides the expression keywords. It reports whether the name is valid.
 func checkName(st *stmt, id sql.Ident, reserved ...string) bool {
 	switch {
-	case len(id.Qualifier) > 0:
-		st.errorf(id.Pos, "DF5102", "use the column name alone", "qualified name %s is not supported", st.text(id))
+	case qualified(st, id):
 	case sql.IsReserved(id.Name) || slices.Contains(reserved, id.Name):
 		st.errorf(id.Pos, "DF1302", "choose another name", "%s is reserved", id.Name)
-	case !isDefinedName(id.Name):
+	case !catalog.IsName(id.Name):
 		st.errorf(id.Pos, "DF1301", "names use lowercase letters, digits and _, and start with a letter",
 			"invalid name %s", id.Name)
 	default:
 		return true
 	}
 	return false
-}
-
-// isDefinedName reports whether s matches [a-z][a-z0-9_]*.
-func isDefinedName(s string) bool {
-	if s == "" || s[0] < 'a' || s[0] > 'z' {
-		return false
-	}
-	for i := range len(s) {
-		if c := s[i]; !isLowerASCII(c) && !isDigitASCII(c) && c != '_' {
-			return false
-		}
-	}
-	return true
 }
 
 // isGoName reports whether s matches [A-Z][A-Za-z0-9]*.

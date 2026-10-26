@@ -78,24 +78,27 @@ func (n *paramName) use(st *stmt, p *sql.Param) operand {
 }
 
 // paramType resolves the type of a parameter: a scalar type, or an Array of one, but no
-// Nullable or LowCardinality (DF4401).
+// Nullable or LowCardinality (DF4401). An invalid type gets its own error first.
 func paramType(st *stmt, t *sql.Type) (catalog.Type, bool) {
-	inner := t
-	if t.Name.Name == typeArray && len(t.Args) == 1 {
-		if elem, ok := t.Args[0].(*sql.Type); ok {
-			inner = elem
-		}
+	typ, ok := resolveType(st, t)
+	if !ok {
+		return catalog.Type{}, false
 	}
-	if inner.Name.Name == typeNullable || inner.Name.Name == typeLowCardinality || inner != t && inner.Name.Name == typeArray {
+	elem := t
+	if typ.Array {
+		elem, _ = typeParam(st, t) // resolveType has checked it
+	}
+	// LowCardinality(String) resolves to String, so only its spelling shows it.
+	if typ.Nullable || elem.Name.Name == typeLowCardinality {
 		st.errorf(t.Pos, "DF4401", "", "parameter type %s is not supported", st.text(t))
 		return catalog.Type{}, false
 	}
-	return resolveType(st, t)
+	return typ, true
 }
 
-// param resolves a parameter where it appears: an Array parameter goes right after IN,
-// and only there (DF4405).
-func (q *queryCompiler) param(st *stmt, p *sql.Param, role paramRole) operand {
+// resolveParam resolves a parameter where it appears: an Array parameter goes right after
+// IN, and only there (DF4405).
+func (q *queryCompiler) resolveParam(c *checker, p *sql.Param, role paramRole) operand {
 	o := q.params.ops[p]
 	if o.bad {
 		return o
@@ -103,7 +106,7 @@ func (q *queryCompiler) param(st *stmt, p *sql.Param, role paramRole) operand {
 	if o.typ().Array != (role == paramAfterIn) {
 		elem := o.typ()
 		elem.Array = false
-		st.errorf(p.Pos, "DF4405", "write x IN {"+p.Name.Name+":Array("+elem.String()+")}",
+		c.st.errorf(p.Pos, "DF4405", "write x IN {"+p.Name.Name+":Array("+elem.String()+")}",
 			"parameter %s is misplaced: an Array parameter goes only right after IN or NOT IN, and a parameter there must be an Array",
 			p.Name.Name)
 		return badOperand()

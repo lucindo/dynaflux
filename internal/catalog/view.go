@@ -36,9 +36,10 @@ func (v *View) Current() (*ViewVersion, bool) {
 
 // ViewVersion is one immutable version of a view, stored in its own table.
 //
-// [Fingerprint] hashes the JSON of every field except Number, State, Fingerprint and Mode,
-// so a new field must be omitzero or omitempty: otherwise every fingerprint changes and
-// every deployed view gets a new version.
+// [Fingerprint] hashes the JSON of every field except Number, State, Fingerprint and Mode.
+// So a field added here, or to a type a version holds (Expr, NamedExpr, ArrayJoin, ViewTTL,
+// ViewAggregate), must be omitzero or omitempty, even when only queries use it: otherwise
+// every fingerprint changes and every deployed view gets a new version.
 type ViewVersion struct {
 	// Number is the version number from dynaflux.lock, starting at 1.
 	Number      int          `json:"number"`

@@ -26,12 +26,9 @@ type Stream struct {
 	Columns []Column `json:"columns,omitempty"`
 	// PrimaryKey names the partition key columns, in order.
 	PrimaryKey []string `json:"primary_key,omitempty"`
-	// DedupBy names the DEDUP BY columns, in order; empty without DEDUP BY. It sets the
-	// event_id scheme of storage format 1. Without DEDUP BY, event_id is a ULID that the
-	// writer makes. With it, event_id is a 128-bit hash of the encoded PRIMARY KEY values,
-	// event_time in microseconds and DEDUP BY values, as 26 characters of Crockford base32.
-	// That is the identity that makes two appends duplicates, so distinct stored events
-	// never share an event_id.
+	// DedupBy names the DEDUP BY columns, in order. With them, event_id is a hash of the
+	// event's PRIMARY KEY values, event_time and DEDUP BY values instead of a ULID that the
+	// writer makes (sql.md §8.5).
 	DedupBy      []string  `json:"dedup_by,omitempty"`
 	LogRetention Retention `json:"log_retention"`
 	Accept       Accept    `json:"accept"`

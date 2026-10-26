@@ -12,7 +12,9 @@ import (
 )
 
 // orderBy checks ORDER BY (sql.md §10.8) and returns the full sort order: its items, then
-// the row key columns they don't sort by, ascending, which break ties.
+// the row key columns they don't sort by, which break ties. The tie-breakers take the
+// direction of the last item, so ORDER BY event_time DESC reads the key in reverse and
+// LIMIT can stop the read.
 func (q *queryCompiler) orderBy() []catalog.OrderItem {
 	var items []catalog.OrderItem
 	if ob := q.sel.OrderBy; ob != nil {
@@ -22,9 +24,10 @@ func (q *queryCompiler) orderBy() []catalog.OrderItem {
 			}
 		}
 	}
+	desc := len(items) > 0 && items[len(items)-1].Desc
 	for _, k := range q.rowKey() {
 		if !slices.ContainsFunc(items, func(it catalog.OrderItem) bool { return reflect.DeepEqual(it.Expr, k) }) {
-			items = append(items, catalog.OrderItem{Expr: k})
+			items = append(items, catalog.OrderItem{Expr: k, Desc: desc})
 		}
 	}
 	return items
@@ -55,9 +58,9 @@ func (q *queryCompiler) orderExpr(it *sql.OrderItem) (catalog.Expr, bool) {
 // doesn't aggregate, or a GROUP BY key when it does (DF4301).
 func (q *queryCompiler) orderColumn(ref *sql.ColumnRef) operand {
 	if q.byName[ref.Name] != nil {
-		return q.columns[ref.Name]
+		return q.outputs[ref.Name]
 	}
-	o, found := q.sourceColumn(ref)
+	o, found := q.source(q.st, ref)
 	switch {
 	case !found:
 		return unknownColumn(q.st, ref, q.visible(true))
@@ -111,7 +114,7 @@ func (q *queryCompiler) limit() *catalog.Expr {
 		return &lit
 	}
 	if p, ok := l.X.(*sql.Param); ok {
-		o := q.param(q.st, p, paramValue)
+		o := q.checker(q.st, "LIMIT", nil).param(p, paramValue)
 		if o.bad {
 			return nil
 		}

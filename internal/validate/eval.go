@@ -160,29 +160,17 @@ func evalArith(e catalog.Expr, args []cval) (cval, error) {
 	if isFloat(e.Type) {
 		return evalFloat(sym, e, args)
 	}
-	x := num(args[0], e.Args[0].Type)
+	// A constant is an integer or a Float64 here: a Decimal needs a Decimal column or
+	// parameter, which a DEFAULT can't use.
+	x := args[0].num.Num()
 	if sym == opNegate {
-		return fitResult(new(big.Rat).Neg(x), e.Type)
+		return cval{num: new(big.Rat).SetInt(wrap(new(big.Int).Neg(x), e.Type))}, nil
 	}
-	y := num(args[1], e.Args[1].Type)
-	if (sym == opDivide || sym == opModulo || sym == opIntDiv) && y.Sign() == 0 {
+	y := args[1].num.Num()
+	if (sym == opModulo || sym == opIntDiv) && y.Sign() == 0 {
 		return cval{}, errEval
 	}
-	if isInteger(e.Type) {
-		return evalInteger(sym, e, x.Num(), y.Num())
-	}
-	var r *big.Rat
-	switch sym {
-	case opPlus:
-		r = new(big.Rat).Add(x, y)
-	case opMinus:
-		r = new(big.Rat).Sub(x, y)
-	case opTimes:
-		r = new(big.Rat).Mul(x, y)
-	default:
-		r = truncate(new(big.Rat).Quo(x, y), e.Type.Scale)
-	}
-	return fitResult(r, e.Type)
+	return evalInteger(sym, e, x, y)
 }
 
 func evalFloat(sym string, e catalog.Expr, args []cval) (cval, error) {
@@ -258,36 +246,6 @@ func intRange(t catalog.Type) (*big.Int, *big.Int) {
 	return lo, hi.Sub(hi, big.NewInt(1))
 }
 
-// truncate cuts r toward zero to scale fractional digits.
-func truncate(r *big.Rat, scale int) *big.Rat {
-	pow := pow10(scale)
-	m := new(big.Int).Quo(new(big.Int).Mul(r.Num(), pow), r.Denom())
-	return new(big.Rat).SetFrac(m, pow)
-}
-
 func pow10(n int) *big.Int {
 	return new(big.Int).Exp(big.NewInt(decimalBase), big.NewInt(int64(n)), nil)
-}
-
-// fitResult wraps an integer result, and checks a Decimal result against the storage of
-// its precision class (sql.md §5.6): 32 bits for 9, 64 bits for 18, and 38 digits for 38.
-func fitResult(r *big.Rat, t catalog.Type) (cval, error) {
-	if isInteger(t) {
-		return cval{num: new(big.Rat).SetInt(wrap(r.Num(), t))}, nil
-	}
-	m := new(big.Int).Mul(r.Num(), pow10(t.Scale))
-	m.Quo(m, r.Denom())
-	var fits bool
-	switch decimalClass(t.Precision) {
-	case class9:
-		fits = m.IsInt64() && m.Int64() >= math.MinInt32 && m.Int64() <= math.MaxInt32
-	case class18:
-		fits = m.IsInt64()
-	default:
-		fits = new(big.Int).Abs(m).Cmp(pow10(class38)) < 0
-	}
-	if !fits {
-		return cval{}, errEval
-	}
-	return cval{num: r}, nil
 }

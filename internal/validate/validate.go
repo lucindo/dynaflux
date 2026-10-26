@@ -30,10 +30,7 @@ func Load(fsys fs.FS, root string) (*config.Config, *catalog.Catalog, []diag.Dia
 		diag.Sort(ds)
 		return nil, nil, ds
 	}
-	p := &project{
-		cfg: cfg, tables: map[string]*decl{}, queries: map[string]*decl{},
-		streams: map[string]*streamInfo{}, views: map[string]*viewInfo{}, queryInfos: map[*decl]*queryInfo{},
-	}
+	p := &project{cfg: cfg, tables: map[string]*decl{}, queries: map[string]*decl{}}
 	for _, path := range paths {
 		p.parse(fsys, path)
 	}
@@ -56,12 +53,6 @@ type project struct {
 	// one namespace, and queries have their own.
 	tables  map[string]*decl
 	queries map[string]*decl
-	// streams and views are the compiled streams and views, by name, from their first
-	// definition.
-	streams map[string]*streamInfo
-	views   map[string]*viewInfo
-	// queryInfos are the compiled queries, by statement.
-	queryInfos map[*decl]*queryInfo
 }
 
 func (p *project) parse(fsys fs.FS, path string) {
@@ -106,31 +97,19 @@ func (p *project) compile() *catalog.Catalog {
 
 func (p *project) catalog() *catalog.Catalog {
 	c := &catalog.Catalog{
-		Store:          p.cfg.Store,
-		Regions:        p.cfg.Regions,
-		TimeoutSeconds: p.cfg.Runtime.TimeoutSeconds,
-	}
-	for _, s := range p.compiledStreams() {
-		c.Streams = append(c.Streams, s.stream)
-	}
-	for _, v := range p.compiledViews() {
-		c.Views = append(c.Views, catalog.View{Name: v.decl.name, Versions: []catalog.ViewVersion{v.version}})
+		Store:              p.cfg.Store,
+		Regions:            p.cfg.Regions,
+		PruneWindowSeconds: p.cfg.Runtime.PruneWindowSeconds,
 	}
 	for _, d := range p.decls {
-		if q, ok := p.queryInfos[d]; ok && d.defines && d.earlier == nil {
-			c.Queries = append(c.Queries, q.query)
+		switch {
+		case d.stream != nil:
+			c.Streams = append(c.Streams, d.stream.stream)
+		case d.view != nil:
+			c.Views = append(c.Views, catalog.View{Name: d.name, Versions: []catalog.ViewVersion{d.view.version}})
+		case d.query != nil:
+			c.Queries = append(c.Queries, d.query.query)
 		}
 	}
 	return c
-}
-
-// compiledStreams returns the compiled streams in source order.
-func (p *project) compiledStreams() []*streamInfo {
-	var out []*streamInfo
-	for _, d := range p.decls {
-		if s, ok := p.streams[d.name]; ok && s.decl == d {
-			out = append(out, s)
-		}
-	}
-	return out
 }

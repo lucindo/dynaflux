@@ -30,6 +30,7 @@ runtime:
   out: cmd/dynaflux-runtime
   arch: arm64                         # arm64 | x86_64
   timeout_seconds: 60
+  prune_window_seconds: 960
   memory_mb: 1024
   batching_window_seconds: 1
   split: store                        # store | stream
@@ -109,6 +110,7 @@ func TestLoadDiagnostics(t *testing.T) {
 		{"DF6014 non-specific tag", base + "prefix: ! prod-\n", []string{"3:9 error DF6014"}},
 		{"DF6007 string for a list", "store: analytics\nregions: us-east-1\n", []string{"2:10 error DF6007"}},
 		{"DF6007 yes for a boolean", base + "archive:\n  enabled: yes\n", []string{"4:12 error DF6007"}},
+		{"DF6007 quoted boolean", base + "archive:\n  enabled: \"true\"\n", []string{"4:12 error DF6007"}},
 		{
 			"DF6007 integer spellings",
 			base + "runtime:\n  memory_mb: 1024.0\n  timeout_seconds: 0x3c\n  batching_window_seconds: \"1\"\n",
@@ -128,6 +130,8 @@ func TestLoadDiagnostics(t *testing.T) {
 		{"DF6008 missing store", "regions: [us-east-1]\n", []string{"1:1 error DF6008"}},
 		{"DF6008 null store", "store:\nregions: [us-east-1]\n", []string{"1:1 error DF6008"}},
 		{"DF6008 null tables entry", base + "tables: {page_daily: }\n", []string{"3:10 error DF6008"}},
+		{"DF6008 empty archive.streams entry", base + "archive:\n  streams:\n    page_views: {}\n", []string{"5:17 error DF6008"}},
+		{"DF6008 null archive.streams entry", base + "archive: {streams: {page_views: }}\n", []string{"3:21 error DF6008"}},
 		{
 			"DF6008 missing domain name",
 			base + "http:\n  frontend: http_api\n  domain: {routing: latency}\n",
@@ -145,7 +149,14 @@ func TestLoadDiagnostics(t *testing.T) {
 			[]string{"4:13 error DF6009"},
 		},
 		{"DF6009 archive regions", base + "archive:\n  regions: everywhere\n", []string{"4:12 error DF6009"}},
+		{
+			"DF6009 split hides the store-wide projector name",
+			"store: " + strings.Repeat("a", 55) + "\nregions: [us-east-1]\nruntime: {split: Stream}\n",
+			[]string{"3:18 error DF6009"},
+		},
 		{"DF6010 below the Lambda minimum", base + "runtime:\n  memory_mb: 64\n", []string{"4:14 error DF6010"}},
+		{"DF6010 prune window of 0", base + "runtime:\n  prune_window_seconds: 0\n", []string{"4:25 error DF6010"}},
+		{"DF6010 prune window over 25 hours", base + "runtime:\n  prune_window_seconds: 90001\n", []string{"4:25 error DF6010"}},
 		{
 			"DF6010 beyond 64 bits",
 			base + "runtime:\n  timeout_seconds: 99999999999999999999\n",
@@ -159,7 +170,9 @@ func TestLoadDiagnostics(t *testing.T) {
 		},
 		{"DF6011 empty regions", "store: analytics\nregions: []\n", []string{"2:10 error DF6011"}},
 		{"DF6011 empty sql", base + "sql: []\n", []string{"3:6 error DF6011"}},
+		{"DF6011 empty archive.regions counts as all", base + "archive: {regions: [], events: local}\n", []string{"3:20 error DF6011"}},
 		{"DF6012 repeated region", "store: analytics\nregions: [us-east-1, us-east-1]\n", []string{"2:22 error DF6012"}},
+		{"DF6012 repeated archive region", base + "archive:\n  regions: [us-east-1, us-east-1]\n", []string{"4:24 error DF6012"}},
 		{
 			"DF6012 pattern repeated after cleaning",
 			base + "sql: [dynaflux/*.sql, ./dynaflux/*.sql]\n",
@@ -170,6 +183,7 @@ func TestLoadDiagnostics(t *testing.T) {
 		{"DF6101 underscore in store", "store: web_analytics\nregions: [us-east-1]\n", []string{"1:8 error DF6101"}},
 		{"DF6102 prefix without -", base + "prefix: prod\n", []string{"3:9 error DF6102"}},
 		{"DF6103 bad region", "store: analytics\nregions: [us-east]\n", []string{"2:11 error DF6103"}},
+		{"DF6103 one-word region", "store: analytics\nregions: [useast-1]\n", []string{"2:11 error DF6103"}},
 		{
 			"DF6110 projector name of 65 characters",
 			"store: " + strings.Repeat("a", 55) + "\nregions: [us-east-1]\n",
@@ -222,6 +236,29 @@ func TestLoadDiagnostics(t *testing.T) {
 			base + "go:\n  out: pkg/internal/flux\nruntime:\n  out: cmd/rt\n",
 			[]string{"6:8 error DF6304"},
 		},
+		{
+			"DF6304 sibling that shares a name prefix",
+			base + "go: {out: pkg/internal/flux}\nruntime: {out: pkg2/rt}\n",
+			[]string{"4:16 error DF6304"},
+		},
+		{
+			"DF6305 prune window under timeout + 60",
+			base + "runtime:\n  timeout_seconds: 300\n  prune_window_seconds: 359\n",
+			[]string{"5:25 error DF6305"},
+		},
+		{"DF6305 against the default timeout", base + "runtime:\n  prune_window_seconds: 119\n", []string{"4:25 error DF6305"}},
+		{
+			"DF6305 needs a valid timeout",
+			base + "runtime:\n  timeout_seconds: 901\n  prune_window_seconds: 100\n",
+			[]string{"4:20 error DF6010"},
+		},
+		{"DF6306 at timeout + 60", base + "runtime:\n  prune_window_seconds: 120\n", []string{"4:25 warning DF6306"}},
+		{"DF6306 just under 960", base + "runtime:\n  prune_window_seconds: 959\n", []string{"4:25 warning DF6306"}},
+		{
+			"DF6305 just under 960 with the longest timeout",
+			base + "runtime:\n  timeout_seconds: 900\n  prune_window_seconds: 959\n",
+			[]string{"5:25 error DF6305"},
+		},
 		{"DF6401 uppercase unit", base + "defaults:\n  log_retention: 2D\n", []string{"4:18 error DF6401"}},
 		{"DF6401 two pairs", base + "defaults:\n  log_retention: 1d12h\n", []string{"4:18 error DF6401"}},
 		{"DF6401 leading zero", base + "defaults:\n  log_retention: 02d\n", []string{"4:18 error DF6401"}},
@@ -261,6 +298,16 @@ func TestLoadDiagnostics(t *testing.T) {
 			base + "http:\n  frontend: http_api\n  domain: {name: localhost}\n",
 			[]string{"5:18 error DF6606"},
 		},
+		{
+			"DF6606 label of 64 characters",
+			base + "http:\n  frontend: http_api\n  domain: {name: " + strings.Repeat("a", 64) + ".com}\n",
+			[]string{"5:18 error DF6606"},
+		},
+		{
+			"DF6606 name of 254 characters",
+			base + "http:\n  frontend: http_api\n  domain: {name: " + strings.Repeat("a.", 126) + "ab}\n",
+			[]string{"5:18 error DF6606"},
+		},
 		{"DF6607 api_key", base + "http:\n  frontend: rest_api\n  auth: api_key\n", []string{"5:9 warning DF6607"}},
 	}
 	for _, tt := range tests {
@@ -298,6 +345,13 @@ func TestLoadAccepts(t *testing.T) {
 		{"pattern cleaned", base + "sql: [./dynaflux/**/*.sql, \"dynaflux/_drafts/*.sql\"]\n"},
 		{"quoted <<", base + "tables: {'<<': {capacity: on_demand}}\n"},
 		{"auth none confirmed is only a warning", base + "http: {auth: none, allow_public: true}\n"},
+		{"prune window of 960 with the longest timeout", base + "runtime: {timeout_seconds: 900, prune_window_seconds: 960}\n"},
+		{"prune window of 25 hours", base + "runtime: {prune_window_seconds: 90000}\n"},
+		{
+			"domain name of 253 characters with a label of 63",
+			base + "http: {frontend: http_api, domain: {name: " +
+				strings.Repeat(strings.Repeat("a", 63)+".", 3) + strings.Repeat("a", 61) + "}}\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -462,7 +516,7 @@ func TestLoadAuth(t *testing.T) {
 func TestLoadMessage(t *testing.T) {
 	t.Parallel()
 	_, ds := load(strings.Replace(completeExample, "memory_mb: 1024", "memory_mb: 64", 1))
-	want := "dynaflux.yaml:14:14: error DF6010: runtime.memory_mb is 64; it must be between 128 and 10240\n" +
+	want := "dynaflux.yaml:15:14: error DF6010: runtime.memory_mb is 64; it must be between 128 and 10240\n" +
 		"  hint: Lambda functions take 128 to 10240 MB of memory"
 	if len(ds) != 1 || ds[0].String() != want {
 		t.Errorf("diagnostics = %v, want\n%s", ds, want)
@@ -489,8 +543,8 @@ func TestLoadDefaults(t *testing.T) {
 		SQL:     []config.Pattern{{Glob: "dynaflux/**/*.sql", Pos: pos(1, 1)}},
 		Go:      config.Go{Package: "flux", Out: "internal/flux"},
 		Runtime: config.Runtime{
-			Out: "cmd/dynaflux-runtime", Arch: config.ArchARM64, TimeoutSeconds: 60, MemoryMB: 1024,
-			BatchingWindowSeconds: 1, Split: config.SplitStore,
+			Out: "cmd/dynaflux-runtime", Arch: config.ArchARM64, TimeoutSeconds: 60, PruneWindowSeconds: 960,
+			MemoryMB: 1024, BatchingWindowSeconds: 1, Split: config.SplitStore,
 		},
 		Infra: config.Infra{Format: config.InfraFormatSAM, Out: "infra/dynaflux"},
 		Defaults: config.Defaults{
@@ -523,19 +577,19 @@ func TestLoadComplete(t *testing.T) {
 		SQL:     []config.Pattern{{Glob: "dynaflux/**/*.sql", Pos: pos(4, 7)}},
 		Go:      config.Go{Package: "flux", Out: "internal/flux"},
 		Runtime: config.Runtime{
-			Out: "cmd/dynaflux-runtime", Arch: config.ArchARM64, TimeoutSeconds: 60, MemoryMB: 1024,
-			BatchingWindowSeconds: 1, Split: config.SplitStore,
+			Out: "cmd/dynaflux-runtime", Arch: config.ArchARM64, TimeoutSeconds: 60, PruneWindowSeconds: 960,
+			MemoryMB: 1024, BatchingWindowSeconds: 1, Split: config.SplitStore,
 		},
 		Infra: config.Infra{Format: config.InfraFormatSAM, Out: "infra/dynaflux"},
 		Defaults: config.Defaults{
 			Capacity:        config.Capacity{Mode: config.CapacityOnDemand},
 			ViewMode:        catalog.ModeAsync,
 			LogRetention:    catalog.RetainFor(catalog.Interval{N: 2, Unit: catalog.UnitDay}),
-			LogRetentionPos: pos(25, 18),
+			LogRetentionPos: pos(26, 18),
 		},
 		Tables: []config.Table{{
 			Name: "page_daily",
-			Pos:  pos(28, 3),
+			Pos:  pos(29, 3),
 			Capacity: config.Capacity{Mode: config.CapacityProvisioned, Autoscaling: &config.Autoscaling{
 				Read:  config.Scaling{Min: 5, Max: 500, TargetPercent: 70},
 				Write: config.Scaling{Min: 5, Max: 1000, TargetPercent: 60},
@@ -545,7 +599,7 @@ func TestLoadComplete(t *testing.T) {
 			Enabled: true, Catalog: config.ArchiveCatalogGlue,
 			Regions: []string{"us-east-1", "us-west-2", "ap-northeast-1"},
 			Events:  catalog.ArchiveEventsAll,
-			Streams: []config.ArchiveStream{{Name: "debug_events", Pos: pos(40, 5), Enabled: false, EnabledPos: pos(40, 29)}},
+			Streams: []config.ArchiveStream{{Name: "debug_events", Pos: pos(41, 5), Enabled: false, EnabledPos: pos(41, 29)}},
 		},
 		HTTP: config.HTTP{
 			Frontend: config.FrontendHTTPAPI, Auth: config.AuthIAM,
@@ -562,7 +616,7 @@ func TestLoadSettings(t *testing.T) {
 	cfg, ds := load(base + `prefix: staging-
 sql: [queries/*.sql]
 go: {package: gen, out: pkg/gen}
-runtime: {out: cmd/rt, arch: x86_64, timeout_seconds: 900, memory_mb: 10240, batching_window_seconds: 0, split: stream}
+runtime: {out: cmd/rt, arch: x86_64, timeout_seconds: 900, prune_window_seconds: 1000, memory_mb: 10240, batching_window_seconds: 0, split: stream}
 infra: {out: deploy}
 defaults:
   capacity: provisioned
@@ -583,7 +637,7 @@ http: {frontend: rest_api, auth: cognito}
 		SQL:     []config.Pattern{{Glob: "queries/*.sql", Pos: pos(4, 7)}},
 		Go:      config.Go{Package: "gen", Out: "pkg/gen"},
 		Runtime: config.Runtime{
-			Out: "cmd/rt", Arch: config.ArchX8664, TimeoutSeconds: 900, MemoryMB: 10240,
+			Out: "cmd/rt", Arch: config.ArchX8664, TimeoutSeconds: 900, PruneWindowSeconds: 1000, MemoryMB: 10240,
 			BatchingWindowSeconds: 0, Split: config.SplitStream,
 		},
 		Infra: config.Infra{Format: config.InfraFormatSAM, Out: "deploy"},

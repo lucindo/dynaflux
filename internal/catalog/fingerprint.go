@@ -23,8 +23,9 @@ const fingerprintScheme = 1
 //
 // The hash is over the JSON {"scheme":1,"version":V}, where V is the version's JSON form
 // without the ignored fields. Object keys are sorted, there is no insignificant
-// whitespace, strings escape only '"', '\', control characters, U+2028 and U+2029, and
-// numbers are written as encoding/json writes a Go int or float64.
+// whitespace, and numbers are written as encoding/json writes a Go int or float64. Strings
+// escape only '"' and '\' (as \" and \\), the characters below U+0020 (as \b, \f, \n, \r
+// and \t, or else \u00xx in lowercase hex), and U+2028 and U+2029 (as \u2028 and \u2029).
 func Fingerprint(v *ViewVersion) (string, error) {
 	if v == nil {
 		return "", errors.New("fingerprint: view version is nil")

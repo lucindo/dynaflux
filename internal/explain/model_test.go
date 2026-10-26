@@ -81,6 +81,7 @@ func model(t *testing.T, in inputs) (explain.Store, explain.Stream) {
 	store := explain.Store{
 		Regions:        in.Regions,
 		BatchingWindow: time.Duration(in.WindowS * float64(time.Second)),
+		BatchSize:      100,
 		HWMWindow:      hwmWindow,
 		MemoryMB:       1024,
 		Arch:           explain.ArchARM64,
@@ -350,6 +351,15 @@ func TestEstimateDeployment(t *testing.T) {
 		near(t, "Invocations", got.Invocations, 79.99970186774624, 1e-9)
 		near(t, "Batch", got.Batch, 12.50004658333825, 1e-9)
 	})
+	t.Run("batch size caps batches before the window ends", func(t *testing.T) {
+		t.Parallel()
+		store, stream := model(t, scenarioA())
+		store.BatchSize = 10
+		got := estimate(t, store, stream)
+		// 1,000 events/s in batches of 10.
+		near(t, "Invocations", got.Invocations, 100, 1e-12)
+		near(t, "Batch", got.Batch, 10, 1e-12)
+	})
 	t.Run("provisioned stream table only", func(t *testing.T) {
 		t.Parallel()
 		store, stream := model(t, scenarioA())
@@ -371,6 +381,8 @@ func TestEstimateRejects(t *testing.T) {
 	}{
 		{"no regions", func(s *explain.Store, _ *explain.Stream) { s.Regions = 0 }, "no regions"},
 		{"no high-water-mark window", func(s *explain.Store, _ *explain.Stream) { s.HWMWindow = 0 }, "high-water-mark"},
+		{"no batch size", func(s *explain.Store, _ *explain.Stream) { s.BatchSize = 0 }, "batch size"},
+		{"batch size over the maximum", func(s *explain.Store, _ *explain.Stream) { s.BatchSize = 10001 }, "batch size"},
 		{"no projector memory", func(s *explain.Store, _ *explain.Stream) { s.MemoryMB = 0 }, "memory"},
 		{"unknown arch", func(s *explain.Store, _ *explain.Stream) { s.Arch = "" }, "architecture"},
 		{"no events", func(_ *explain.Store, s *explain.Stream) { s.Rate = 0 }, "rate"},

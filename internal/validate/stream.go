@@ -19,7 +19,6 @@ const (
 
 // streamInfo is a compiled stream.
 type streamInfo struct {
-	decl   *decl
 	stream catalog.Stream
 	// badColumns are the declared columns with an invalid name or type: what reads them
 	// is reported already.
@@ -31,7 +30,7 @@ type streamInfo struct {
 // compileStream checks a CREATE STREAM (sql.md §8) and compiles it.
 func (p *project) compileStream(d *decl, s *sql.CreateStream) {
 	st := d.st
-	info := &streamInfo{decl: d, badColumns: map[string]bool{}}
+	info := &streamInfo{badColumns: map[string]bool{}}
 	cs := catalog.Stream{Name: s.Name.Name, GoType: goType(s), StorageFormat: catalog.StorageFormatVersion}
 	if strings.HasSuffix(cs.Name, dedupSuffix) {
 		st.errorf(s.Name.Pos, "DF2101", "the archive uses "+cs.Name+" for its deduplicated Athena view",
@@ -58,7 +57,7 @@ func (p *project) compileStream(d *decl, s *sql.CreateStream) {
 	cs.Archive = p.archive(cs.Name)
 	info.stream = cs
 	if d.earlier == nil {
-		p.streams[cs.Name] = info
+		d.stream = info
 	}
 }
 
@@ -113,8 +112,7 @@ func keyColumns(st *stmt, list *sql.NameList, clause string, cols []catalog.Colu
 		name := id.Name
 		i := slices.IndexFunc(cols, func(c catalog.Column) bool { return c.Name == name })
 		switch {
-		case len(id.Qualifier) > 0:
-			st.errorf(id.Pos, "DF5102", "use the column name alone", "qualified name %s is not supported", st.text(id))
+		case qualified(st, id):
 		case slices.Contains(names, name):
 			st.errorf(id.Pos, "DF2106", "", "%s appears twice in %s", name, clause)
 		case bad[name]:

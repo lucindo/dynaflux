@@ -6,11 +6,8 @@ package validate
 import (
 	"slices"
 	"strconv"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
-	"github.com/lucindo/dynaflux/internal/diag"
 	"github.com/lucindo/dynaflux/internal/sql"
 )
 
@@ -30,7 +27,7 @@ func (c *checker) call(x *sql.Call) operand {
 	case fn.kind == fnUnknown:
 		c.st.errorf(x.Pos, fn.code, fn.hint, "%s", fn.msg)
 	case x.Distinct:
-		c.st.errorf(c.distinctPos(x), "DF5207", "use uniqExact(x), or uniq(x) for an estimate",
+		c.st.errorf(x.DistinctPos, "DF5207", "use uniqExact(x), or uniq(x) for an estimate",
 			"DISTINCT inside %s is not supported", x.Name.Name)
 	case fn.kind == fnNow:
 		c.st.errorf(x.Pos, "DF5405", "pass the time as a parameter", "now() is only allowed in ACCEPT")
@@ -39,9 +36,9 @@ func (c *checker) call(x *sql.Call) operand {
 	case fn.kind == fnAggregate:
 		return c.env.aggregate(c, x, fn.agg)
 	case x.Star:
-		c.st.errorf(x.Pos, "DF5203", "", "%s doesn't accept * as argument 1", x.Name.Name)
+		c.starArg(x)
 	case x.Parametric:
-		c.st.errorf(x.Pos, "DF5205", "", "invalid parameters for %s: it takes no parameter list", x.Name.Name)
+		c.paramsError(x, "it takes no parameter list")
 	default:
 		return fn.check(c, x)
 	}
@@ -55,37 +52,6 @@ func resolveCall(st *stmt, x *sql.Call) funcRef {
 		arg = st.text(x.Args[0])
 	}
 	return resolveFunc(x, arg)
-}
-
-// distinctPos returns where DISTINCT is written in a call's first argument list.
-func (c *checker) distinctPos(x *sql.Call) diag.Pos {
-	first := x.Args
-	if x.Parametric {
-		first = x.Params
-	}
-	if len(first) == 0 {
-		return x.Pos
-	}
-	src := c.st.f.Src
-	const kw = "DISTINCT"
-	for i := first[0].Extent().Start - len(kw); i >= x.Name.End; i-- {
-		if strings.EqualFold(string(src[i:i+len(kw)]), kw) {
-			return advance(x.Pos, src[x.Start:i])
-		}
-	}
-	return x.Pos
-}
-
-// advance returns the position after text, which starts at p.
-func advance(p diag.Pos, text []byte) diag.Pos {
-	for line := range strings.Lines(string(text)) {
-		if strings.HasSuffix(line, "\n") {
-			p.Line, p.Col = p.Line+1, 1
-		} else {
-			p.Col += utf8.RuneCountInString(line)
-		}
-	}
-	return p
 }
 
 func unparen(x sql.Expr) sql.Expr {
@@ -130,6 +96,10 @@ func (c *checker) arity(x *sql.Call, fewest, most int, zone bool) bool {
 func (c *checker) argType(x *sql.Call, i int, t catalog.Type) operand {
 	c.st.errorf(x.Pos, "DF5203", "", "%s doesn't accept %s as argument %d", x.Name.Name, t, i+1)
 	return badOperand()
+}
+
+func (c *checker) starArg(x *sql.Call) {
+	c.st.errorf(x.Pos, "DF5203", "", "%s doesn't accept * as argument 1", x.Name.Name)
 }
 
 // unaryFunc returns the checker of a one-argument function. rule returns the result type
@@ -205,7 +175,7 @@ func (c *checker) multiIf(x *sql.Call) operand {
 	var whenFalse []catalog.Expr // divisors that the conditions so far rule out when false
 	ok := true
 	for i := 0; i+1 < n; i += 2 {
-		cond := c.condition(x.Args[i])
+		cond := c.guarded(whenFalse, func() operand { return c.condition(x.Args[i]) })
 		guards := whenFalse
 		if !cond.bad {
 			guards = append(slices.Clip(whenFalse), nonZeroIfTrue(cond.ir)...)
@@ -380,10 +350,7 @@ func (c *checker) toStartOfWeek(x *sql.Call) operand {
 }
 
 func (c *checker) weekMode(x sql.Expr) (catalog.Expr, bool) {
-	if p, ok := unparen(x).(*sql.Param); ok {
-		if !c.param(p, paramValue).bad {
-			c.st.errorf(p.Pos, "DF4404", "", "the toStartOfWeek mode needs a literal, not a parameter")
-		}
+	if c.rejectParam(x, "the toStartOfWeek mode") {
 		return catalog.Expr{}, false
 	}
 	if m, ok := unparen(x).(*sql.NumberLit); ok && !m.IsFloat && (!m.Neg || m.Int == 0) && m.Int <= maxWeekMode {
@@ -392,4 +359,14 @@ func (c *checker) weekMode(x sql.Expr) (catalog.Expr, bool) {
 	c.st.errorf(x.Extent().Pos, "DF5211", "0 starts weeks on Sunday, 1 on Monday",
 		"toStartOfWeek mode must be a whole number from 0 to 9")
 	return catalog.Expr{}, false
+}
+
+// rejectParam reports x when it is a parameter, where what needs a literal (DF4404), and
+// whether it is one. A parameter with its own error isn't reported again.
+func (c *checker) rejectParam(x sql.Expr, what string) bool {
+	p, ok := unparen(x).(*sql.Param)
+	if ok && !c.param(p, paramValue).bad {
+		c.st.errorf(p.Pos, "DF4404", "", "%s needs a literal, not a parameter", what)
+	}
+	return ok
 }

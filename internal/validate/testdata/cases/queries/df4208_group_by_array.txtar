@@ -1,0 +1,37 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Arrays can't be keys (sql.md §4.2), so a query can't group by one: neither by an Array
+column nor by an alias of one.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    tags    Array(String)
+)
+PRIMARY KEY (user_id);
+-- dynaflux/queries.sql --
+-- name: TagCounts :many
+SELECT tags, count() AS n
+FROM page_views
+WHERE user_id = {user:String}
+GROUP BY tags;
+
+-- name: AliasCounts :many
+SELECT tags AS t, count() AS n
+FROM page_views
+WHERE user_id = {user:String}
+GROUP BY t;
+-- want --
+dynaflux/queries.sql:3:6: warning DF4501
+dynaflux/queries.sql:5:10: error DF4208
+dynaflux/queries.sql:9:6: warning DF4501
+dynaflux/queries.sql:11:10: error DF4208
+-- want-text --
+dynaflux/queries.sql:3:6: warning DF4501: TagCounts: reads stream page_views, which keeps events for 2 DAY after ingestion (LOG RETENTION). Older events are only in the archive.
+  hint: query older events with Athena, or aggregate them in a view
+dynaflux/queries.sql:5:10: error DF4208: TagCounts: can't group by tags of type Array(String)
+  hint: to group by its elements, ARRAY JOIN it in a view
+dynaflux/queries.sql:9:6: warning DF4501: AliasCounts: reads stream page_views, which keeps events for 2 DAY after ingestion (LOG RETENTION). Older events are only in the archive.
+  hint: query older events with Athena, or aggregate them in a view
+dynaflux/queries.sql:11:10: error DF4208: AliasCounts: can't group by t of type Array(String)
+  hint: to group by its elements, ARRAY JOIN it in a view

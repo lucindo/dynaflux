@@ -18,6 +18,7 @@ runtime:
   out: cmd/dynaflux-runtime
   arch: arm64                         # arm64 | x86_64
   timeout_seconds: 60
+  prune_window_seconds: 960
   memory_mb: 1024
   batching_window_seconds: 1
   split: store                        # store | stream
@@ -78,4 +79,4 @@ GROUP BY page, day;
 CREATE STREAM debug_events (host String, message String)
 PRIMARY KEY (host);
 -- want --
-dynaflux.yaml:40:29: warning DF6504
+dynaflux.yaml:41:29: warning DF6504

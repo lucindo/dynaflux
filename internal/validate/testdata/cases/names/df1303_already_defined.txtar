@@ -2,7 +2,8 @@ Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
 Two views with one name, and a view and a stream with one name: streams and views share
-one namespace. Each diagnostic points at the later definition, by path.
+one namespace. Two queries with one name get DF1303 only, not DF1207 for their Go names.
+Each diagnostic points at the later definition, by path.
 -- dynaflux/a.sql --
 CREATE STREAM page_views (user_id String, page String)
 PRIMARY KEY (user_id);
@@ -27,6 +28,24 @@ GROUP BY page;
 -- dynaflux/d.sql --
 CREATE STREAM clicks (user_id String)
 PRIMARY KEY (user_id);
+-- dynaflux/e.sql --
+-- name: PageTotals :many
+SELECT page, views
+FROM page_totals
+WHERE page = {page:String};
+-- dynaflux/f.sql --
+-- name: PageTotals :many
+SELECT page, views
+FROM page_totals
+WHERE page = {page:String};
 -- want --
 dynaflux/b.sql:1:26: error DF1303
 dynaflux/d.sql:1:15: error DF1303
+dynaflux/f.sql:1:10: error DF1303
+-- want-text --
+dynaflux/b.sql:1:26: error DF1303: page_totals: page_totals is already defined at dynaflux/a.sql:4
+  hint: streams and views share one set of names, and queries have their own; rename one
+dynaflux/d.sql:1:15: error DF1303: clicks: clicks is already defined at dynaflux/c.sql:1
+  hint: streams and views share one set of names, and queries have their own; rename one
+dynaflux/f.sql:1:10: error DF1303: PageTotals: PageTotals is already defined at dynaflux/e.sql:1
+  hint: streams and views share one set of names, and queries have their own; rename one

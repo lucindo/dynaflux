@@ -4,7 +4,8 @@ SPDX-License-Identifier: Apache-2.0
 The compiled form of four queries, worked out from sql.md §10:
 - HourRange: an alias stands for its column, so s = binds the partition key site; = on day
   extends the sort prefix; two bounds on hour make the range; the term on clicks is the
-  residual filter; ORDER BY a source column is followed by the view key as tie-breaker.
+  residual filter; ORDER BY a source column is followed by the view key as tie-breaker, in
+  the direction of the last ORDER BY item.
 - MonthlyClicks: a GROUP BY alias groups by its expression, which Columns and ORDER BY see
   by name; aggregates are numbered in order of appearance, -IfMerge merges a sumIf column,
   quantileMerge may change the level, and an expression over an aggregate is an output.
@@ -154,9 +155,9 @@ dynaflux/queries.sql:34:6: warning DF4501: PageClicks: reads stream clicks, whic
         ],
         "order_by": [
           {"expr": {"op": "column", "type": "UInt64", "name": "page_ms"}, "desc": true, "nulls_first": true},
-          {"expr": {"op": "column", "type": "String", "name": "site"}},
-          {"expr": {"op": "column", "type": "Date", "name": "day"}},
-          {"expr": {"op": "column", "type": "DateTime", "name": "hour"}}
+          {"expr": {"op": "column", "type": "String", "name": "site"}, "desc": true},
+          {"expr": {"op": "column", "type": "Date", "name": "day"}, "desc": true},
+          {"expr": {"op": "column", "type": "DateTime", "name": "hour"}, "desc": true}
         ],
         "limit": {"op": "literal", "type": "UInt8", "value": "5"}
       },

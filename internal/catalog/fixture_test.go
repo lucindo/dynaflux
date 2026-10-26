@@ -48,15 +48,15 @@ func interval(n int, unit catalog.Unit) catalog.Interval {
 // fixture is the store of sql.md §12.1 and §12.2, extended so that it uses every catalog
 // field: page_views gives tags a DEFAULT; api_calls has a go:type, LOG RETENTION FOREVER,
 // SHARDS 4 and no archive; page_daily has a retained v1; quota_usage adds a countIf and a
-// quantile; tag_hourly has SPLIT 2; and RecentPageViews filters on referrer. Lists are in
-// canonical order, and fingerprints are computed.
+// quantile; tag_hourly has SPLIT 2; and RecentPageViews filters on referrer and sorts
+// NULLS FIRST. Lists are in canonical order, and fingerprints are computed.
 func fixture(t *testing.T) *catalog.Catalog {
 	t.Helper()
 	c := &catalog.Catalog{
-		Store:          "analytics",
-		Regions:        []string{"us-east-1", "us-west-2"},
-		TimeoutSeconds: 60,
-		Streams:        []catalog.Stream{apiCalls(), pageViews()},
+		Store:              "analytics",
+		Regions:            []string{"us-east-1", "us-west-2"},
+		PruneWindowSeconds: 960,
+		Streams:            []catalog.Stream{apiCalls(), pageViews()},
 		Views: []catalog.View{
 			{Name: "page_daily", Versions: []catalog.ViewVersion{pageDailyV1(), pageDailyV2()}},
 			{Name: "quota_usage", Versions: []catalog.ViewVersion{quotaUsage()}},
@@ -278,7 +278,7 @@ func recentPageViews() catalog.Query {
 			{Name: "duration_ms", Expr: col("duration_ms", u32T())},
 		},
 		OrderBy: []catalog.OrderItem{
-			{Expr: col("event_time", microsT()), Desc: true},
+			{Expr: col("event_time", microsT()), Desc: true, NullsFirst: true},
 			{Expr: col("event_id", strT())},
 		},
 		Limit: new(param("n", u32T())),

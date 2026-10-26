@@ -108,3 +108,47 @@ func TestRetentionText(t *testing.T) {
 		t.Errorf("MarshalText(1 QUARTER) = %q, want an error", text)
 	}
 }
+
+func TestParseUnit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		word string
+		want catalog.Unit
+		ok   bool
+	}{
+		{"MINUTE", catalog.UnitMinute, true},
+		{"minutes", catalog.UnitMinute, true},
+		{"Day", catalog.UnitDay, true},
+		{"QUARTERS", catalog.UnitQuarter, true},
+		{"SECONDSS", "", false},
+		{"S", "", false},
+		{"MIN", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		if got, ok := catalog.ParseUnit(tt.word); got != tt.want || ok != tt.ok {
+			t.Errorf("ParseUnit(%q) = %q, %v; want %q, %v", tt.word, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+// INTERVAL takes at most 100 years of 365.25 days in any unit (sql.md §8.1).
+func TestUnitMax(t *testing.T) {
+	t.Parallel()
+	tests := map[catalog.Unit]uint64{
+		catalog.UnitSecond:  3_155_760_000,
+		catalog.UnitMinute:  52_596_000,
+		catalog.UnitHour:    876_600,
+		catalog.UnitDay:     36_525,
+		catalog.UnitWeek:    5_217,
+		catalog.UnitMonth:   1_200,
+		catalog.UnitQuarter: 400,
+		catalog.UnitYear:    100,
+		"FORTNIGHT":         0,
+	}
+	for u, want := range tests {
+		if got := u.Max(); got != want {
+			t.Errorf("%s.Max() = %d, want %d", u, got, want)
+		}
+	}
+}

@@ -36,7 +36,20 @@ func (s *stmt) warnf(pos diag.Pos, code, hint, format string, args ...any) {
 	s.d.add(diag.SeverityWarning, s.name, pos, code, hint, fmt.Sprintf(format, args...))
 }
 
+// quiet returns a stmt like s that reports nothing, for checking again what s reports.
+func (s *stmt) quiet() *stmt {
+	return &stmt{d: &diags{}, f: s.f, name: s.name}
+}
+
 // text returns the source text of n as diagnostics quote it.
 func (s *stmt) text(n sql.Node) string {
 	return s.f.Text(n)
+}
+
+// didYouMean returns the hint that suggests a name, or "".
+func didYouMean(s string, candidates []string) string {
+	if c, ok := diag.Suggest(s, candidates); ok {
+		return "did you mean " + c + "?"
+	}
+	return ""
 }

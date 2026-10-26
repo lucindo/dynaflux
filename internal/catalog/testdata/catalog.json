@@ -6,7 +6,7 @@
       "us-east-1",
       "us-west-2"
     ],
-    "timeout_seconds": 60,
+    "prune_window_seconds": 960,
     "streams": [
       {
         "name": "api_calls",
@@ -718,7 +718,8 @@
               "type": "DateTime64(6)",
               "name": "event_time"
             },
-            "desc": true
+            "desc": true,
+            "nulls_first": true
           },
           {
             "expr": {

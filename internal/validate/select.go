@@ -20,33 +20,38 @@ type output struct {
 	key bool
 }
 
-// selectOutputs names the SELECT items (sql.md §5.3). It reports SELECT * (DF4002), an
-// item that needs an alias (DF5106), a duplicate name (DF5104), an alias that is a column
-// of source (DF5103), and an alias that a definition can't use (DF1301, DF1302).
-// isColumn tells the columns of source; nil means they're unknown.
-func selectOutputs(st *stmt, items []*sql.SelectItem, source string, isColumn func(string) bool, reserved ...string) []*output {
+// selectOutputs names the SELECT items (sql.md §5.3), and returns them with the first
+// output of each name. It reports SELECT * (DF4002), an item that needs an alias (DF5106),
+// a duplicate name (DF5104), an alias that is a column of source (DF5103), and an alias
+// that a definition can't use (DF1301, DF1302).
+func selectOutputs(st *stmt, items []*sql.SelectItem, source string, isColumn func(string) bool,
+	reserved ...string,
+) ([]*output, map[string]*output) {
 	var outs []*output
-	seen := map[string]bool{}
+	byName := map[string]*output{}
 	for _, item := range items {
 		if item.Star {
 			st.errorf(item.Pos, "DF4002", "list the columns", "SELECT * is not supported")
 			continue
 		}
 		out := outputName(st, item, source, isColumn, reserved)
-		if out.name != "" && seen[out.name] {
+		switch {
+		case out.name == "":
+		case byName[out.name] != nil:
 			st.errorf(out.pos, "DF5104", "", "duplicate output column %s", out.name)
+		default:
+			byName[out.name] = out
 		}
-		seen[out.name] = true
 		outs = append(outs, out)
 	}
-	return outs
+	return outs, byName
 }
 
 func outputName(st *stmt, item *sql.SelectItem, source string, isColumn func(string) bool, reserved []string) *output {
 	if a := item.Alias; a != nil {
 		checkName(st, *a, reserved...)
-		if isColumn != nil && isColumn(a.Name) {
-			st.errorf(a.Pos, "DF5103", "choose another alias", "alias %s is also a column of %s", a.Name, source)
+		if isColumn(a.Name) {
+			aliasIsColumn(st, *a, source)
 		}
 		return &output{item: item, name: a.Name, pos: a.Pos}
 	}
@@ -55,6 +60,11 @@ func outputName(st *stmt, item *sql.SelectItem, source string, isColumn func(str
 	}
 	st.errorf(item.X.Extent().Pos, "DF5106", "add AS <name>", "%s needs a name", st.text(item.X))
 	return &output{item: item, pos: item.Pos}
+}
+
+// aliasIsColumn reports an alias that is also a column of source (DF5103).
+func aliasIsColumn(st *stmt, alias sql.Ident, source string) {
+	st.errorf(alias.Pos, "DF5103", "choose another alias", "alias %s is also a column of %s", alias.Name, source)
 }
 
 // groupByNames returns the names that GROUP BY lists. Each item must be a name (DF5107),

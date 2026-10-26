@@ -1,0 +1,92 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+costs.py's scenario B1: a log kept a year, with high-water marks kept for 25 hours, the
+longest prune window. Every one of the ~25,150 shards that write a page_daily row within
+the window leaves a mark, so the row passes DynamoDB's 400 KB item limit, which is an
+error.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2, ap-northeast-1]
+runtime:
+  prune_window_seconds: 90000
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id)
+LOG RETENTION 365 DAY;
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views, sum(duration_ms) AS total_ms
+FROM page_views
+GROUP BY page, day;
+-- explain page_views --
+stream page_views
+  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
+
+layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
+  table        analytics-stream-page_views: Global Table, on-demand
+  key          pk user_id; sk event_time, event_id
+  log          LOG RETENTION 365 DAY: ~34,690 GB in ~3,469 partitions, each a change-stream shard
+  projector    batching window 1 s, batches of at most 100 events: ~869 invocations/s, 1.15 events each on average
+  marks        a view row keeps a shard's high-water mark for 90000 s after the shard's progress passes it (runtime.prune_window_seconds)
+  archive      Firehose to Iceberg in us-east-1, us-west-2, ap-northeast-1
+
+per event, per region                                     write units  read units
+  event put, local or replicated                                 1.00
+  TTL delete, replicated from the region that expires it         0.67
+  page_daily, shared rows, 1,000 active                        802.94      201.28
+  progress item, one per batch                                   0.87
+  total                                                        805.47      201.28
+  per second, all events                                      805,475     201,285
+
+monthly                        per region  3 regions
+  DynamoDB requests                $4,164    $12,493
+    stream and meta tables         $4,164    $12,493
+    page_daily                      fails      fails
+  DynamoDB storage of the log      $8,672    $26,017
+  Lambda, the projector            $1,440     $4,320
+  Firehose                           $142       $426
+  S3 archive, year-1 average          $73       $218
+  replication transfer                $35       $105
+  total                           $14,526    $43,579
+  provisioned capacity at a 70% target would cut requests to $1,719 per region (-59%), but costs more than on-demand if it must cover peaks over 2.42 times the average
+  not modeled: query reads, view and marker storage, backfills, archive compaction, CloudWatch
+
+warning page_views: batches average 1.15 events over 3,469 shards, so view writes rarely combine: most events cost a row write in every view
+  hint: shorten LOG RETENTION, which means fewer shards, or raise runtime.batching_window_seconds
+warning page_views: ~3,469 shards per region: after an outage, the projector catches up with one invocation per shard, over Lambda's default quota of 1,000 concurrent executions, which all of the account's functions in a region share
+  hint: shorten LOG RETENTION, or raise the account's Lambda concurrency quota
+error page_daily: rows reach 729 KB, over DynamoDB's 400 KB item limit: every write to them would fail
+  hint: shorten LOG RETENTION on page_views (fewer shards), or runtime.prune_window_seconds; SPLIT 2 keeps each item under the limit
+-- explain page_daily --
+view page_daily, from stream page_views
+  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
+               (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
+  prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
+
+layout, in each of 3 regions (us-east-1, us-west-2, ap-northeast-1)
+  table        analytics-view-page_daily-v1: regional, on-demand
+  mode         ASYNC: the projector applies events in batches
+  rows         shared: GROUP BY (page, day) leaves out user_id, the PRIMARY KEY of page_views, so any shard can write any row; ~1,000 active
+  backfill     fenced handoff: count and sum are additive
+
+row, estimated (key and state encodings aren't final yet; String values are taken as 32 bytes)
+  pk        page                                                         34 B
+  sk        day                                                           6 B
+  views     count()                                                      13 B
+  total_ms  sum(duration_ms)                                             20 B
+  _v        row version                                                  10 B
+  _hwm      ~25,150 high-water marks of ~30 B                          729 KB
+  total     730 write units, 183 read units; the item limit is 400 KB  729 KB
+
+per event, per region
+  rows         802.94 write units and 201.28 read units: a batch of 1.15 events updates 1.15 rows, and 10% of writes conflict and retry
+  per row      ~803 write and 201 read units per second on average; a partition takes 1,000 and 3,000
+  monthly      none: writes to rows over 400 KB fail
+
+error page_daily: rows reach 729 KB, over DynamoDB's 400 KB item limit: every write to them would fail
+  hint: shorten LOG RETENTION on page_views (fewer shards), or runtime.prune_window_seconds; SPLIT 2 keeps each item under the limit

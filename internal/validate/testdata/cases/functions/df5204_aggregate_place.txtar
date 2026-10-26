@@ -1,7 +1,7 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-Aggregates can't appear in WHERE.
+Aggregates can't appear in WHERE, or inside another aggregate, -Merge included.
 -- dynaflux/page_views.sql --
 CREATE STREAM page_views (
     user_id     String,
@@ -20,5 +20,20 @@ AS SELECT
 FROM page_views
 WHERE max(duration_ms) > 0
 GROUP BY page;
+
+CREATE MATERIALIZED VIEW page_totals
+ORDER BY (page)
+AS SELECT page, sum(duration_ms) AS total_ms
+FROM page_views
+GROUP BY page;
+-- dynaflux/queries.sql --
+-- name: Nested :many
+SELECT sumMerge(sum(total_ms)) AS total
+FROM page_totals
+WHERE page = {page:String};
 -- want --
+dynaflux/queries.sql:2:17: error DF5204
 dynaflux/views.sql:7:7: error DF5204
+-- want-text --
+dynaflux/queries.sql:2:17: error DF5204: Nested: aggregate sum is not allowed in another aggregate
+dynaflux/views.sql:7:7: error DF5204: page_stats: aggregate max is not allowed in WHERE
