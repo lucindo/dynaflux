@@ -157,27 +157,31 @@ func render(s agg.Spec, v expr.Value) string {
 	return fmt.Sprint(v.AsInt(), v.AsUint())
 }
 
-// TestNoFusedMultiplyAdd compiles the package for arm64 and for amd64 with FMA (v3), the
-// targets where Go may fuse x*y + z, and fails on any fused instruction: a fused result is
-// rounded once instead of twice, so it would differ from a CPU without FMA.
+// TestNoFusedMultiplyAdd compiles this package and internal/expr, whose Float64 arithmetic
+// feeds the states, for arm64 and for amd64 with FMA (v3), the targets where Go may fuse
+// x*y + z, and fails on any fused instruction: a fused result is rounded once instead of
+// twice, so it would differ from a CPU without FMA.
 func TestNoFusedMultiplyAdd(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
-		t.Skip("compiles the package twice")
+		t.Skip("compiles two packages twice")
 	}
 	fused := regexp.MustCompile(`\b(FMADDD|FMSUBD|FNMADDD|FNMSUBD|VFMADD\w*|VFMSUB\w*|VFNMADD\w*|VFNMSUB\w*)\b`)
-	for _, env := range [][]string{{"GOARCH=arm64"}, {"GOARCH=amd64", "GOAMD64=v3"}} {
-		cmd := exec.CommandContext(t.Context(), "go", "build", "-gcflags=-S", "github.com/lucindo/dynaflux/internal/agg")
-		cmd.Env = append(os.Environ(), env...)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("%v go build: %v\n%s", env, err, out)
-		}
-		if !regexp.MustCompile(`\bTEXT\b`).Match(out) {
-			t.Fatalf("%v: go build printed no assembly", env)
-		}
-		if m := fused.FindAll(out, -1); len(m) > 0 {
-			t.Errorf("%v: %d fused multiply-add instructions, such as %s", env, len(m), m[0])
+	text := regexp.MustCompile(`\bTEXT\b`)
+	for _, pkg := range []string{"github.com/lucindo/dynaflux/internal/agg", "github.com/lucindo/dynaflux/internal/expr"} {
+		for _, env := range [][]string{{"GOARCH=arm64"}, {"GOARCH=amd64", "GOAMD64=v3"}} {
+			cmd := exec.CommandContext(t.Context(), "go", "build", "-gcflags=-S", pkg)
+			cmd.Env = append(os.Environ(), env...)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s %v go build: %v\n%s", pkg, env, err, out)
+			}
+			if !text.Match(out) {
+				t.Fatalf("%s %v: go build printed no assembly", pkg, env)
+			}
+			if m := fused.FindAll(out, -1); len(m) > 0 {
+				t.Errorf("%s %v: %d fused multiply-add instructions, such as %s", pkg, env, len(m), m[0])
+			}
 		}
 	}
 }
