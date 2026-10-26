@@ -620,6 +620,30 @@ SELECT k, total FROM sums
 WHERE account = {account:String};
 `
 
+// TestReadRowDecodeError checks that a row item ReadRow can't decode fails the read with an
+// error that starts with "dynaflux: ", as the package's other errors do.
+func TestReadRowDecodeError(t *testing.T) {
+	t.Parallel()
+	s := newQueryStore(t, totals)
+	str := []catalog.Type{{Kind: catalog.KindString}}
+	pk, err := keys.Key(str, []expr.Value{expr.String("a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, err := keys.Key(str, []expr.Value{expr.String("r1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := store.Item{catalog.AttrPK: {Type: store.S, Str: pk}, catalog.AttrSK: {Type: store.S, Str: sk}}
+	if err = s.mem.Put(t.Context(), catalog.Naming{Store: "app"}.ViewTable("sums", 1), it, store.Cond{}); err != nil {
+		t.Fatal(err)
+	}
+	_, ok, err := s.e.ReadRow(t.Context(), s.cat, "sums@v1", []expr.Value{expr.String("a"), expr.String("r1")})
+	if ok || err == nil || !strings.HasPrefix(err.Error(), "dynaflux: view sums@v1: item ") {
+		t.Errorf("ReadRow of an item without columns = %v, %v; want an error that starts with \"dynaflux: view sums@v1: item \"", ok, err)
+	}
+}
+
 // TestQueryChecksOnlyTotalsItReads checks that a total outside its type fails only the reads
 // of its value, and that a merge checks only the merged total (sql.md §7.2).
 func TestQueryChecksOnlyTotalsItReads(t *testing.T) {
@@ -654,8 +678,9 @@ func TestQueryChecksOnlyTotalsItReads(t *testing.T) {
 					t.Errorf("%s = %q, %v; want %q, %v", tt.query, got, err, tt.want, tt.err)
 				}
 				// A row read whole finalizes every column.
-				if _, _, err = s.e.ReadRow(t.Context(), s.cat, "sums@v1", []expr.Value{a, expr.String("r1")}); !errors.Is(err, engine.ErrEvaluation) {
-					t.Errorf("ReadRow of r1: %v, want an evaluation error", err)
+				_, _, err = s.e.ReadRow(t.Context(), s.cat, "sums@v1", []expr.Value{a, expr.String("r1")})
+				if !errors.Is(err, engine.ErrEvaluation) || !strings.HasPrefix(err.Error(), "dynaflux: ") {
+					t.Errorf("ReadRow of r1: %v, want an evaluation error that starts with \"dynaflux: \"", err)
 				}
 			})
 		})

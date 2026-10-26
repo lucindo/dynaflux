@@ -56,15 +56,21 @@ func (e *Engine) ReadRow(ctx context.Context, cat *Catalog, version string, key 
 		}
 	}
 	ks, states, ok, err := cat.p.Row(version, items, time.Now())
-	if err != nil || !ok {
-		return nil, false, err
+	if err != nil {
+		return nil, false, fmt.Errorf("dynaflux: %w", err)
+	}
+	if !ok {
+		return nil, false, nil
 	}
 	all := make([]int, len(states))
 	for i := range all {
 		all[i] = i
 	}
 	row, err := finalize(version, vv, ks, states, all)
-	return row, err == nil, err
+	if err != nil {
+		return nil, false, fmt.Errorf("dynaflux: %w", err)
+	}
+	return row, true, nil
 }
 
 // finalize returns the columns of a row of view version id from its key values ks and
