@@ -29,8 +29,7 @@ Commands:
   help            show help for a command
 
 Planned:
-  init                                                         milestone M2
-  diff, dev, status, backfill, retire, import, inspect, query  milestone M5
+  init, diff, dev, status, backfill, retire, import, inspect, query  milestone M5
 
 Run 'dynaflux help <command>' for more about a command.
 `
@@ -117,7 +116,7 @@ error, and 2 for usage and I/O problems.
 			"help on an unknown command", []string{"help", "explian"},
 			result{2, "", "dynaflux: unknown command \"explian\"; did you mean explain?\nRun 'dynaflux help' for usage.\n"},
 		},
-		{"planned command", []string{"init"}, result{2, "", "dynaflux init: not available yet (milestone M2)\n"}},
+		{"planned command", []string{"init"}, result{2, "", "dynaflux init: not available yet (milestone M5)\n"}},
 		{
 			"alias with an argument", []string{"gen", "x"},
 			result{2, "", "dynaflux generate: unexpected arguments: x\nRun 'dynaflux help generate' for usage.\n"},

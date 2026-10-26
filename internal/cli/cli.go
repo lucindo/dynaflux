@@ -42,16 +42,15 @@ func commands() []command {
 // planned maps the commands of later milestones to their milestone, so that the CLI's
 // shape shows already.
 func planned() map[string]string {
-	const m2, m5 = "M2", "M5"
+	const m5 = "M5"
 	return map[string]string{
-		"init": m2,
-		"diff": m5, "dev": m5, "status": m5, "backfill": m5, "retire": m5, "import": m5, "inspect": m5, "query": m5,
+		"init": m5, "diff": m5, "dev": m5, "status": m5, "backfill": m5, "retire": m5, "import": m5, "inspect": m5,
+		"query": m5,
 	}
 }
 
 const plannedHelp = `Planned:
-  init                                                         milestone M2
-  diff, dev, status, backfill, retire, import, inspect, query  milestone M5
+  init, diff, dev, status, backfill, retire, import, inspect, query  milestone M5
 `
 
 // cli is one run of dynaflux. Commands write to out and errOut, and Run copies them to
