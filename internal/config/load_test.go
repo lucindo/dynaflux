@@ -152,7 +152,7 @@ func TestLoadDiagnostics(t *testing.T) {
 		{
 			"DF6009 split hides the store-wide projector name",
 			"store: " + strings.Repeat("a", 55) + "\nregions: [us-east-1]\nruntime: {split: Stream}\n",
-			[]string{"3:18 error DF6009"},
+			[]string{"1:8 error DF6110", "3:18 error DF6009"}, // the bucket only
 		},
 		{"DF6010 below the Lambda minimum", base + "runtime:\n  memory_mb: 64\n", []string{"4:14 error DF6010"}},
 		{"DF6010 prune window of 0", base + "runtime:\n  prune_window_seconds: 0\n", []string{"4:25 error DF6010"}},
@@ -184,21 +184,29 @@ func TestLoadDiagnostics(t *testing.T) {
 		{"DF6102 prefix without -", base + "prefix: prod\n", []string{"3:9 error DF6102"}},
 		{"DF6103 bad region", "store: analytics\nregions: [us-east]\n", []string{"2:11 error DF6103"}},
 		{"DF6103 one-word region", "store: analytics\nregions: [useast-1]\n", []string{"2:11 error DF6103"}},
+		{"DF6104 no account regional namespace", "store: analytics\nregions: [us-east-1, me-south-1]\n", []string{"2:22 error DF6104"}},
 		{
-			"DF6110 projector name of 65 characters",
+			"DF6110 projector and bucket names",
 			"store: " + strings.Repeat("a", 55) + "\nregions: [us-east-1]\n",
+			[]string{"1:8 error DF6110", "1:8 error DF6110"},
+		},
+		{
+			"DF6110 bucket name counts the prefix",
+			"store: " + strings.Repeat("a", 33) + "\nprefix: prod-\nregions: [us-east-1]\n",
 			[]string{"1:8 error DF6110"},
 		},
 		{
-			"DF6110 counts the prefix",
-			"store: " + strings.Repeat("a", 50) + "\nprefix: prod-\nregions: [us-east-1]\n",
+			"DF6110 bucket name in each region",
+			"store: " + strings.Repeat("a", 33) + "\nregions: [us-east-1, ap-northeast-1]\n",
 			[]string{"1:8 error DF6110"},
 		},
 		{
 			"DF6111 S3 Tables namespace starts with aws",
 			base + "prefix: aws-\narchive:\n  catalog: s3tables\n",
-			[]string{"1:8 error DF6111"},
+			[]string{"1:8 error DF6111", "5:12 error DF6506"},
 		},
+		{"DF6112 store starts with xn--", "store: xn--analytics\nregions: [us-east-1]\n", []string{"1:8 error DF6112"}},
+		{"DF6112 counts the prefix", "store: s3-demo-x\nprefix: amzn-\nregions: [us-east-1]\n", []string{"1:8 error DF6112"}},
 		{"DF6201 absolute pattern", base + "sql: [/abs/*.sql]\n", []string{"3:7 error DF6201"}},
 		{"DF6201 .. before cleaning", base + "sql: [dynaflux/**/../*.sql]\n", []string{"3:7 error DF6201"}},
 		{"DF6202 empty pattern", base + "sql: [\"\"]\n", []string{"3:7 error DF6202"}},
@@ -283,6 +291,7 @@ func TestLoadDiagnostics(t *testing.T) {
 			base + "archive:\n  regions: [us-east-1]\n  events: local\n",
 			[]string{"5:11 error DF6502"},
 		},
+		{"DF6506 S3 Tables", base + "archive:\n  catalog: s3tables\n", []string{"4:12 error DF6506"}},
 		{"DF6601 auth unsupported", base + "http:\n  frontend: http_api\n  auth: none\n", []string{"5:9 error DF6601"}},
 		{"DF6602 none without allow_public", base + "http:\n  auth: none\n", []string{"4:9 error DF6602"}},
 		{"DF6603 public", base + "http:\n  auth: none\n  allow_public: true\n", []string{"4:9 warning DF6603"}},
@@ -331,8 +340,8 @@ func TestLoadAccepts(t *testing.T) {
 		src  string
 	}{
 		{"complete example", completeExample},
-		{"store and prefix of 54 characters", "store: " + strings.Repeat("a", 49) + "\nprefix: prod-\nregions: [us-east-1]\n"},
-		{"split stream has no store-wide projector", "store: " + strings.Repeat("a", 55) + "\nregions: [us-east-1]\nruntime: {split: stream}\n"},
+		{"bucket name of 63 characters", "store: " + strings.Repeat("a", 32) + "\nprefix: prod-\nregions: [us-east-1]\n"},
+		{"bucket name of 63 characters in ap-northeast-1", "store: " + strings.Repeat("a", 32) + "\nregions: [ap-northeast-1, us-east-1]\n"},
 		{"aws prefix with glue", base + "prefix: aws-\n"},
 		{"empty prefix", base + "prefix: \"\"\n"},
 		{"null sections", base + "go:\nruntime: ~\ntables:\narchive: null\n"},
@@ -435,36 +444,56 @@ func TestLoadHint(t *testing.T) {
 	}
 }
 
-// The budgets are those of the Resource names table in docs/spec/config.md: P <= 54 for the
-// projector function, and P <= 55 for the backfill function.
+// The budgets are those of the Resource names table in docs/spec/config.md: P + region <= 46
+// for the bucket, P <= 54 for the projector function, and P <= 55 for the backfill function.
+// The bucket's is the tightest, so a function name is too long only together with it.
 func TestLoadNameBudget(t *testing.T) {
 	t.Parallel()
+	bucket := func(base, region string, length, left int) string {
+		return fmt.Sprintf("dynaflux.yaml:1:8: error DF6110: the S3 bucket name %s-123456789012-%s-an has %d characters; the limit is 63\n"+
+			"  hint: shorten store or prefix: the S3 bucket name leaves them %d characters together", base, region, length, left)
+	}
 	tests := []struct {
 		name string
 		src  string
-		want string
+		want []string
 	}{
+		{
+			"bucket",
+			"store: " + strings.Repeat("a", 33) + "\nregions: [us-east-1, ap-northeast-1]\n",
+			[]string{bucket(strings.Repeat("a", 33), "ap-northeast-1", 64, 32)},
+		},
 		{
 			"projector",
 			"store: " + strings.Repeat("a", 55) + "\nregions: [us-east-1]\n",
-			"dynaflux.yaml:1:8: error DF6110: the projector function name " + strings.Repeat("a", 55) +
-				"-projector has 65 characters; the limit is 64\n" +
-				"  hint: shorten store or prefix: the projector function name leaves them 54 characters together",
+			[]string{
+				bucket(strings.Repeat("a", 55), "us-east-1", 81, 37),
+				"dynaflux.yaml:1:8: error DF6110: the projector function name " + strings.Repeat("a", 55) +
+					"-projector has 65 characters; the limit is 64\n" +
+					"  hint: shorten store or prefix: the projector function name leaves them 54 characters together",
+			},
 		},
 		{
 			"backfill",
 			"store: " + strings.Repeat("a", 53) + "\nprefix: pr-\nregions: [us-east-1]\nruntime: {split: stream}\n",
-			"dynaflux.yaml:1:8: error DF6110: the backfill function name pr-" + strings.Repeat("a", 53) +
-				"-backfill has 65 characters; the limit is 64\n" +
-				"  hint: shorten store or prefix: the backfill function name leaves them 55 characters together",
+			[]string{
+				bucket("pr-"+strings.Repeat("a", 53), "us-east-1", 82, 37),
+				"dynaflux.yaml:1:8: error DF6110: the backfill function name pr-" + strings.Repeat("a", 53) +
+					"-backfill has 65 characters; the limit is 64\n" +
+					"  hint: shorten store or prefix: the backfill function name leaves them 55 characters together",
+			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, ds := load(tt.src)
-			if len(ds) != 1 || ds[0].String() != tt.want {
-				t.Errorf("diagnostics = %v, want\n%s", ds, tt.want)
+			got := make([]string, len(ds))
+			for i, d := range ds {
+				got[i] = d.String()
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("diagnostics:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(tt.want, "\n"))
 			}
 		})
 	}
@@ -538,10 +567,11 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("diagnostics: %v", ds)
 	}
 	want := &config.Config{
-		Store:   "analytics",
-		Regions: []string{"us-east-1", "us-west-2"},
-		SQL:     []config.Pattern{{Glob: "dynaflux/**/*.sql", Pos: pos(1, 1)}},
-		Go:      config.Go{Package: "flux", Out: "internal/flux"},
+		Store:      "analytics",
+		Regions:    []string{"us-east-1", "us-west-2"},
+		RegionsPos: pos(2, 10),
+		SQL:        []config.Pattern{{Glob: "dynaflux/**/*.sql", Pos: pos(1, 1)}},
+		Go:         config.Go{Package: "flux", Out: "internal/flux"},
 		Runtime: config.Runtime{
 			Out: "cmd/dynaflux-runtime", Arch: config.ArchARM64, TimeoutSeconds: 60, PruneWindowSeconds: 960,
 			MemoryMB: 1024, BatchingWindowSeconds: 1, Split: config.SplitStore,
@@ -553,8 +583,9 @@ func TestLoadDefaults(t *testing.T) {
 			LogRetention: catalog.RetainFor(catalog.Interval{N: 2, Unit: catalog.UnitDay}),
 		},
 		Archive: config.Archive{
-			Enabled: true, Catalog: config.ArchiveCatalogGlue, Regions: []string{"us-east-1", "us-west-2"},
-			Events: catalog.ArchiveEventsAll,
+			Enabled: true, Catalog: config.ArchiveCatalogGlue, Regions: []string{"us-east-1", "us-west-2"}, AllRegions: true,
+			RegionPos: map[string]diag.Pos{"us-east-1": pos(2, 11), "us-west-2": pos(2, 22)},
+			Events:    catalog.ArchiveEventsAll,
 		},
 		HTTP: config.HTTP{Frontend: config.FrontendFunctionURL, Auth: config.AuthIAM},
 	}
@@ -571,11 +602,12 @@ func TestLoadComplete(t *testing.T) {
 		t.Fatalf("diagnostics: %v", ds)
 	}
 	want := &config.Config{
-		Store:   "analytics",
-		Prefix:  "prod-",
-		Regions: []string{"us-east-1", "us-west-2", "ap-northeast-1"},
-		SQL:     []config.Pattern{{Glob: "dynaflux/**/*.sql", Pos: pos(4, 7)}},
-		Go:      config.Go{Package: "flux", Out: "internal/flux"},
+		Store:      "analytics",
+		Prefix:     "prod-",
+		Regions:    []string{"us-east-1", "us-west-2", "ap-northeast-1"},
+		RegionsPos: pos(3, 10),
+		SQL:        []config.Pattern{{Glob: "dynaflux/**/*.sql", Pos: pos(4, 7)}},
+		Go:         config.Go{Package: "flux", Out: "internal/flux"},
 		Runtime: config.Runtime{
 			Out: "cmd/dynaflux-runtime", Arch: config.ArchARM64, TimeoutSeconds: 60, PruneWindowSeconds: 960,
 			MemoryMB: 1024, BatchingWindowSeconds: 1, Split: config.SplitStore,
@@ -597,9 +629,11 @@ func TestLoadComplete(t *testing.T) {
 		}},
 		Archive: config.Archive{
 			Enabled: true, Catalog: config.ArchiveCatalogGlue,
-			Regions: []string{"us-east-1", "us-west-2", "ap-northeast-1"},
-			Events:  catalog.ArchiveEventsAll,
-			Streams: []config.ArchiveStream{{Name: "debug_events", Pos: pos(41, 5), Enabled: false, EnabledPos: pos(41, 29)}},
+			Regions:    []string{"us-east-1", "us-west-2", "ap-northeast-1"},
+			AllRegions: true,
+			RegionPos:  map[string]diag.Pos{"us-east-1": pos(3, 11), "us-west-2": pos(3, 22), "ap-northeast-1": pos(3, 33)},
+			Events:     catalog.ArchiveEventsAll,
+			Streams:    []config.ArchiveStream{{Name: "debug_events", Pos: pos(41, 5), Enabled: false, EnabledPos: pos(41, 29)}},
 		},
 		HTTP: config.HTTP{
 			Frontend: config.FrontendHTTPAPI, Auth: config.AuthIAM,
@@ -624,18 +658,19 @@ defaults:
   view_mode: sync
   log_retention: forever
 tables: {page_views: {capacity: on_demand}}
-archive: {enabled: false, catalog: s3tables, regions: [us-west-2], events: all, streams: {page_views: {enabled: true}}}
+archive: {enabled: false, catalog: glue, regions: [us-west-2], events: all, streams: {page_views: {enabled: true}}}
 http: {frontend: rest_api, auth: cognito}
 `)
 	if len(ds) != 0 {
 		t.Fatalf("diagnostics: %v", ds)
 	}
 	want := &config.Config{
-		Store:   "analytics",
-		Prefix:  "staging-",
-		Regions: []string{"us-east-1", "us-west-2"},
-		SQL:     []config.Pattern{{Glob: "queries/*.sql", Pos: pos(4, 7)}},
-		Go:      config.Go{Package: "gen", Out: "pkg/gen"},
+		Store:      "analytics",
+		Prefix:     "staging-",
+		Regions:    []string{"us-east-1", "us-west-2"},
+		RegionsPos: pos(2, 10),
+		SQL:        []config.Pattern{{Glob: "queries/*.sql", Pos: pos(4, 7)}},
+		Go:         config.Go{Package: "gen", Out: "pkg/gen"},
 		Runtime: config.Runtime{
 			Out: "cmd/rt", Arch: config.ArchX8664, TimeoutSeconds: 900, PruneWindowSeconds: 1000, MemoryMB: 10240,
 			BatchingWindowSeconds: 0, Split: config.SplitStream,
@@ -652,9 +687,10 @@ http: {frontend: rest_api, auth: cognito}
 		},
 		Tables: []config.Table{{Name: "page_views", Pos: pos(13, 10), Capacity: config.Capacity{Mode: config.CapacityOnDemand}}},
 		Archive: config.Archive{
-			Enabled: false, Catalog: config.ArchiveCatalogS3Tables, Regions: []string{"us-west-2"},
-			Events:  catalog.ArchiveEventsAll,
-			Streams: []config.ArchiveStream{{Name: "page_views", Pos: pos(14, 91), Enabled: true, EnabledPos: pos(14, 113)}},
+			Enabled: false, Catalog: config.ArchiveCatalogGlue, Regions: []string{"us-west-2"},
+			RegionPos: map[string]diag.Pos{"us-west-2": pos(14, 52)},
+			Events:    catalog.ArchiveEventsAll,
+			Streams:   []config.ArchiveStream{{Name: "page_views", Pos: pos(14, 87), Enabled: true, EnabledPos: pos(14, 109)}},
 		},
 		HTTP: config.HTTP{Frontend: config.FrontendRESTAPI, Auth: config.AuthCognito},
 	}

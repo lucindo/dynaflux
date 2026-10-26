@@ -43,7 +43,7 @@ DOCKERFILES = $(shell git ls-files --cached --others --exclude-standard -- '*Doc
 
 .PHONY: help check-git-hooks warn-git-hooks setup-git-hooks tools tools-update \
         test bench fmt fix lint vuln osv gomod mod-download verify check-clean \
-        hadolint checkov trivy semgrep
+        hadolint checkov infra-lint trivy semgrep
 
 .DEFAULT_GOAL := help
 
@@ -139,6 +139,11 @@ hadolint: ## Lint every Dockerfile with hadolint (needs hadolint on PATH).
 checkov: ## Scan CloudFormation/SAM templates with checkov (needs checkov on PATH).
 	$(call require_cmd,checkov,brew install checkov)
 	checkov --directory . --framework cloudformation --compact --quiet
+
+# Version 1.58.0 is the one the templates were designed against.
+infra-lint: ## Lint the golden CloudFormation templates with cfn-lint in every region (needs cfn-lint on PATH).
+	$(call require_cmd,cfn-lint,uv tool install cfn-lint==1.58.0)
+	go test -count=1 -run '^TestCfnLint$$' -v ./internal/infra/cloudformation
 
 trivy: ## Scan the repo for vulnerabilities, secrets, and misconfigurations with trivy (needs trivy on PATH).
 	$(call require_cmd,trivy,brew install trivy)

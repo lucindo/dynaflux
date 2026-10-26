@@ -12,10 +12,13 @@ import (
 const (
 	maxTableName          = 255 // DynamoDB table.
 	maxFunctionName       = 64  // Lambda function.
+	maxBucketName         = 63  // S3 general purpose bucket.
+	maxLogGroupName       = 512 // CloudWatch Logs log group.
 	maxStateMachineName   = 80  // Step Functions state machine.
 	maxDeliveryStream     = 64  // Firehose stream.
 	maxArchiveDatabase    = 252 // Iceberg database in Glue; S3 Tables namespaces allow 255.
 	maxArchiveTableOrView = 255 // Iceberg table or Athena view.
+	maxAthenaWorkGroup    = 128 // Athena workgroup.
 )
 
 // Naming derives AWS resource names, {prefix}{store}-{kind}-{name}, from logical names.
@@ -51,6 +54,22 @@ func (n Naming) StreamProjectorFunction(stream string) string {
 	return n.ProjectorFunction() + "-" + stream
 }
 
+// SetupFunction names the function that serves the templates' deploy-time requests.
+func (n Naming) SetupFunction() string {
+	return n.base() + "-setup"
+}
+
+// Bucket names the store's S3 bucket in a region. The name is in the account regional
+// namespace: only the account can create a name that ends in -{account}-{region}-an.
+func (n Naming) Bucket(account, region string) string {
+	return n.base() + "-" + account + "-" + region + "-an"
+}
+
+// ReservedBucketPrefixes returns the prefixes that S3 reserves at the start of bucket names.
+func ReservedBucketPrefixes() []string {
+	return []string{"xn--", "sthree-", "amzn-s3-demo-"}
+}
+
 // QueryFunction names the query function.
 func (n Naming) QueryFunction() string {
 	return n.base() + "-query"
@@ -77,16 +96,28 @@ func (n Naming) ArchiveDatabase() string {
 	return strings.ReplaceAll(n.base(), "-", "_")
 }
 
+// ArchiveWorkGroup names the Athena workgroup that creates and evolves the archive tables.
+func (n Naming) ArchiveWorkGroup() string {
+	return n.base()
+}
+
+// ArchiveLogGroup names the log group of the Firehose streams.
+func (n Naming) ArchiveLogGroup() string {
+	return "/aws/kinesisfirehose/" + n.base() + "-archive"
+}
+
 // StoreResources lists the AWS resource names that the prefix and store alone imply, with
 // projectorPerStream set when runtime.split is stream. It includes the archive database
 // even when no stream is archived.
 func (n Naming) StoreResources(projectorPerStream bool) []Resource {
 	res := []Resource{
 		{Kind: ResourceMetaTable, Name: n.MetaTable()},
+		{Kind: ResourceSetupFunction, Name: n.SetupFunction()},
 		{Kind: ResourceQueryFunction, Name: n.QueryFunction()},
 		{Kind: ResourceBackfillFunction, Name: n.BackfillFunction()},
 		{Kind: ResourceBackfillStateMachine, Name: n.BackfillStateMachine()},
 		{Kind: ResourceArchiveDatabase, Name: n.ArchiveDatabase()},
+		{Kind: ResourceArchiveWorkGroup, Name: n.ArchiveWorkGroup()},
 	}
 	if !projectorPerStream {
 		res = append(res, Resource{Kind: ResourceProjectorFunction, Name: n.ProjectorFunction()})
@@ -123,6 +154,11 @@ func (n Naming) base() string {
 	return n.Prefix + n.Store
 }
 
+// FunctionLogGroup names the log group of a Lambda function.
+func FunctionLogGroup(function string) string {
+	return "/aws/lambda/" + function
+}
+
 // IcebergTable names a stream's archive table.
 func IcebergTable(stream string) string {
 	return stream
@@ -155,13 +191,17 @@ const (
 	ResourceViewTable            ResourceKind = "view table"
 	ResourceMetaTable            ResourceKind = "meta table"
 	ResourceProjectorFunction    ResourceKind = "projector function"
+	ResourceSetupFunction        ResourceKind = "setup function"
 	ResourceQueryFunction        ResourceKind = "query function"
 	ResourceBackfillFunction     ResourceKind = "backfill function"
 	ResourceBackfillStateMachine ResourceKind = "backfill state machine"
 	ResourceArchiveStream        ResourceKind = "Firehose stream"
 	ResourceArchiveDatabase      ResourceKind = "archive database"
+	ResourceArchiveWorkGroup     ResourceKind = "Athena workgroup"
 	ResourceIcebergTable         ResourceKind = "Iceberg table"
 	ResourceDedupView            ResourceKind = "Athena view"
+	ResourceBucket               ResourceKind = "S3 bucket"
+	ResourceLogGroup             ResourceKind = "log group"
 )
 
 // MaxLen returns the longest name AWS allows for k.
@@ -169,7 +209,7 @@ func (k ResourceKind) MaxLen() int {
 	switch k {
 	case ResourceStreamTable, ResourceViewTable, ResourceMetaTable:
 		return maxTableName
-	case ResourceProjectorFunction, ResourceQueryFunction, ResourceBackfillFunction:
+	case ResourceProjectorFunction, ResourceSetupFunction, ResourceQueryFunction, ResourceBackfillFunction:
 		return maxFunctionName
 	case ResourceBackfillStateMachine:
 		return maxStateMachineName
@@ -177,8 +217,14 @@ func (k ResourceKind) MaxLen() int {
 		return maxDeliveryStream
 	case ResourceArchiveDatabase:
 		return maxArchiveDatabase
+	case ResourceArchiveWorkGroup:
+		return maxAthenaWorkGroup
 	case ResourceIcebergTable, ResourceDedupView:
 		return maxArchiveTableOrView
+	case ResourceBucket:
+		return maxBucketName
+	case ResourceLogGroup:
+		return maxLogGroupName
 	}
 	return 0
 }

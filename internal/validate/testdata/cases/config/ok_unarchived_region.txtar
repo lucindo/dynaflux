@@ -1,0 +1,16 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A store that archives no stream may use regions that can't hold the archive; DF2501 is
+the only diagnostic.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-west-1, mx-central-1]
+archive:
+  enabled: false
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id)
+LOG RETENTION FOREVER;
+-- want --
+dynaflux/page_views.sql:3:1: warning DF2501

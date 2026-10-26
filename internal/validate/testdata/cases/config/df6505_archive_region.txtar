@@ -1,0 +1,17 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+AWS Glue has no table optimizers in us-west-1, so it can't be an archive region.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-1]
+archive:
+  regions: [us-east-1, us-west-1]
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (user_id String)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:4:24: error DF6505
+-- want-text --
+dynaflux.yaml:4:24: error DF6505: archive.regions lists us-west-1, which has no AWS Glue table optimizers
+  hint: remove it from archive.regions

@@ -36,11 +36,30 @@ const (
 	EnvStore  = "DYNAFLUX_STORE"
 	EnvPrefix = "DYNAFLUX_PREFIX"
 	EnvMode   = "DYNAFLUX_MODE"
+	// EnvArchiveSchema is the archive schema's fingerprint, which projectors get in the
+	// regions that archive (ADR 0008).
+	EnvArchiveSchema = "DYNAFLUX_ARCHIVE_SCHEMA"
 )
 
 // Values of [EnvMode]: the function that the runtime binary serves.
 const (
 	EnvModeProjector = "projector"
+	EnvModeSetup     = "setup"
 	EnvModeQuery     = "query"
 	EnvModeBackfill  = "backfill"
+)
+
+// Runtime metrics, which the functions publish in CloudWatch embedded metric format. Each
+// has the dimension [MetricDimensionStore], whose value is {prefix}{store}, so that two
+// environments in one account and region don't share alarms.
+const (
+	MetricNamespace      = "Dynaflux"
+	MetricDimensionStore = "Store"
+	// MetricBreakerOpened counts view versions whose breaker opened.
+	MetricBreakerOpened = "BreakerOpened"
+	// MetricRowTooLarge counts view row writes refused for passing DynamoDB's item size limit.
+	MetricRowTooLarge = "RowTooLarge"
+	// MetricDivergentDuplicates counts events written twice under one dedup key with
+	// different payloads.
+	MetricDivergentDuplicates = "DivergentDuplicates"
 )

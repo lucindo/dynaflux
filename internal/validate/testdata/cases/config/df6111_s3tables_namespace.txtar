@@ -18,3 +18,4 @@ CREATE STREAM page_views (
 PRIMARY KEY (user_id);
 -- want --
 dynaflux.yaml:1:8: error DF6111
+dynaflux.yaml:4:12: error DF6506

@@ -45,6 +45,9 @@ func deferredCodes() map[string]string {
 	return map[string]string{
 		"DF6001": "Load gets the project root; finding dynaflux.yaml in a parent directory is the CLI's job",
 		"DF6205": "internal/config's tests cover it; a txtar archive can't hold a symbolic link",
+		"DF6016": "generate reports it against its previous templates, not validate",
+		"DF6017": "generate reports it against its previous templates, not validate",
+		"DF6018": "generate reports it against its previous templates, not validate",
 	}
 }
 

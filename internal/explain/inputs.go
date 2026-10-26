@@ -9,6 +9,7 @@ import (
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/config"
+	"github.com/lucindo/dynaflux/internal/infra"
 )
 
 const (
@@ -45,7 +46,7 @@ func newStreamPlan(cfg *config.Config, cat *catalog.Catalog, w Workload, s *cata
 		store: Store{
 			Regions:        len(cat.Regions),
 			BatchingWindow: time.Duration(cfg.Runtime.BatchingWindowSeconds) * time.Second,
-			BatchSize:      DefaultBatchSize,
+			BatchSize:      infra.ProjectorBatchSize,
 			HWMWindow:      time.Duration(cat.PruneWindowSeconds) * time.Second,
 			MemoryMB:       cfg.Runtime.MemoryMB,
 			Arch:           Arch(cfg.Runtime.Arch),

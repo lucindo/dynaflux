@@ -24,7 +24,7 @@ Usage:
 Commands:
   validate        check dynaflux.yaml and the SQL definitions
   explain         show the layout and cost of a stream, view or query
-  generate (gen)  write the Go client package and update dynaflux.lock
+  generate (gen)  write the Go client package and templates, and update dynaflux.lock
   version         show the versions of the CLI, the runtime library and generated code
   help            show help for a command
 

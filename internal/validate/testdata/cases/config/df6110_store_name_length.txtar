@@ -1,8 +1,9 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-A 55-character store makes the projector function name 65 characters long, over
-Lambda's 64. Every other store-wide name fits, and the check stops before the SQL.
+A 55-character store makes the bucket name 81 characters long, over S3's 63, and the
+projector function name 65, over Lambda's 64. Every other store-wide name fits, and the
+check stops before the SQL.
 -- dynaflux.yaml --
 store: analytics-for-a-store-whose-name-is-fifty-five-long-xyz
 regions: [us-east-1]
@@ -16,4 +17,5 @@ CREATE STREAM page_views (
 )
 PRIMARY KEY (user_id);
 -- want --
+dynaflux.yaml:1:8: error DF6110
 dynaflux.yaml:1:8: error DF6110
