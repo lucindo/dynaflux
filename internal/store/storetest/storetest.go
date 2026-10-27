@@ -40,6 +40,9 @@ func Run(t *testing.T, newBackend func(t *testing.T) store.Backend) {
 	t.Run("QueryBounds", s.checkQueryBounds)
 	t.Run("QueryPages", s.checkQueryPages)
 	t.Run("QueryWhileWriting", s.checkQueryWhileWriting)
+	t.Run("Scan", s.checkScan)
+	t.Run("ScanResume", s.checkScanResume)
+	t.Run("ScanSegments", s.checkScanSegments)
 	t.Run("BatchGet", s.checkBatchGet)
 	t.Run("NumberForm", s.checkNumberForm)
 	t.Run("EmptyValues", s.checkEmptyValues)
@@ -99,6 +102,10 @@ func (s stale) BatchGet(ctx context.Context, table string, ks []store.Key, consi
 
 func (s stale) Query(ctx context.Context, table string, q store.Query) iter.Seq2[store.Item, error] {
 	return s.at(q.Consistent).Query(ctx, table, q)
+}
+
+func (s stale) ScanPage(ctx context.Context, table string, sc store.Scan, start *store.Key) ([]store.Item, *store.Key, error) {
+	return s.at(sc.Consistent).ScanPage(ctx, table, sc, start)
 }
 
 const part = "p" // the partition most checks use

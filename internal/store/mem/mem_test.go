@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -94,6 +95,9 @@ func TestTablesAreSeparate(t *testing.T) {
 	if err := m.Put(t.Context(), "t2", item("a", nil), store.IfAbsent()); err != nil {
 		t.Errorf("IfAbsent Put of a key that exists only in another table: %v", err)
 	}
+	if page, _, err := m.ScanPage(t.Context(), "t3", store.Scan{Segments: 1}, nil); err != nil || len(page) != 0 {
+		t.Errorf("ScanPage of a table never written = %d items, %v; want none", len(page), err)
+	}
 }
 
 func TestDeleteRemovesTheItemFromReadsAndConditions(t *testing.T) {
@@ -149,5 +153,96 @@ func TestQueryPagesOfOneMegabyte(t *testing.T) {
 	}
 	if read != 4 || !errors.Is(err, context.Canceled) {
 		t.Errorf("read %d items, then error %v; want 4 items, then context.Canceled", read, err)
+	}
+}
+
+// sks returns the sort keys of items.
+func sks(items []store.Item) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it[catalog.AttrSK].Str
+	}
+	return out
+}
+
+// A scan reads the snapshot its first page took, so it misses every later write, the most
+// DynamoDB allows; a stale worker resuming from an older key reads the same snapshot.
+func TestScanMissesWritesAfterItsFirstPage(t *testing.T) {
+	t.Parallel()
+	m := mem.New()
+	put := func(sks ...string) {
+		for _, sk := range sks {
+			if err := m.Put(t.Context(), "t", item(sk, nil), store.Cond{}); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+		}
+	}
+	put("b", "d", "f")
+	s := store.Scan{Segments: 1, PageSize: 1}
+	first, next, err := m.ScanPage(t.Context(), "t", s, nil)
+	if err != nil || next == nil {
+		t.Fatalf("first ScanPage = %q, %v, %v; want a key to continue from", sks(first), next, err)
+	}
+	put("a", "c", "e", "g")
+	readFrom := func(start *store.Key) []string {
+		var got []string
+		for start != nil {
+			var page []store.Item
+			if page, start, err = m.ScanPage(t.Context(), "t", s, start); err != nil {
+				t.Fatalf("ScanPage: %v", err)
+			}
+			got = append(got, sks(page)...)
+		}
+		return got
+	}
+	if got := append(sks(first), readFrom(next)...); !slices.Equal(got, []string{"b", "d", "f"}) {
+		t.Errorf("scan read %q, want [b d f]: the items stored before its first page", got)
+	}
+	if got := readFrom(next); !slices.Equal(got, []string{"d", "f"}) {
+		t.Errorf("a second resume from the first key read %q, want [d f]", got)
+	}
+}
+
+// Without a PageSize, a scan's page ends at the item that brings it to 1 MB.
+func TestScanPagesOfOneMegabyte(t *testing.T) {
+	t.Parallel()
+	m := mem.New()
+	big := strings.Repeat("x", 300<<10)
+	for _, sk := range []string{"a", "b", "c", "d", "e", "f"} {
+		if err := m.Put(t.Context(), "t", item(sk, store.Item{"x": {Type: store.S, Str: big}}), store.Cond{}); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	page, next, err := m.ScanPage(t.Context(), "t", store.Scan{Segments: 1}, nil)
+	if err != nil || len(page) != 4 || next == nil {
+		t.Errorf("ScanPage = %d items, next %v, %v; want 4 items and a key to continue from", len(page), next, err)
+	}
+}
+
+// Scans of one segment share one snapshot, so many paged scans hold one table copy, not one
+// per page.
+func TestScansKeepOneSnapshotPerSegment(t *testing.T) {
+	t.Parallel()
+	m := mem.New()
+	for _, sk := range []string{"a", "b", "c"} {
+		if err := m.Put(t.Context(), "t", item(sk, nil), store.Cond{}); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	for range 10 {
+		var start *store.Key
+		for {
+			_, next, err := m.ScanPage(t.Context(), "t", store.Scan{Segments: 1, PageSize: 1}, start)
+			if err != nil {
+				t.Fatalf("ScanPage: %v", err)
+			}
+			if next == nil {
+				break
+			}
+			start = next
+		}
+	}
+	if n := m.Snapshots(); n != 1 {
+		t.Errorf("%d snapshots after 10 scans of one segment, want 1", n)
 	}
 }

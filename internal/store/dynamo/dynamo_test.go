@@ -80,8 +80,9 @@ func ops(ctx context.Context, b store.Backend) map[string]error {
 			queryErr = err
 		}
 	}
+	_, _, scanErr := b.ScanPage(ctx, "t", store.Scan{Segments: 1}, nil)
 	putErr := b.Put(ctx, "t", store.Item{"pk": str(key.PK), "sk": str(key.SK)}, store.Cond{})
-	return map[string]error{"Get": getErr, "BatchGet": batchErr, "Query": queryErr, "Put": putErr}
+	return map[string]error{"Get": getErr, "BatchGet": batchErr, "Query": queryErr, "ScanPage": scanErr, "Put": putErr}
 }
 
 // The SDK retries what may pass on a later attempt; the backend sorts what is left. Only a
@@ -121,8 +122,8 @@ func TestErrorClasses(t *testing.T) {
 					t.Errorf("%s: error %v; want the SDK's %s, ErrInvalidRequest %v", op, err, tt.code, tt.invalid)
 				}
 			}
-			if got, want := attempts.Load(), 4*tt.attempts; got != want {
-				t.Errorf("%d attempts for four operations, want %d", got, want)
+			if got, want := attempts.Load(), 5*tt.attempts; got != want {
+				t.Errorf("%d attempts for five operations, want %d", got, want)
 			}
 		})
 	}
@@ -145,8 +146,9 @@ func TestInvalidRequestsSendNothing(t *testing.T) {
 	for _, err := range b.Query(ctx, "t", store.Query{PK: bad.SK}) {
 		queryErr = err
 	}
+	_, _, scanErr := b.ScanPage(ctx, "t", store.Scan{Segments: 1}, &bad)
 	putErr := b.Put(ctx, "t", store.Item{"pk": str("p"), "sk": str("a"), "x": str("\xff")}, store.Cond{})
-	for op, err := range map[string]error{"Get": getErr, "BatchGet": batchErr, "Query": queryErr, "Put": putErr} {
+	for op, err := range map[string]error{"Get": getErr, "BatchGet": batchErr, "Query": queryErr, "ScanPage": scanErr, "Put": putErr} {
 		if !errors.Is(err, store.ErrInvalidRequest) {
 			t.Errorf("%s: error %v, want ErrInvalidRequest", op, err)
 		}

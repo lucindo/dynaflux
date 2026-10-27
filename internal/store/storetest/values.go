@@ -140,6 +140,13 @@ func (s suite) checkDeepCopies(t *testing.T) {
 	}
 	wantStored(t, b, original())
 
+	scanned, _, err := b.ScanPage(t.Context(), Table, store.Scan{Segments: 1}, nil)
+	if err != nil || len(scanned) != 1 {
+		t.Fatalf("ScanPage = %d items, %v; want 1", len(scanned), err)
+	}
+	mutate(scanned[0])
+	wantStored(t, b, original())
+
 	var ce *store.ConditionError
 	if err = b.Put(t.Context(), Table, original(), store.IfAbsent()); !errors.As(err, &ce) {
 		t.Fatalf("Put over an existing item with IfAbsent: %v, want a *store.ConditionError", err)

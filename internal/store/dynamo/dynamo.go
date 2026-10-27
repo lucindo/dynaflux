@@ -29,6 +29,7 @@ type api interface {
 	GetItem(ctx context.Context, in *dynamodb.GetItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	BatchGetItem(ctx context.Context, in *dynamodb.BatchGetItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error)
 	Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
+	Scan(ctx context.Context, in *dynamodb.ScanInput, opts ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
 	PutItem(ctx context.Context, in *dynamodb.PutItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 }
 
@@ -225,6 +226,42 @@ func queryInput(table string, q store.Query) *dynamodb.QueryInput {
 		ScanIndexForward:          new(!q.Desc),
 		ConsistentRead:            new(q.Consistent),
 	}
+}
+
+// ScanPage implements [store.Backend]. One segment of one is sent without Segment and
+// TotalSegments.
+func (b *Backend) ScanPage(ctx context.Context, table string, sc store.Scan, start *store.Key) ([]store.Item, *store.Key, error) {
+	if err := store.CheckScan(sc, start); err != nil {
+		return nil, nil, fmt.Errorf("dynamo: scan %s: %w", table, err)
+	}
+	in := &dynamodb.ScanInput{
+		TableName:      &table,
+		ConsistentRead: new(sc.Consistent),
+		Limit:          pageLimit(sc.PageSize, 0),
+	}
+	if sc.Segments > 1 {
+		in.Segment = new(int32(sc.Segment))        //nolint:gosec // CheckScan bounds it by MaxSegments
+		in.TotalSegments = new(int32(sc.Segments)) //nolint:gosec // CheckScan bounds it by MaxSegments
+	}
+	if start != nil {
+		in.ExclusiveStartKey = keyAV(*start)
+	}
+	out, err := b.c.Scan(ctx, in)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dynamo: scan %s: %w", table, classify(err))
+	}
+	items := make([]store.Item, len(out.Items))
+	for i, av := range out.Items {
+		items[i] = fromItem(av)
+	}
+	if len(out.LastEvaluatedKey) == 0 {
+		return items, nil, nil
+	}
+	next := keyOf(out.LastEvaluatedKey)
+	if next == (store.Key{}) {
+		return nil, nil, fmt.Errorf("dynamo: scan %s: the response's LastEvaluatedKey is not a pk and sk", table)
+	}
+	return items, &next, nil
 }
 
 // Put implements [store.Backend]. On a failed condition DynamoDB returns the stored item

@@ -149,8 +149,8 @@ func (s suite) checkStaleReads(t *testing.T) {
 	wantRead(t, b, keyOf(it), false, nil)
 }
 
-// wantRead fails unless Get and BatchGet of k, and a Query of its partition, find want, or
-// nothing when want is nil.
+// wantRead fails unless Get and BatchGet of k, a Query of its partition and a scan of the
+// table find want, or nothing when want is nil.
 func wantRead(t *testing.T, b store.Backend, k store.Key, consistent bool, want store.Item) {
 	t.Helper()
 	got, err := b.Get(t.Context(), Table, k, consistent)
@@ -174,6 +174,10 @@ func wantRead(t *testing.T, b store.Backend, k store.Key, consistent bool, want 
 	if !slices.EqualFunc(queried, wantQueried, equalItem) {
 		t.Errorf("Query, consistent %v = %d items, want %d", consistent, len(queried), len(wantQueried))
 	}
+	scanned, _ := scanAll(t, b, store.Scan{Segments: 1, Consistent: consistent}, nil)
+	if !slices.EqualFunc(scanned, wantQueried, equalItem) {
+		t.Errorf("ScanPage, consistent %v = %d items, want %d", consistent, len(scanned), len(wantQueried))
+	}
 }
 
 func (s suite) checkCanceledContext(t *testing.T) {
@@ -190,7 +194,8 @@ func (s suite) checkCanceledContext(t *testing.T) {
 		queryErr = err
 		break
 	}
-	errs := map[string]error{"Put": putErr, "Get": getErr, "BatchGet": batchErr, "Query": queryErr}
+	_, _, scanErr := b.ScanPage(ctx, Table, store.Scan{Segments: 1}, nil)
+	errs := map[string]error{"Put": putErr, "Get": getErr, "BatchGet": batchErr, "Query": queryErr, "ScanPage": scanErr}
 	for op, err := range errs {
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("%s with a canceled context: error = %v, want context.Canceled", op, err)

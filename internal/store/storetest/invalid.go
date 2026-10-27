@@ -44,6 +44,13 @@ func query(q store.Query) func(context.Context, store.Backend) error {
 	}
 }
 
+func scan(s store.Scan, start *store.Key) func(context.Context, store.Backend) error {
+	return func(ctx context.Context, b store.Backend) error {
+		_, _, err := b.ScanPage(ctx, Table, s, start)
+		return err
+	}
+}
+
 func put(it store.Item, c store.Cond) func(context.Context, store.Backend) error {
 	return func(ctx context.Context, b store.Backend) error { return b.Put(ctx, Table, it, c) }
 }
@@ -72,6 +79,13 @@ func invalidLookups() []request {
 		{"query with an exclusive bound and no To", query(store.Query{PK: part, ToExclusive: true})},
 		{"query with a negative limit", query(store.Query{PK: part, Limit: -1})},
 		{"query with a negative page size", query(store.Query{PK: part, PageSize: -1})},
+		{"scan of no segments", scan(store.Scan{}, nil)},
+		{"scan over the segment limit", scan(store.Scan{Segments: store.MaxSegments + 1}, nil)},
+		{"scan of a negative segment", scan(store.Scan{Segment: -1, Segments: 1}, nil)},
+		{"scan of a segment past the last", scan(store.Scan{Segment: 1, Segments: 1}, nil)},
+		{"scan with a negative page size", scan(store.Scan{Segments: 1, PageSize: -1}, nil)},
+		{"scan from a key with an empty sk", scan(store.Scan{Segments: 1}, &store.Key{PK: part})},
+		{"scan from a key that isn't UTF-8", scan(store.Scan{Segments: 1}, &store.Key{PK: "p\xff", SK: "a"})},
 	}
 }
 

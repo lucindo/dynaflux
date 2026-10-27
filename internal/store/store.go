@@ -52,12 +52,13 @@ type Item map[string]Value
 // Key is the primary key of an item: every table has the string keys pk and sk.
 type Key struct{ PK, SK string }
 
-// DynamoDB limits, in bytes except for MaxBatchGetKeys.
+// DynamoDB limits, in bytes except for MaxBatchGetKeys and MaxSegments.
 const (
 	MaxItemSize     = 400 << 10 // as [ItemSize] counts it
 	MaxPKLen        = 2048
 	MaxSKLen        = 1024
 	MaxBatchGetKeys = 100
+	MaxSegments     = 1_000_000 // a Scan's TotalSegments
 )
 
 // Cond is the condition of a Put. The zero Cond is unconditional.
@@ -102,6 +103,14 @@ type Query struct {
 	Consistent bool
 }
 
+// Scan reads segment Segment of Segments, which split a table by partition key. Segment 0
+// of 1 is the whole table.
+type Scan struct {
+	Segment, Segments int
+	Consistent        bool
+	PageSize          int // the item limit of each request; 0 leaves pages at DynamoDB's 1 MB
+}
+
 // Backend is a store. Every call takes the invocation's context.
 type Backend interface {
 	// Get reads one item, nil when absent.
@@ -112,6 +121,11 @@ type Backend interface {
 	// Query yields the items of one partition a page at a time. It stops after an error,
 	// and sends no request after the caller stops.
 	Query(ctx context.Context, table string, q Query) iter.Seq2[Item, error]
+	// ScanPage reads the page of s that follows start, or its first page when start is nil,
+	// and returns the page's items and the key to continue from, nil after the last page.
+	// A page may be empty and still have a key to continue from. An item written after the
+	// scan began may or may not appear.
+	ScanPage(ctx context.Context, table string, s Scan, start *Key) ([]Item, *Key, error)
 	// Put writes a whole item, replacing a stored one, when c holds.
 	Put(ctx context.Context, table string, it Item, c Cond) error
 }

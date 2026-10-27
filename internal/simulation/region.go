@@ -363,6 +363,28 @@ func (p *pager) ends(it store.Item) bool {
 	return !p.limited || p.left > 0
 }
 
+// scanPage is the most items a page of a scan holds that asks DynamoDB for 1 MB pages: that
+// limit, scaled to the harness's small items.
+const scanPage = 8
+
+// ScanPage reads mem when its request is released, and the caller gets the page after the
+// request's latency.
+func (g gated) ScanPage(ctx context.Context, table string, s store.Scan, start *store.Key) ([]store.Item, *store.Key, error) {
+	if s.PageSize == 0 {
+		s.PageSize = scanPage
+	}
+	op := "scan " + table + " " + strconv.Itoa(s.Segment) + "/" + strconv.Itoa(s.Segments)
+	if start != nil {
+		op += " " + start.PK + " " + start.SK
+	}
+	lat, f := g.rg.enter(ctx, kindRead, op)
+	defer time.Sleep(lat)
+	if f == faultTransient {
+		return nil, nil, errTransient
+	}
+	return g.rg.mem.ScanPage(ctx, table, s, start)
+}
+
 func (g gated) Put(ctx context.Context, table string, it store.Item, c store.Cond) error {
 	k := kindWrite
 	if c != (store.Cond{}) {

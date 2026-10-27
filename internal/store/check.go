@@ -90,6 +90,22 @@ func CheckQuery(q Query) error {
 	return nil
 }
 
+// CheckScan returns [ErrInvalidRequest] for Segments outside 1 to [MaxSegments], a Segment
+// outside 0 to Segments-1, a negative PageSize, or a start key that [CheckKey] refuses.
+func CheckScan(s Scan, start *Key) error {
+	switch {
+	case s.Segments < 1 || s.Segments > MaxSegments:
+		return invalidf("%d segments, want 1 to %d", s.Segments, MaxSegments)
+	case s.Segment < 0 || s.Segment >= s.Segments:
+		return invalidf("segment %d of %d", s.Segment, s.Segments)
+	case s.PageSize < 0:
+		return invalidf("negative PageSize %d", s.PageSize)
+	case start != nil:
+		return CheckKey(*start)
+	}
+	return nil
+}
+
 // CheckPut returns why DynamoDB would reject a Put of it under c: [ErrInvalidRequest] for a
 // name, value (the zero [Type] too), number or key it refuses, or a version below 1;
 // [ErrTooLarge] for a key over its length limit or an item over [MaxItemSize] by [ItemSize].

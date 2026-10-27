@@ -8,11 +8,15 @@
 package mem
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"iter"
+	"math/bits"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -27,6 +31,14 @@ const pageBytes = 1 << 20
 type Mem struct {
 	mu     sync.Mutex
 	tables map[string]map[string]*partition // table, then pk
+	// scans holds the snapshot that the latest scan of each segment took at its first page.
+	// A scan resumes from it, and so does a stale worker that resumes from an older key.
+	scans map[scanSegment][]store.Item
+}
+
+type scanSegment struct {
+	table             string
+	segment, segments int
 }
 
 type partition struct {
@@ -37,7 +49,7 @@ type partition struct {
 // New returns an empty store. Put stores each number in DynamoDB's form, without leading
 // zeros or trailing fraction zeros, so readers that rescale are exercised in every test.
 func New() *Mem {
-	return &Mem{tables: make(map[string]map[string]*partition)}
+	return &Mem{tables: make(map[string]map[string]*partition), scans: make(map[scanSegment][]store.Item)}
 }
 
 // Get implements [store.Backend].
@@ -118,6 +130,101 @@ func (m *Mem) nextPage(table string, q store.Query, c *cursor) []store.Item {
 		c.size += c.size
 	}
 	return page
+}
+
+// ScanPage implements [store.Backend]. A scan's first page snapshots its segment, and a page
+// that continues from a key reads the segment's latest snapshot after that key, so no write
+// made after that snapshot appears: the most a DynamoDB scan may miss. Segments split the range of a hash of pk, and items come
+// in the order of that hash, not of their keys.
+func (m *Mem) ScanPage(ctx context.Context, table string, s store.Scan, start *store.Key) ([]store.Item, *store.Key, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, fmt.Errorf("mem: scan: %w", err)
+	}
+	if err := store.CheckScan(s, start); err != nil {
+		return nil, nil, fmt.Errorf("mem: scan: %w", err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seg := scanSegment{table, s.Segment, s.Segments}
+	rest, ok := m.scans[seg]
+	if start == nil || !ok {
+		rest = m.snapshot(table, s)
+		m.scans[seg] = rest
+	}
+	if start != nil {
+		from := scanPos{hashPK(start.PK), start.PK, start.SK}
+		i, found := slices.BinarySearchFunc(rest, from, func(it store.Item, p scanPos) int { return positionOf(it).compare(p) })
+		if found {
+			i++
+		}
+		rest = rest[i:]
+	}
+	page, more := firstPage(rest, s.PageSize)
+	out := make([]store.Item, len(page))
+	for i, it := range page {
+		out[i] = cloneItem(it)
+	}
+	if !more {
+		return out, nil, nil
+	}
+	last := page[len(page)-1]
+	next := store.Key{PK: last[catalog.AttrPK].Str, SK: last[catalog.AttrSK].Str}
+	return out, &next, nil
+}
+
+// scanPos is an item's place in scan order.
+type scanPos struct {
+	hash   uint64
+	pk, sk string
+}
+
+func positionOf(it store.Item) scanPos {
+	pk := it[catalog.AttrPK].Str
+	return scanPos{hashPK(pk), pk, it[catalog.AttrSK].Str}
+}
+
+func (a scanPos) compare(b scanPos) int {
+	return cmp.Or(cmp.Compare(a.hash, b.hash), strings.Compare(a.pk, b.pk), strings.Compare(a.sk, b.sk))
+}
+
+func hashPK(pk string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(pk)) //nolint:gosec // a hash.Hash never fails to write
+	return h.Sum64()
+}
+
+// snapshot returns the items of s's segment in scan order. Stored items are never changed
+// in place, so it shares them.
+func (m *Mem) snapshot(table string, s store.Scan) []store.Item {
+	var pos []scanPos
+	for pk, p := range m.tables[table] {
+		h := hashPK(pk)
+		if seg, _ := bits.Mul64(h, uint64(s.Segments)); seg != uint64(s.Segment) { //nolint:gosec // CheckScan made both positive
+			continue
+		}
+		for _, sk := range p.sks {
+			pos = append(pos, scanPos{h, pk, sk})
+		}
+	}
+	slices.SortFunc(pos, scanPos.compare)
+	items := make([]store.Item, len(pos))
+	for i, at := range pos {
+		items[i] = m.tables[table][at.pk].items[at.sk]
+	}
+	return items
+}
+
+// firstPage returns the first page of items: up to limit items (0 for none) and pageBytes.
+// more reports whether the page stopped at a limit.
+func firstPage(items []store.Item, limit int) ([]store.Item, bool) {
+	read := 0
+	for n, it := range items {
+		read += store.ItemSize(it)
+		if n+1 == limit || read >= pageBytes {
+			return items[:n+1], true
+		}
+	}
+	return items, false
 }
 
 // Put implements [store.Backend].

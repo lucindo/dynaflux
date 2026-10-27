@@ -132,6 +132,10 @@ func (r renamed) Query(ctx context.Context, _ string, q store.Query) iter.Seq2[s
 	return r.b.Query(ctx, r.table, q)
 }
 
+func (r renamed) ScanPage(ctx context.Context, _ string, s store.Scan, start *store.Key) ([]store.Item, *store.Key, error) {
+	return r.b.ScanPage(ctx, r.table, s, start)
+}
+
 func (r renamed) Put(ctx context.Context, _ string, it store.Item, c store.Cond) error {
 	return r.b.Put(ctx, r.table, it, c)
 }

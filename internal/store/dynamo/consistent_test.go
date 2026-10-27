@@ -20,7 +20,7 @@ func emptyReads(op string, _ []byte) (int, string) {
 		return 200, `{}`
 	case "BatchGetItem":
 		return 200, `{"Responses":{"t":[]},"UnprocessedKeys":{}}`
-	case "Query":
+	case "Query", "Scan":
 		return 200, `{"Count":0,"Items":[]}`
 	}
 	return 400, errorBody("UnknownOperationException")
@@ -47,6 +47,10 @@ func misread(t *testing.T, b store.Backend, rec *emulatortest.Recorder) []string
 				return err
 			}
 			return nil
+		}},
+		{"ScanPage", func(consistent bool) error {
+			_, _, err := b.ScanPage(ctx, "t", store.Scan{Segments: 1, Consistent: consistent}, nil)
+			return err
 		}},
 	}
 	var wrong []string
@@ -80,7 +84,7 @@ func TestConsistentReadSentControl(t *testing.T) {
 	t.Parallel()
 	rec := emulatortest.NewRecorder(fake(emptyReads))
 	got := misread(t, alwaysEventual{newBackend(rec)}, rec)
-	if want := []string{"Get", "BatchGet", "Query"}; !slices.Equal(got, want) {
+	if want := []string{"Get", "BatchGet", "Query", "ScanPage"}; !slices.Equal(got, want) {
 		t.Errorf("a backend that drops ConsistentRead fails the check in %q, want %q", got, want)
 	}
 }
@@ -99,4 +103,9 @@ func (a alwaysEventual) BatchGet(ctx context.Context, table string, ks []store.K
 func (a alwaysEventual) Query(ctx context.Context, table string, q store.Query) iter.Seq2[store.Item, error] {
 	q.Consistent = false
 	return a.Backend.Query(ctx, table, q)
+}
+
+func (a alwaysEventual) ScanPage(ctx context.Context, table string, s store.Scan, start *store.Key) ([]store.Item, *store.Key, error) {
+	s.Consistent = false
+	return a.Backend.ScanPage(ctx, table, s, start)
 }
