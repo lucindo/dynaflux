@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,6 +42,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) store.Backend) {
 	t.Run("QueryWhileWriting", s.checkQueryWhileWriting)
 	t.Run("BatchGet", s.checkBatchGet)
 	t.Run("NumberForm", s.checkNumberForm)
+	t.Run("EmptyValues", s.checkEmptyValues)
 	t.Run("DeepCopies", s.checkDeepCopies)
 	t.Run("InvalidRequests", s.checkInvalidRequests)
 	t.Run("TooLarge", s.checkTooLarge)
@@ -142,9 +144,16 @@ func wantStored(t *testing.T, b store.Backend, want store.Item) {
 	}
 }
 
-// equalItem compares items as DynamoDB values: an empty L, M or B equals a nil one.
+// equalItem compares items as DynamoDB values: an empty L, M or B equals a nil one. A
+// top-level number must match as text; one inside an L or M only by value, since DynamoDB
+// Local returns nested numbers as written and readers parse every number anyway.
 func equalItem(a, b store.Item) bool {
-	return (a == nil) == (b == nil) && maps.EqualFunc(a, b, equalValue)
+	return (a == nil) == (b == nil) && maps.EqualFunc(a, b, func(x, y store.Value) bool {
+		if x.Type == store.N && y.Type == store.N {
+			return x.Str == y.Str
+		}
+		return equalValue(x, y)
+	})
 }
 
 func equalValue(a, b store.Value) bool {
@@ -152,8 +161,12 @@ func equalValue(a, b store.Value) bool {
 		return false
 	}
 	switch a.Type {
-	case store.S, store.N:
+	case store.S:
 		return a.Str == b.Str
+	case store.N:
+		x, xok := new(big.Rat).SetString(a.Str)
+		y, yok := new(big.Rat).SetString(b.Str)
+		return xok && yok && x.Cmp(y) == 0
 	case store.B:
 		return bytes.Equal(a.Bin, b.Bin)
 	case store.BOOL:

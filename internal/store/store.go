@@ -34,7 +34,9 @@ const (
 	M
 )
 
-// Value is a DynamoDB attribute value. Only the field of its Type is read.
+// Value is a DynamoDB attribute value. Only the field of its Type is read. The zero Type
+// is a value of a type Dynaflux never writes (NULL, a set), which only a foreign writer
+// leaves: backends return it, and [CheckPut] refuses it.
 type Value struct {
 	Type Type
 	Str  string           // S, and N as decimal text

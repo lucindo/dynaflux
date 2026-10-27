@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package mem
+package store
 
 import (
 	"fmt"
@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
-	"github.com/lucindo/dynaflux/internal/store"
 )
 
 // DynamoDB numbers (https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Constraints.html#limits-data-types-numbers):
@@ -25,15 +24,32 @@ const (
 )
 
 func invalidf(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", store.ErrInvalidRequest, fmt.Sprintf(format, args...))
+	return fmt.Errorf("%w: %s", ErrInvalidRequest, fmt.Sprintf(format, args...))
 }
 
-// checkKey checks a lookup key: DynamoDB rejects an oversized one rather than finding nothing.
-func checkKey(k store.Key) error {
-	if err := checkKeyValue(catalog.AttrPK, k.PK, store.MaxPKLen); err != nil {
+// CheckKey returns [ErrInvalidRequest] for a pk or sk that is empty, not valid UTF-8, or
+// over [MaxPKLen] or [MaxSKLen] bytes. Backends check before sending: DynamoDB rejects an
+// oversized key rather than finding nothing, and the SDK sends an invalid UTF-8 byte as
+// U+FFFD without an error, so the request would name another key.
+func CheckKey(k Key) error {
+	if err := checkKeyValue(catalog.AttrPK, k.PK, MaxPKLen); err != nil {
 		return err
 	}
-	return checkKeyValue(catalog.AttrSK, k.SK, store.MaxSKLen)
+	return checkKeyValue(catalog.AttrSK, k.SK, MaxSKLen)
+}
+
+// CheckKeys checks the keys of a BatchGet: each as [CheckKey] does, and from 0 to
+// [MaxBatchGetKeys] of them. A BatchGet of no keys sends nothing.
+func CheckKeys(ks []Key) error {
+	if len(ks) > MaxBatchGetKeys {
+		return invalidf("%d keys, over %d", len(ks), MaxBatchGetKeys)
+	}
+	for i, k := range ks {
+		if err := CheckKey(k); err != nil {
+			return fmt.Errorf("key %d: %w", i, err)
+		}
+	}
+	return nil
 }
 
 func checkKeyValue(name, v string, limit int) error {
@@ -48,15 +64,18 @@ func checkKeyValue(name, v string, limit int) error {
 	return nil
 }
 
-func checkQuery(q store.Query) error {
-	if err := checkKeyValue(catalog.AttrPK, q.PK, store.MaxPKLen); err != nil {
+// CheckQuery returns [ErrInvalidRequest] for a PK, or a nonempty From or To, that
+// [CheckKey] would refuse as pk or sk; crossed bounds; ToExclusive without To or with From
+// set; or a negative Limit or PageSize.
+func CheckQuery(q Query) error {
+	if err := checkKeyValue(catalog.AttrPK, q.PK, MaxPKLen); err != nil {
 		return err
 	}
 	for _, bound := range []string{q.From, q.To} {
 		if bound == "" {
 			continue
 		}
-		if err := checkKeyValue(catalog.AttrSK+" bound", bound, store.MaxSKLen); err != nil {
+		if err := checkKeyValue(catalog.AttrSK+" bound", bound, MaxSKLen); err != nil {
 			return err
 		}
 	}
@@ -71,12 +90,21 @@ func checkQuery(q store.Query) error {
 	return nil
 }
 
-// checkPut returns the item as DynamoDB stores it, or why DynamoDB rejects the request.
-func checkPut(it store.Item, c store.Cond) (store.Item, error) {
+// CheckPut returns why DynamoDB would reject a Put of it under c: [ErrInvalidRequest] for a
+// name, value (the zero [Type] too), number or key it refuses, or a version below 1;
+// [ErrTooLarge] for a key over its length limit or an item over [MaxItemSize] by [ItemSize].
+func CheckPut(it Item, c Cond) error {
+	_, err := Stored(it, c)
+	return err
+}
+
+// Stored returns the deep copy of it that the in-memory backend stores, every number in
+// DynamoDB's normal form, or [CheckPut]'s error.
+func Stored(it Item, c Cond) (Item, error) {
 	if v, ok := c.Version(); ok && v < 1 {
 		return nil, invalidf("condition on version %d; versions start at 1", v)
 	}
-	out := make(store.Item, len(it))
+	out := make(Item, len(it))
 	for name, v := range it {
 		if err := checkName(name); err != nil {
 			return nil, err
@@ -90,19 +118,19 @@ func checkPut(it store.Item, c store.Cond) (store.Item, error) {
 	for _, k := range []struct {
 		name  string
 		limit int
-	}{{catalog.AttrPK, store.MaxPKLen}, {catalog.AttrSK, store.MaxSKLen}} {
+	}{{catalog.AttrPK, MaxPKLen}, {catalog.AttrSK, MaxSKLen}} {
 		v, ok := out[k.name]
 		switch {
-		case !ok || v.Type != store.S:
+		case !ok || v.Type != S:
 			return nil, invalidf("key attribute %s is missing or not a string", k.name)
 		case v.Str == "":
 			return nil, invalidf("%s is empty", k.name)
 		case len(v.Str) > k.limit:
-			return nil, fmt.Errorf("%w: %s is %d bytes, over %d", store.ErrTooLarge, k.name, len(v.Str), k.limit)
+			return nil, fmt.Errorf("%w: %s is %d bytes, over %d", ErrTooLarge, k.name, len(v.Str), k.limit)
 		}
 	}
-	if size := store.ItemSize(out); size > store.MaxItemSize {
-		return nil, fmt.Errorf("%w: item is up to %d bytes, over %d", store.ErrTooLarge, size, store.MaxItemSize)
+	if size := ItemSize(out); size > MaxItemSize {
+		return nil, fmt.Errorf("%w: item is up to %d bytes, over %d", ErrTooLarge, size, MaxItemSize)
 	}
 	return out, nil
 }
@@ -115,48 +143,48 @@ func checkName(name string) error {
 }
 
 // normalize returns a deep copy of v in DynamoDB's stored form.
-func normalize(v store.Value) (store.Value, error) {
+func normalize(v Value) (Value, error) {
 	switch v.Type {
-	case store.S:
+	case S:
 		if !utf8.ValidString(v.Str) {
-			return store.Value{}, invalidf("string is not valid UTF-8")
+			return Value{}, invalidf("string is not valid UTF-8")
 		}
-		return store.Value{Type: store.S, Str: v.Str}, nil
-	case store.N:
+		return Value{Type: S, Str: v.Str}, nil
+	case N:
 		n, err := parseNumber(v.Str)
 		if err != nil {
-			return store.Value{}, err
+			return Value{}, err
 		}
-		return store.Value{Type: store.N, Str: n.String()}, nil
-	case store.B:
-		return store.Value{Type: store.B, Bin: append([]byte{}, v.Bin...)}, nil
-	case store.BOOL:
-		return store.Value{Type: store.BOOL, Bool: v.Bool}, nil
-	case store.L:
-		list := make([]store.Value, len(v.List))
+		return Value{Type: N, Str: n.String()}, nil
+	case B:
+		return Value{Type: B, Bin: append([]byte{}, v.Bin...)}, nil
+	case BOOL:
+		return Value{Type: BOOL, Bool: v.Bool}, nil
+	case L:
+		list := make([]Value, len(v.List))
 		for i, e := range v.List {
 			ne, err := normalize(e)
 			if err != nil {
-				return store.Value{}, fmt.Errorf("element %d: %w", i, err)
+				return Value{}, fmt.Errorf("element %d: %w", i, err)
 			}
 			list[i] = ne
 		}
-		return store.Value{Type: store.L, List: list}, nil
-	case store.M:
-		m := make(map[string]store.Value, len(v.Map))
+		return Value{Type: L, List: list}, nil
+	case M:
+		m := make(map[string]Value, len(v.Map))
 		for name, e := range v.Map {
 			if err := checkName(name); err != nil {
-				return store.Value{}, err
+				return Value{}, err
 			}
 			ne, err := normalize(e)
 			if err != nil {
-				return store.Value{}, fmt.Errorf("element %q: %w", name, err)
+				return Value{}, fmt.Errorf("element %q: %w", name, err)
 			}
 			m[name] = ne
 		}
-		return store.Value{Type: store.M, Map: m}, nil
+		return Value{Type: M, Map: m}, nil
 	}
-	return store.Value{}, invalidf("type %d is not one Dynaflux writes", v.Type)
+	return Value{}, invalidf("type %d is not one Dynaflux writes", v.Type)
 }
 
 // number is a parsed DynamoDB number: ±d.ddd × 10^exp, where digits holds the
@@ -222,8 +250,8 @@ func parseExponent(s string) (int, bool) {
 	return e, err == nil && e >= -maxExpText && e <= maxExpText
 }
 
-// String is the plain decimal form mem stores: no exponent, no leading zeros, no trailing
-// zeros in the fraction, and no negative zero.
+// String is DynamoDB's normal form of n: no exponent, no leading zeros, no trailing zeros
+// in the fraction, and no negative zero.
 func (n number) String() string {
 	if n.digits == "" {
 		return "0"

@@ -45,7 +45,7 @@ func (m *Mem) Get(ctx context.Context, table string, k store.Key, _ bool) (store
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("mem: get: %w", err)
 	}
-	if err := checkKey(k); err != nil {
+	if err := store.CheckKey(k); err != nil {
 		return nil, fmt.Errorf("mem: get: %w", err)
 	}
 	m.mu.Lock()
@@ -58,13 +58,8 @@ func (m *Mem) BatchGet(ctx context.Context, table string, ks []store.Key, _ bool
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("mem: batch get: %w", err)
 	}
-	if len(ks) > store.MaxBatchGetKeys {
-		return nil, fmt.Errorf("mem: batch get: %w", invalidf("%d keys, over %d", len(ks), store.MaxBatchGetKeys))
-	}
-	for i, k := range ks {
-		if err := checkKey(k); err != nil {
-			return nil, fmt.Errorf("mem: batch get: key %d: %w", i, err)
-		}
+	if err := store.CheckKeys(ks); err != nil {
+		return nil, fmt.Errorf("mem: batch get: %w", err)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -79,7 +74,7 @@ func (m *Mem) BatchGet(ctx context.Context, table string, ks []store.Key, _ bool
 // it, so the caller may write while it iterates and sees writes made between pages.
 func (m *Mem) Query(ctx context.Context, table string, q store.Query) iter.Seq2[store.Item, error] {
 	return func(yield func(store.Item, error) bool) {
-		if err := checkQuery(q); err != nil {
+		if err := store.CheckQuery(q); err != nil {
 			yield(nil, fmt.Errorf("mem: query: %w", err))
 			return
 		}
@@ -130,7 +125,7 @@ func (m *Mem) Put(ctx context.Context, table string, it store.Item, c store.Cond
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("mem: put: %w", err)
 	}
-	stored, err := checkPut(it, c)
+	stored, err := store.Stored(it, c)
 	if err != nil {
 		return fmt.Errorf("mem: put: %w", err)
 	}
@@ -150,7 +145,7 @@ func (m *Mem) Delete(ctx context.Context, table string, k store.Key) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("mem: delete: %w", err)
 	}
-	if err := checkKey(k); err != nil {
+	if err := store.CheckKey(k); err != nil {
 		return fmt.Errorf("mem: delete: %w", err)
 	}
 	m.mu.Lock()
