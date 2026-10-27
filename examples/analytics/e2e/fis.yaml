@@ -1,0 +1,83 @@
+# Copyright 2026 The Dynaflux Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The end-to-end suite's replication pause (docs/runbooks/e2e.md, scenario 3), never
+# generated for users. scripts/e2e/deploy.sh deploys it in the second region of the e2e
+# store; an experiment pauses Global Table replication to and from that region's replicas of
+# the stream tables.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Dynaflux e2e - an AWS FIS experiment that pauses the replication of the e2e store's stream tables in this region.
+Parameters:
+  Prefix:
+    Type: String
+    AllowedPattern: ^e2e-[a-z0-9]{1,8}-$
+    Description: The e2e store's prefix, e2e-<E2E_RUN>-.
+  Run:
+    Type: String
+    AllowedPattern: ^[a-z0-9]{1,8}$
+    Description: E2E_RUN. The suite finds the experiment template by its dynaflux:e2e-run tag.
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: fis.amazonaws.com
+            Action: sts:AssumeRole
+            # Only this account's experiments may use the role (confused deputy).
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:fis:${AWS::Region}:${AWS::AccountId}:experiment/*
+      Policies:
+        - PolicyName: pause-replication
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # FIS denies the replication service in the resource policies of the tables
+              # and of their streams.
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:GetResourcePolicy
+                  - dynamodb:PutResourcePolicy
+                  - dynamodb:DeleteResourcePolicy
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-stream-*
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-stream-*/stream/*
+              - Effect: Allow
+                Action: tag:GetResources
+                Resource: "*"
+  PauseReplication:
+    Type: AWS::FIS::ExperimentTemplate
+    Properties:
+      Description: !Sub Pause the replication of the stream tables of ${Prefix}analytics in ${AWS::Region}
+      RoleArn: !GetAtt Role.Arn
+      StopConditions:
+        - Source: none
+      Targets:
+        StreamTables:
+          ResourceType: aws:dynamodb:global-table
+          SelectionMode: ALL
+          ResourceArns:
+            - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-stream-api_calls
+            - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-stream-member_events
+            - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-stream-page_views
+      Actions:
+        Pause:
+          ActionId: aws:dynamodb:global-table-pause-replication
+          Parameters:
+            # Scenario 3's pauseDuration (aws_scenarios_test.go).
+            duration: PT10M
+          Targets:
+            # Confirm the key with `aws fis get-action --id aws:dynamodb:global-table-pause-replication`.
+            Tables: StreamTables
+      Tags:
+        dynaflux:e2e-run: !Ref Run
+Outputs:
+  ExperimentTemplateId:
+    Value: !Ref PauseReplication

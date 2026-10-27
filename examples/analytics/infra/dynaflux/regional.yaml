@@ -5,7 +5,7 @@ Description: "Dynaflux store analytics: the regional resources. Deploy in every 
 Parameters:
   Prefix:
     Type: String
-    Default: ""
+    Default: demo-
     AllowedPattern: ^(?!xn--|sthree-|amzn-s3-demo-)([a-z][a-z0-9-]*-)?$
     MaxLength: 28
     Description: "Prefix of every resource name. Fixed for the life of the stack: a new prefix means new stacks."

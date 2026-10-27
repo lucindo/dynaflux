@@ -235,9 +235,9 @@ func TestGenerateRefusesOversizedCatalog(t *testing.T) {
 	}
 }
 
-// TestGenerateExampleIsCurrent checks that the code, templates and lock committed in
+// TestExampleIsGenerated checks that the code, templates and lock committed in
 // examples/analytics are what generate writes: regenerate them after changing generate.
-func TestGenerateExampleIsCurrent(t *testing.T) {
+func TestExampleIsGenerated(t *testing.T) {
 	t.Parallel()
 	// The example's main.go imports its client by Dynaflux's module path.
 	module := t.TempDir()

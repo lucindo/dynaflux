@@ -13,10 +13,14 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.10
 	github.com/aws/aws-sdk-go-v2/service/athena v1.66.6
 	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.75.1
+	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.90.2
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.1
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.46.2
 	github.com/aws/aws-sdk-go-v2/service/firehose v1.52.6
+	github.com/aws/aws-sdk-go-v2/service/fis v1.46.6
 	github.com/aws/aws-sdk-go-v2/service/glue v1.172.0
+	github.com/aws/aws-sdk-go-v2/service/iam v1.64.5
+	github.com/aws/aws-sdk-go-v2/service/lakeformation v1.56.1
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.113.3
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5
 	github.com/aws/aws-sdk-go-v2/service/sfn v1.52.1

@@ -41,10 +41,13 @@ endef
 # Dockerfiles anywhere in the repo, tracked or new, minus .gitignore'd ones.
 DOCKERFILES = $(shell git ls-files --cached --others --exclude-standard -- '*Dockerfile*')
 
+# The shell scripts under scripts/, found the same way.
+SHELL_SCRIPTS = $(shell git ls-files --cached --others --exclude-standard -- 'scripts/*.sh')
+
 .PHONY: help check-git-hooks warn-git-hooks setup-git-hooks tools tools-update \
         test bench cross-arch lambda-build fmt fix lint vuln osv gomod check-go-bound mod-download verify \
         check-clean sim sim-controls sim-seed emulators-up emulators-down integration \
-        hadolint checkov infra-lint trivy semgrep
+        e2e-emulator e2e-aws hadolint checkov infra-lint shellcheck trivy semgrep
 
 .DEFAULT_GOAL := help
 
@@ -110,10 +113,11 @@ fix: ## Run `go fix ./...`.
 	go fix ./...
 
 # The second run covers the files behind the integration build tag; the first still covers
-# the !integration ones.
-lint: tools ## Run `golangci-lint run ./...`, then again with the integration build tag.
+# the !integration ones. The third covers the end-to-end suite, which nothing else builds.
+lint: tools ## Run `golangci-lint run ./...`, then again with the integration and e2e build tags.
 	$(GOLANGCI_LINT) run ./...
 	$(GOLANGCI_LINT) run --build-tags integration ./...
+	$(GOLANGCI_LINT) run --build-tags e2e $(E2E_PKG)/...
 
 vuln: tools ## Check dependencies for known vulnerabilities (needs network).
 	$(GOVULNCHECK) ./...
@@ -209,6 +213,24 @@ integration: ## Run the tests of every package with a *_integration_test.go file
 	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' \
 		go test -race -shuffle=on -tags integration $$pkgs $(GO_TEST_FLAGS)
 
+# === End to end
+
+# docs/runbooks/e2e.md. The suite is the example's, behind the e2e build tag.
+E2E_PKG := ./examples/analytics/e2e
+
+e2e-emulator: emulators-up ## Run the end-to-end suite on DynamoDB Local (needs docker).
+	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' go test -race -tags e2e $(E2E_PKG) -target=emulator $(GO_TEST_FLAGS)
+
+# Maintainer only: it deploys to AWS with your credentials. common.sh checks the variables and
+# the account before the trap, which tears the run down even after a later failure;
+# scripts/e2e/teardown.sh does it by hand after an interrupted run.
+e2e-aws: ## Deploy the e2e store, run the suite on AWS, and tear it down: make e2e-aws E2E_RUN=<id> E2E_ACCOUNT=<sandbox account ID>.
+	set -euo pipefail; export E2E_RUN='$(E2E_RUN)' E2E_ACCOUNT='$(E2E_ACCOUNT)'; \
+	bash -c 'source scripts/e2e/common.sh'; \
+	trap 'scripts/e2e/teardown.sh || { echo "Teardown failed: run E2E_RUN=$$E2E_RUN E2E_ACCOUNT=$$E2E_ACCOUNT scripts/e2e/teardown.sh again." >&2; exit 1; }' EXIT; \
+	scripts/e2e/deploy.sh; \
+	go test -tags e2e -timeout 120m -v $(E2E_PKG) -target=aws $(GO_TEST_FLAGS)
+
 # === External scanners
 
 # These tools are not Go modules, so `make tools` can't install them and
@@ -224,10 +246,18 @@ checkov: ## Scan CloudFormation/SAM templates with checkov (needs checkov on PAT
 	$(call require_cmd,checkov,brew install checkov)
 	checkov --directory . --framework cloudformation --compact --quiet
 
-# Version 1.58.0 is the one the templates were designed against.
-infra-lint: ## Lint the golden CloudFormation templates with cfn-lint in every region (needs cfn-lint on PATH).
+# Version 1.58.0 is the one the templates were designed against. The e2e FIS template is
+# linted only in the example's regions, where deploy.sh puts it: AWS FIS isn't in every
+# region. As in TestCfnLint, informational findings don't fail.
+infra-lint: ## Lint the golden CloudFormation templates and the example's with cfn-lint in every region, and the e2e FIS template in the example's (needs cfn-lint on PATH).
 	$(call require_cmd,cfn-lint,uv tool install cfn-lint==1.58.0)
 	go test -count=1 -run '^TestCfnLint$$' -v ./internal/infra/cloudformation
+	cfn-lint --regions us-east-1 us-west-2 --non-zero-exit-code warning -- $(E2E_PKG)/fis.yaml
+
+# -x follows the files that scripts source.
+shellcheck: ## Lint the shell scripts under scripts/ with shellcheck (needs shellcheck on PATH).
+	$(call require_cmd,shellcheck,brew install shellcheck)
+	shellcheck -x $(SHELL_SCRIPTS)
 
 trivy: ## Scan the repo for vulnerabilities, secrets, and misconfigurations with trivy (needs trivy on PATH).
 	$(call require_cmd,trivy,brew install trivy)

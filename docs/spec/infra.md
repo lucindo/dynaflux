@@ -919,7 +919,7 @@ archived streams and 60 provisioned view versions pass the limit. Roles have the
 | VPC | The functions call only AWS APIs; a VPC would add NAT gateway or endpoint costs. |
 | An SNS topic | Pass your own as `AlarmTopicArn` ([§2](#2-parameters)). |
 | A permissions boundary | One can be added to the existing roles in place when an account requires it. |
-| IAM policies for operators and applications | With exact ARNs, such a policy outgrows IAM's limits as a store grows. [§9.8](#98-operators) lists what each command needs, and the two-region example shows an application's policy. |
+| IAM policies for operators and applications | With exact ARNs, such a policy outgrows IAM's limits as a store grows. [§9.8](#98-operators) lists what each command needs, and the [two-region example](../../examples/analytics/README.md#use-it-from-an-application) shows an application's policy. |
 | A region check | `global.yaml` fails in a region outside `regions`, because its own region must hold a replica, and `regional.yaml` fails at the stream lookup ([§6.2](#62-stream-arn-lookup)). |
 
 ## 15. Not in these templates yet
