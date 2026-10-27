@@ -64,16 +64,19 @@ for region in us-east-1 us-west-2; do
   sam deploy --stack-name demo-analytics-regional --region "$region" \
     --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND --resolve-s3
 done
+
+# 4. Make every view version live, in both regions:
+go run ../../cmd/dynaflux backfill -all -yes
 ```
 
 - The `Prefix` parameter defaults to `demo-`. For another environment, add
-  `--parameter-overrides Prefix=<prefix>` to every deploy and use new stack names.
+  `--parameter-overrides Prefix=<prefix>` to every deploy, `-prefix <prefix>` to the
+  backfill, and use new stack names.
 - For alarm notifications, add `AlarmTopicArn=<topic ARN>` to the regional deploys, with a
   topic in that region.
-- Every view here counts or sums, so a new view version stays empty until a backfill fills
-  it and marks it live ([sql.md §7.5](../../docs/spec/sql.md#75-state-classes)). The
-  backfill arrives in M5. Until then, a deployed store takes appends, answers stream
-  queries and archives events, and its views stay empty.
+- Until a backfill makes a view version live, queries over it return `ErrViewNotReady`
+  ([lifecycle.md §2](../../docs/spec/lifecycle.md#2-deploying-changes)). On this store,
+  which has no events yet, step 4 takes about two minutes. Deploy the application after it.
 
 ## Use it from an application
 
