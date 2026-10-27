@@ -205,6 +205,36 @@ linters:
           deny:
             - pkg: log$
               desc: Use log/slog instead, see https://go.dev/blog/slog
+        # Dynaflux: ADR 0004 keeps the protocol above the storage interface, so AWS calls stay
+        # in the adapters. `*` stops at `/`: internal/archive/firehose and
+        # internal/setup/awssetup are adapters, outside these globs.
+        "adapters only":
+          files:
+            - "**/internal/projector/*.go"
+            - "**/internal/meta/*.go"
+            - "**/internal/engine/*.go"
+            - "**/internal/setup/*.go"
+            - "**/internal/archive/*.go"
+            - "**/internal/keys/*.go"
+            - "**/internal/agg/*.go"
+            - "**/internal/expr/*.go"
+            - "!$test"
+          deny:
+            - pkg: github.com/aws/
+              desc: Only the AWS adapters import AWS packages, see docs/decisions/0004-runtime-storage-boundary.md
+        # Dynaflux: internal/esmlocal and internal/emulatortest serve the tests against DynamoDB
+        # Local (docs/decisions/0009-emulator-choice.md), so production code, the Lambda binary
+        # included, never imports them.
+        "test support":
+          files:
+            - "!$test"
+            - "!**/internal/esmlocal/*.go"
+            - "!**/internal/emulatortest/*.go"
+          deny:
+            - pkg: github.com/lucindo/dynaflux/internal/esmlocal
+              desc: A test-only stream reader; production code never imports it
+            - pkg: github.com/lucindo/dynaflux/internal/emulatortest
+              desc: Test support for the emulator; production code never imports it
 
     embeddedstructfieldcheck:
       # Checks that sync.Mutex and sync.RWMutex are not used as embedded fields.

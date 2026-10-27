@@ -1,0 +1,126 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+One column of each type, with the values at the edges of each type's encoding: integers a
+double can't hold, decimals with every digit, floats in exponent form, times at the ends
+of their range, and strings that JSON must escape.
+-- dynaflux/types.sql --
+CREATE STREAM types (
+    s    String,
+    lc   LowCardinality(String),
+    u    UUID,
+    u8   UInt8,
+    u16  UInt16,
+    u32  UInt32,
+    u64  UInt64,
+    i8   Int8,
+    i16  Int16,
+    i32  Int32,
+    i64  Int64,
+    f    Float64,
+    d    Decimal(38, 10),
+    d0   Decimal(5, 0),
+    b    Bool,
+    day  Date,
+    ms   DateTime64(3),
+    us   DateTime64(6),
+    n    Nullable(Int64),
+    ad   Array(Decimal(10, 2)),
+    au   Array(UUID),
+    ab   Array(Bool),
+    ay   Array(Date),
+    as8  Array(UInt8),
+    ai64 Array(Int64),
+    af   Array(Float64),
+    at   Array(DateTime64(6)),
+    astr Array(String)
+)
+PRIMARY KEY (s);
+-- events/types --
+["<a href=\"x\">&amp;</a>\u2028\u0001\u001f\u007f é😀","","61f0c404-5cb3-11e7-907b-a6006ad3dba0","255","65535","4294967295","18446744073709551615","-128","-32768","-2147483648","-9223372036854775808","1e+21","-9999999999999999999999999999.9999999999","99999","true","2106-02-07","1970-01-01 00:00:00.001","2024-05-31 13:45:00.000123","9223372036854775807",["0.01","-1.00","12345678.90"],["00000000-0000-0000-0000-000000000000"],["true","false"],["1970-01-01"],["0","255"],["-9223372036854775808"],["0.1","-1.5e-07"],["2106-02-07 06:28:14.999999"],["","é"],"01JB8Z9X4Q7M3N2P5R6S8T0V20","2025-10-26 10:40:00.123456","2025-10-26 10:40:00.130000","us-east-1"]
+["","x","ffffffff-ffff-ffff-ffff-ffffffffffff","0","0","0","0","0","0","0","9223372036854775807","-1.5e-07","0.0000000001","-1","false","1970-01-01","2024-05-31 13:45:00.123","1970-01-01 00:00:00.000000",null,[],[],[],[],[],[],[],[],[],"01JB8Z9X4Q7M3N2P5R6S8T0V21","2025-10-26 10:40:00.123456","2025-10-26 10:40:00.130000","us-east-1"]
+-- want/fingerprint --
+sha256:220275188c90bd962f3c0fda0885ff09e6edbd04e585508d1aeb56fea944481e
+-- want/types.create.sql --
+CREATE TABLE `prod_analytics`.`types` (
+  `event_id` string,
+  `event_time` timestamp,
+  `ingest_time` timestamp,
+  `origin_region` string,
+  `s` string,
+  `lc` string,
+  `u` string,
+  `u8` int,
+  `u16` int,
+  `u32` bigint,
+  `u64` decimal(20,0),
+  `i8` int,
+  `i16` int,
+  `i32` int,
+  `i64` bigint,
+  `f` double,
+  `d` decimal(38,10),
+  `d0` decimal(5,0),
+  `b` boolean,
+  `day` date,
+  `ms` timestamp,
+  `us` timestamp,
+  `n` bigint,
+  `ad` array<decimal(10,2)>,
+  `au` array<string>,
+  `ab` array<boolean>,
+  `ay` array<date>,
+  `as8` array<int>,
+  `ai64` array<bigint>,
+  `af` array<double>,
+  `at` array<timestamp>,
+  `astr` array<string>,
+  `_shard` string,
+  `_seq` string,
+  `_arrival` timestamp)
+PARTITIONED BY (day(`event_time`))
+LOCATION 's3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/types/iceberg/'
+TBLPROPERTIES ('table_type' = 'ICEBERG', 'format' = 'parquet', 'write_compression' = 'zstd')
+-- want/types.dedup.sql --
+CREATE OR REPLACE VIEW "prod_analytics"."types_dedup" AS
+SELECT
+  "event_id",
+  "event_time",
+  "ingest_time",
+  "origin_region",
+  "s",
+  "lc",
+  "u",
+  "u8",
+  "u16",
+  "u32",
+  "u64",
+  "i8",
+  "i16",
+  "i32",
+  "i64",
+  "f",
+  "d",
+  "d0",
+  "b",
+  "day",
+  "ms",
+  "us",
+  "n",
+  "ad",
+  "au",
+  "ab",
+  "ay",
+  "as8",
+  "ai64",
+  "af",
+  "at",
+  "astr"
+FROM (
+  SELECT *, row_number() OVER (
+    PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
+  FROM "prod_analytics"."types")
+WHERE "_dedup_rn" = 1
+-- want/types.records --
+{"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V20","event_time":1761475200123456,"ingest_time":1761475200130000,"origin_region":"us-east-1","s":"<a href=\"x\">&amp;</a>\u2028\u0001\u001f é😀","lc":"","u":"61f0c404-5cb3-11e7-907b-a6006ad3dba0","u8":255,"u16":65535,"u32":4294967295,"u64":"18446744073709551615","i8":-128,"i16":-32768,"i32":-2147483648,"i64":"-9223372036854775808","f":1e+21,"d":"-9999999999999999999999999999.9999999999","d0":"99999","b":true,"day":"2106-02-07","ms":1000,"us":1717163100000123,"n":"9223372036854775807","ad":["0.01","-1.00","12345678.90"],"au":["00000000-0000-0000-0000-000000000000"],"ab":[true,false],"ay":["1970-01-01"],"as8":[0,255],"ai64":["-9223372036854775808"],"af":[0.1,-1.5e-7],"at":[4294967294999999],"astr":["","é"],"_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":1761475200000000}
+{"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V21","event_time":1761475200123456,"ingest_time":1761475200130000,"origin_region":"us-east-1","s":"","lc":"x","u":"ffffffff-ffff-ffff-ffff-ffffffffffff","u8":0,"u16":0,"u32":0,"u64":"0","i8":0,"i16":0,"i32":0,"i64":"9223372036854775807","f":-1.5e-7,"d":"0.0000000001","d0":"-1","b":false,"day":"1970-01-01","ms":1717163100123000,"us":0,"ad":[],"au":[],"ab":[],"ay":[],"as8":[],"ai64":[],"af":[],"at":[],"astr":[],"_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":1761475200000000}

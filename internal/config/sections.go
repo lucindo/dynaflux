@@ -81,7 +81,7 @@ func (d *decoder) identity(top object, c *Config) bool {
 		}
 	}
 	if s, ok := d.str(top, "prefix", "for example prefix: prod-"); ok {
-		if s == "" || lowerDashed(s) && strings.HasSuffix(s, "-") {
+		if catalog.ValidPrefix(s) {
 			c.Prefix = s
 		} else {
 			d.errorf(top.at("prefix"), "DF6102",
@@ -235,8 +235,8 @@ func goPackageProblem(s string) string {
 		return "it is a Go keyword"
 	case s == "main":
 		return "a main package can't be imported"
-	case s == "dynaflux" || s == "runtime":
-		return "generated code imports the Dynaflux package of that name"
+	case s == "dynaflux" || s == "runtime" || s == "log":
+		return "generated code imports a package of that name"
 	}
 	return ""
 }

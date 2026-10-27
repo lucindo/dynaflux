@@ -5,10 +5,16 @@ package dynaflux
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+
 	"github.com/lucindo/dynaflux/internal/access"
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/engine"
+	"github.com/lucindo/dynaflux/internal/store/dynamo"
 )
 
 //nolint:gochecknoinits // registers the functions fluxgen and fluxtest reach this package's types through
@@ -40,10 +46,40 @@ func init() {
 	})
 }
 
-// Store is a Dynaflux store that the generated client appends to and reads. In tests,
-// fluxtest.NewStore makes one in memory. The zero Store can't be used.
+// Store is a Dynaflux store that the generated client appends to and reads. [Open] returns
+// one backed by DynamoDB; in tests, fluxtest.NewStore makes one in memory. The zero Store
+// can't be used.
 type Store struct {
 	e *engine.Engine
+}
+
+// Config configures the Store that [Open] returns.
+type Config struct {
+	// AWS configures the DynamoDB client. Its Region is the region the store appends in,
+	// which events record as origin_region. Dynaflux uses its credentials, retryer, HTTP
+	// client and endpoint as they are. The projector's client is a model to follow: the
+	// standard retryer without its client-side retry quota (ratelimit.None), and a 10 s
+	// HTTP timeout for each attempt.
+	AWS aws.Config
+	// Prefix is the deployment's prefix of resource names: the templates' Prefix
+	// parameter, "" for none.
+	Prefix string
+}
+
+// Open returns a store backed by the DynamoDB tables that the generated templates create
+// for cfg.Prefix in cfg.AWS.Region. It makes no AWS call, so a missing table or grant shows
+// on the first append, read or query. Queries don't check yet that a view's version is
+// live: one that isn't returns the rows projected so far.
+func Open(cfg Config) (*Store, error) {
+	if cfg.AWS.Region == "" {
+		return nil, errors.New("dynaflux: Config.AWS has no Region")
+	}
+	if !catalog.ValidPrefix(cfg.Prefix) {
+		return nil, fmt.Errorf("dynaflux: Config.Prefix is %q; use lowercase letters, digits and -, "+
+			"starting with a letter and ending with -, such as prod-, or \"\" for none", cfg.Prefix)
+	}
+	b := dynamo.New(dynamodb.NewFromConfig(cfg.AWS))
+	return &Store{e: engine.New(b, engine.Options{Region: cfg.AWS.Region, Prefix: cfg.Prefix})}, nil
 }
 
 // Catalog holds a store's definitions, compiled. The generated package declares one, as

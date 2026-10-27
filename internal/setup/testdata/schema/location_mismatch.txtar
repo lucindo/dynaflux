@@ -58,7 +58,6 @@ The live table is somewhere else: the setup function never moves a table.
 {
   "page": {
     "location": "s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/page/",
-    "partition": "day(event_time)",
     "table_type": "ICEBERG",
     "columns": {
       "event_id": "string",

@@ -31,22 +31,22 @@ type Naming struct {
 
 // StreamTable names a stream's Global Table.
 func (n Naming) StreamTable(stream string) string {
-	return n.base() + "-stream-" + stream
+	return n.Base() + "-stream-" + stream
 }
 
 // ViewTable names the regional table of a view version.
 func (n Naming) ViewTable(view string, version int) string {
-	return n.base() + "-view-" + view + "-v" + strconv.Itoa(version)
+	return n.Base() + "-view-" + view + "-v" + strconv.Itoa(version)
 }
 
 // MetaTable names the store's regional meta table.
 func (n Naming) MetaTable() string {
-	return n.base() + "-meta"
+	return n.Base() + "-meta"
 }
 
 // ProjectorFunction names the store's projector function when runtime.split is store.
 func (n Naming) ProjectorFunction() string {
-	return n.base() + "-projector"
+	return n.Base() + "-projector"
 }
 
 // StreamProjectorFunction names a stream's projector function when runtime.split is stream.
@@ -56,13 +56,30 @@ func (n Naming) StreamProjectorFunction(stream string) string {
 
 // SetupFunction names the function that serves the templates' deploy-time requests.
 func (n Naming) SetupFunction() string {
-	return n.base() + "-setup"
+	return n.Base() + "-setup"
 }
 
 // Bucket names the store's S3 bucket in a region. The name is in the account regional
 // namespace: only the account can create a name that ends in -{account}-{region}-an.
 func (n Naming) Bucket(account, region string) string {
-	return n.base() + "-" + account + "-" + region + "-an"
+	return n.Base() + "-" + account + "-" + region + "-an"
+}
+
+// ValidPrefix reports whether s is a valid deployment prefix: "" for none, or
+// [a-z][a-z0-9-]*- (config.md's prefix).
+func ValidPrefix(s string) bool {
+	if s == "" {
+		return true
+	}
+	if s[0] < 'a' || s[0] > 'z' || s[len(s)-1] != '-' {
+		return false
+	}
+	for i := range len(s) {
+		if c := s[i]; (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // ReservedBucketPrefixes returns the prefixes that S3 reserves at the start of bucket names.
@@ -72,38 +89,38 @@ func ReservedBucketPrefixes() []string {
 
 // QueryFunction names the query function.
 func (n Naming) QueryFunction() string {
-	return n.base() + "-query"
+	return n.Base() + "-query"
 }
 
 // BackfillFunction names the backfill worker function.
 func (n Naming) BackfillFunction() string {
-	return n.base() + "-backfill"
+	return n.Base() + "-backfill"
 }
 
 // BackfillStateMachine names the backfill state machine.
 func (n Naming) BackfillStateMachine() string {
-	return n.base() + "-backfill"
+	return n.Base() + "-backfill"
 }
 
 // ArchiveStream names the Firehose stream that archives a stream.
 func (n Naming) ArchiveStream(stream string) string {
-	return n.base() + "-archive-" + stream
+	return n.Base() + "-archive-" + stream
 }
 
 // ArchiveDatabase names the Glue database or S3 Tables namespace of the archive. Those
 // names don't allow "-".
 func (n Naming) ArchiveDatabase() string {
-	return strings.ReplaceAll(n.base(), "-", "_")
+	return strings.ReplaceAll(n.Base(), "-", "_")
 }
 
 // ArchiveWorkGroup names the Athena workgroup that creates and evolves the archive tables.
 func (n Naming) ArchiveWorkGroup() string {
-	return n.base()
+	return n.Base()
 }
 
 // ArchiveLogGroup names the log group of the Firehose streams.
 func (n Naming) ArchiveLogGroup() string {
-	return "/aws/kinesisfirehose/" + n.base() + "-archive"
+	return "/aws/kinesisfirehose/" + n.Base() + "-archive"
 }
 
 // StoreResources lists the AWS resource names that the prefix and store alone imply, with
@@ -150,7 +167,9 @@ func (n Naming) CatalogResources(c *Catalog, projectorPerStream bool) []Resource
 	return res
 }
 
-func (n Naming) base() string {
+// Base returns {prefix}{store}, which starts every name of the store and is the metrics'
+// Store dimension.
+func (n Naming) Base() string {
 	return n.Prefix + n.Store
 }
 

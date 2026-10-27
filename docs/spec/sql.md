@@ -420,6 +420,7 @@ transaction ([§9.7](#97-mode)).
 | `Array(T)` | An appended array has at most 1,000 elements. | Bounds the rows one event adds to a view through `ARRAY JOIN` ([§9.5](#95-array-join)). |
 | Key columns | The encoded partition key must fit 2048 bytes and the encoded sort key 1024 bytes, including any shard or `SPLIT` suffix. | DynamoDB key limits. A stream key that's too long fails the append; a view key that's too long is an evaluation error ([§5.8](#58-evaluation-errors)). |
 | Event | The encoded event item, with attribute names and bookkeeping, must fit 400 KB. | DynamoDB item limit. |
+| Event of an archived stream | Its archive record, with the longest shard ID, sequence number and arrival time, must fit 1,024,000 bytes. | Firehose's record limit: no projector could archive the event. |
 
 ### 4.4 Type groups
 

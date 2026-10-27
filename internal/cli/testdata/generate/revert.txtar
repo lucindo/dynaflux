@@ -3,6 +3,8 @@ SPDX-License-Identifier: Apache-2.0
 
 The SQL defines the retained version 1 again: it is current again, without a new
 number, and version 2 is retained.
+-- go.mod --
+module example.com/app
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]

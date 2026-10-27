@@ -135,7 +135,9 @@ can't start a `testing/synctest` bubble.
 and `Until`, `QueryOption` (its first options, `AllowPartial` and `WaitFor`, arrive in M5 and
 M6), `Decimal`, `UUID`, `ValueError`, `BatchError`, `GeneratedCodeVersion1`, and the errors
 `ErrNotFound`, `ErrDuplicate`, `ErrOutsideWindow`, `ErrInvalidValue`, `ErrTooManyKeys` and
-`ErrEvaluation`. `ErrViewNotReady` arrives in M3 with `Open`, the first path that returns it.
+`ErrEvaluation`. `ErrViewNotReady` arrives in M5, with the backfill that makes view versions
+live: until then nothing moves a deployed version out of `pending_backfill`, so `Open`'s
+queries in M3 read rows without checking view states.
 
 **The runtime binary is M3's.** Generated `cmd/dynaflux-runtime/main.go`, its entry point
 and the contents of the runtime package are designed with M3's Lambda adapter; in M2,

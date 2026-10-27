@@ -68,7 +68,9 @@ a new mode, `setup`.**
   fields, computed by `generate`. The properties
   hold no SQL: a `DEFAULT` is a plain string, never `Fn::Sub`, so a `${` in one stays as it
   is. The desired state is in the properties, so a change set shows schema changes,
-  and CloudFormation sends `Update` only when they change. `ServiceTimeout` is 900. The
+  and CloudFormation sends `Update` only when they change. `ServiceTimeout` is 960, a
+  minute past the function's timeout, so a `FAILED` reply arrives in time even when
+  Lambda's queue held the request. The
   handler works from the properties alone; it doesn't consult the binary's catalog. It
   checks that the names, types and defaults have the forms that `internal/archive` writes:
   they become Athena statements, and anyone allowed to invoke the function can send them.
@@ -78,8 +80,10 @@ a new mode, `setup`.**
   1. Create the database at its location if it is missing (`glue:CreateDatabase`, the call
      that `AWS::Glue::Database` makes).
   2. For each table: if missing, `CREATE TABLE` (Iceberg v2, Parquet, zstd) at its
-     location. Otherwise read it (`glue:GetTable`) and fail if its location, partition spec
-     or table type differs: the handler never moves, repartitions or converts a table. Then
+     location. Otherwise read it (`glue:GetTable`) and fail if its location or table type
+     differs: the handler never moves, repartitions or converts a table. It doesn't compare
+     the partition spec, which doesn't change what a query returns and which only
+     Dynaflux's DDL sets at that location. Then
      `ALTER TABLE ADD COLUMNS` for the missing columns, and fail on a column whose type
      differs. Columns the table has and the properties lack are left alone. Nothing is ever
      dropped or retyped, and the handler issues no `DROP`.
@@ -129,13 +133,12 @@ read-only `dynamodb:DescribeTable` to the role.
 **IAM of the setup role:** `dynamodb:DescribeTable` on the store's stream tables in this
 region and its own log group; in archiving regions:
 
-- `athena:StartQueryExecution`, `GetQueryExecution`, `GetQueryResults` and
-  `StopQueryExecution` (to cancel a query when the handler runs out of time) on the
-  workgroup;
+- `athena:StartQueryExecution`, `GetQueryExecution` and `StopQueryExecution` (to cancel a
+  query when the handler runs out of time or can't read its state) on the workgroup;
 - `glue:GetDatabase`, `GetDatabases` and `CreateDatabase` on the catalog and
   `database/default`, which Athena requires in every region;
 - `glue:CreateDatabase`, `CreateTable`, `GetDatabase`, `GetDatabases`, `GetPartitions`,
-  `GetTable`, `GetTables`, `UpdateTable`, `CreateTableOptimizer`, `GetTableOptimizer` and
+  `GetTable`, `GetTables`, `UpdateTable`, `CreateTableOptimizer` and
   `UpdateTableOptimizer` on the catalog, the archive database and `table/<database>/*`;
 - `iam:PassRole` of the optimizer role, with `iam:PassedToService` = `glue.amazonaws.com`;
 - `s3:GetObject` and `PutObject` on `warehouse/<database>/*`, `s3:ListBucket` with
@@ -199,15 +202,12 @@ shows `AccessDenied` for it.
 - A deploy that changes the schema briefly fails projector batches while CloudFormation
   updates the function's configuration and code in two calls. They retry; the error alarms
   need three periods to fire.
-- A handler crash before it replies holds the stack for up to `ServiceTimeout` (15 minutes)
+- A handler crash before it replies holds the stack for up to `ServiceTimeout` (16 minutes)
   before it fails and rolls back. `cfn.LambdaWrap` from `aws-lambda-go` turns returned errors
   into `FAILED` replies.
 - Re-creating a deleted regional stack meets the retained bucket, which it imports
   ([infra.md](../spec/infra.md#12-changes-after-the-first-deploy)); the database and tables
   need nothing.
-- `GetTable` returns no partition spec for an Iceberg table, so the Glue adapter (M3) reads
-  it from the metadata file that the table's `metadata_location` names, and writes it as
-  Athena's `PARTITIONED BY` does (`setup.GlueTable`).
 - `archive.catalog: s3tables` would need its own handler path (its schema is
   replacement-only and Athena access needs Lake Formation); this decision covers `glue` only.
 - **Unverified, for the AWS end-to-end suite:**
@@ -221,6 +221,9 @@ shows `AccessDenied` for it.
     `AWS::Glue::Database`, which makes the same call, so this is probably fine.
   - The exact IAM the Firehose role and the setup role need (`s3:DeleteObject` for
     Firehose; `iam:PassRole` for the optimizer calls).
+  - That Glue still lists a column dropped from an archive table, with
+    `iceberg.field.current` set to `false`. The handler skips such a column, so a column
+    that someone dropped by hand is added again.
   - That the account's Lake Formation settings leave plain IAM access in place (the default);
     [infra.md](../spec/infra.md#11-deploying) states it as a precondition.
 

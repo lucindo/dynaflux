@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"testing/synctest"
 	"time"
 
@@ -336,6 +337,67 @@ func TestAppendRejectsEventOverItemLimit(t *testing.T) {
 			t.Errorf("got %v, want ErrInvalidValue", got.Err)
 		}
 	})
+}
+
+// An event of an archived stream whose archive record could be over Firehose's record
+// limit fails alone, and isn't stored: no projector could archive it.
+func TestAppendRejectsEventOverArchiveRecordLimit(t *testing.T) {
+	t.Parallel()
+	const rejected = "dynaflux: append to s: invalid value: the event's archive record can reach 1024001 bytes, over Firehose's record limit of 1024000"
+	tests := []struct {
+		name    string
+		archive string // dynaflux.yaml's archive section
+		size    int    // the record's size
+		wantErr string
+	}{
+		{"at the limit", "", 1_024_000, ""},
+		{"one byte over", "", 1_024_001, rejected},
+		{"one byte over, not archived", "archive:\n  enabled: false\n", 1_024_001, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				got, stored := appendArchiveRecord(t, tt.archive, tt.size)
+				if tt.wantErr == "" {
+					if got.Err != nil || stored != 1 {
+						t.Errorf("got %v and %d events stored, want success", got.Err, stored)
+					}
+					return
+				}
+				var ae *engine.ArchiveSizeError
+				if !errors.As(got.Err, &ae) || *ae != (engine.ArchiveSizeError{Stream: "s", Size: tt.size}) ||
+					!errors.Is(got.Err, engine.ErrInvalidValue) || got.Err.Error() != tt.wantErr || stored != 0 {
+					t.Errorf("got %v and %d events stored, want an *ArchiveSizeError for s of %d bytes and none stored", got.Err, stored, tt.size)
+				}
+			})
+		})
+	}
+}
+
+// appendArchiveRecord appends to stream s, in a store whose dynaflux.yaml ends with
+// archive, an event whose archive record has size bytes, and returns the result and how
+// many events s holds after.
+func appendArchiveRecord(t *testing.T, archive string, size int) (engine.Appended, int) {
+	t.Helper()
+	c, err := engine.Compile(catalogtest.MarshalFS(t, fstest.MapFS{
+		"dynaflux.yaml":      {Data: []byte("store: app\nregions: [us-east-1]\n" + archive)},
+		"dynaflux/store.sql": {Data: []byte("CREATE STREAM s (k String, v String) PRIMARY KEY (k);")},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The record without v's text, with the bubble's 15-digit times and the longest unit,
+	// sequence number and arrival time: {"event_id":"<26>","event_time":<15>,
+	// "ingest_time":<15>,"origin_region":"us-east-1","k":"u1","v":"","_shard":"<65>",
+	// "_seq":"<40>","_arrival":<16>}
+	const overhead = 1 + 39 + 29 + 30 + 28 + 9 + 7 + 77 + 50 + 28 + 1
+	// \x01 takes 6 bytes in JSON, so the event item stays far below 400 KB.
+	n := size - overhead
+	v := strings.Repeat("\x01", n/6) + strings.Repeat("x", n%6)
+	e := newEngine(mem.New())
+	got := appendOne(t, e, c, "s", []expr.Value{expr.String("u1"), expr.String(v), micros(start)}, engine.AppendMode{Import: true})
+	return got, len(readAll(t, e, c, "s", "u1", nil, nil))
 }
 
 func TestReadMergesShardsInEventOrder(t *testing.T) {

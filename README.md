@@ -9,8 +9,8 @@ Dynaflux is a Go library and CLI for event-sourced fact streams and materialized
 DynamoDB Global Tables. You declare streams, views and queries in ClickHouse-flavored SQL.
 Dynaflux rejects, at build time, any query that DynamoDB can't serve efficiently, and
 estimates what each event and query costs. The goal is to turn these definitions into
-typed Go code and infrastructure that run active-active in several AWS regions. That part
-isn't built yet: see [Status](#status).
+typed Go code and infrastructure that run active-active in several AWS regions. None of it
+has run on AWS yet: see [Status](#status).
 
 ## Why
 
@@ -38,7 +38,7 @@ Athena, over an archive of events that Dynaflux writes to S3.
 
 ## Status
 
-Dynaflux is in early development, at milestone M2: the runtime core. What works:
+Dynaflux is in early development, at milestone M3: the AWS runtime. What works:
 
 - The SQL dialect and `dynaflux.yaml` are specified in [docs/spec](docs/spec).
 - `dynaflux validate` checks a project and reports each problem with its file, line and a
@@ -46,15 +46,19 @@ Dynaflux is in early development, at milestone M2: the runtime core. What works:
 - `dynaflux explain` shows the table layout and the estimated cost of a stream, view or
   query.
 - `dynaflux generate` writes the typed Go client package of a project and numbers its view
-  versions in `dynaflux.lock`, a file you commit.
+  versions in `dynaflux.lock`, a file you commit. It also writes the store's AWS
+  infrastructure as CloudFormation templates ([docs/spec/infra.md](docs/spec/infra.md)),
+  and the `main.go` of the Lambda binary that its functions run.
 - The generated client appends events and runs queries against an in-memory store from
   `fluxtest`, with the projector keeping views current.
   [examples/analytics](examples/analytics) compiles and passes its tests this way.
+- `dynaflux.Open` returns a store backed by DynamoDB. The Lambda binary runs the projector,
+  which keeps views current and archives events through Firehose, and the setup function
+  that the templates' custom resources call. The integration tests run the store and the
+  projector against DynamoDB Local.
 
-Nothing runs on AWS yet. That needs the AWS runtime, with the DynamoDB store and the
-projector Lambda (milestone M3), and the infrastructure templates (M4). The operations
-commands, such as `status` and `backfill`, come after them. Until v1.0, the dialect, the
-configuration and the commands may change.
+Nothing has run on AWS yet. The operations commands, such as `status` and `backfill`, come
+next. Until v1.0, the dialect, the configuration and the commands may change.
 
 ## Install
 
@@ -198,15 +202,18 @@ dynaflux/top_pages.sql:4:1: error DF4101: TopPages: view page_daily is partition
 - [docs/spec/sql.md](docs/spec/sql.md): the SQL dialect, with every diagnostic code.
 - [docs/spec/config.md](docs/spec/config.md): the `dynaflux.yaml` reference.
 - [docs/spec/encoding.md](docs/spec/encoding.md): how Dynaflux stores data in DynamoDB.
+- [docs/spec/infra.md](docs/spec/infra.md): the CloudFormation templates that
+  `dynaflux generate` writes.
 - [docs/decisions](docs/decisions/README.md): architecture decision records.
 - [docs/README.md](docs/README.md): an index of all the docs.
 
 ## Development
 
 - `make help` lists the development targets. `make verify` runs the formatters,
-  `go mod tidy`, the linters, the vulnerability check and the tests. If the linter reports an
-  unknown linter, your `golangci-lint` is older than `.golangci.yml`: run
-  `make tools-update`.
+  `go mod tidy`, a check that no module needs a Go newer than 1.26, the linters, the
+  vulnerability check, the tests and a `linux/arm64` build of the example's Lambda binary.
+  If the linter reports an unknown linter, your `golangci-lint` is older than
+  `.golangci.yml`: run `make tools-update`.
 - `Float64` results must be the same on every CPU, so `make cross-arch` runs the
   cross-architecture tests as amd64: natively on an amd64 machine, and through Rosetta on
   Apple silicon. It isn't part of `make verify`.
@@ -217,6 +224,18 @@ dynaflux/top_pages.sql:4:1: error DF4101: TopPages: view page_daily is partition
 - `make test` runs a smoke tier of the simulation harness. `make sim` and `make sim-controls`
   run its full tier and its negative controls, as
   [docs/runbooks/simulation.md](docs/runbooks/simulation.md) describes.
+- `make integration` runs the packages that have `*_integration_test.go` files against
+  DynamoDB Local in Docker. It starts the container if it isn't running and leaves it
+  running for the next run; `make emulators-down` stops it and drops its tables. These
+  tests never call AWS: they reach DynamoDB Local at the loopback address in
+  `DYNAFLUX_DYNAMODB_ENDPOINT`, which the target sets, and fail without it. CI runs
+  `make verify` and `make integration` on every push and pull request. With DynamoDB Local
+  already running, the lane takes about 10 s on an Apple M2 Max, or 25 s with an empty
+  build cache; it must stay under 3 minutes. DynamoDB Local's memory grows with every run,
+  and after many runs its requests time out: `make emulators-down` resets it. `runtime`'s
+  tests also check every DynamoDB and Firehose call the projector made against the
+  projector's role in the templates: a call the role doesn't allow fails the run and, after
+  a run of all the tests, so does an action the role allows that no call used.
 
 ## License
 

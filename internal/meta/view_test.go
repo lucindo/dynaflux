@@ -74,7 +74,7 @@ func TestSetViewState(t *testing.T) {
 			for _, bk := range backends() {
 				t.Run(bk.name, func(t *testing.T) {
 					t.Parallel()
-					m := meta.New(bk.new(), table)
+					m := meta.New(bk.new(t), table)
 					from[tt.from](t, m)
 					err := m.SetViewState(t.Context(), version, tt.to)
 					if tt.ok && err != nil || !tt.ok && !errors.Is(err, meta.ErrTransition) {
@@ -108,7 +108,7 @@ func TestMarkBroken(t *testing.T) {
 			for _, bk := range backends() {
 				t.Run(bk.name, func(t *testing.T) {
 					t.Parallel()
-					m := meta.New(bk.new(), table)
+					m := meta.New(bk.new(t), table)
 					tt.setup(t, m)
 					opened, err := m.MarkBroken(t.Context(), version, meta.Failure{Unit: "u1", Seq: seq(2)})
 					if err != nil || opened != tt.opened {
@@ -141,11 +141,11 @@ func TestMarkBrokenRejectsBadSequenceNumbers(t *testing.T) {
 // listing for fences is measured from the first.
 func TestActivatedAt(t *testing.T) {
 	t.Parallel()
-	for _, bk := range backends() {
+	for _, bk := range memBackends() {
 		t.Run(bk.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
-				m := meta.New(bk.new(), table)
+				m := meta.New(bk.new(t), table)
 				for _, s := range []meta.State{meta.Activating, meta.Activating, meta.Live} {
 					setStates(t, m, s)
 					time.Sleep(time.Minute)

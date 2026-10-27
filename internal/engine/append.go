@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/archive"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/expr"
 	"github.com/lucindo/dynaflux/internal/keys"
@@ -147,6 +148,16 @@ func (e *Engine) event(s *stream, vals []expr.Value, now int64, w window) (store
 			return nil, store.Key{}, fmt.Errorf("dynaflux: expiry: %w", aerr)
 		}
 		it[catalog.AttrTTL] = keys.TTL(expiry)
+	}
+	if s.archive != nil {
+		// The projector archives the values it decodes from the item.
+		decoded, bad := s.Decode(it)
+		if err = errors.Join(bad...); err != nil {
+			return nil, store.Key{}, fmt.Errorf("dynaflux: append to %s: the event doesn't decode: %w", s.Def.Name, err)
+		}
+		if size := s.archive.MaxSize(decoded); size > archive.MaxRecordSize {
+			return nil, store.Key{}, &ArchiveSizeError{Stream: s.Def.Name, Size: size}
+		}
 	}
 	return it, k, nil
 }

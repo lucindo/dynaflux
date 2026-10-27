@@ -3,6 +3,8 @@ SPDX-License-Identifier: Apache-2.0
 
 The SQL defines the current version: the lock stays byte for byte, and generate
 prints nothing.
+-- go.mod --
+module example.com/app
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]

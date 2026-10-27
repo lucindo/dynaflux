@@ -87,7 +87,7 @@ func (b *builder) dashboard(s *Scope) (Dashboard, error) {
 	}
 	return Dashboard{
 		Common: Common{ID: idDashboard},
-		Name:   b.fit(maxDashboardName, b.base()+"-"+placeholder(PlaceholderRegion)),
+		Name:   b.fit(maxDashboardName, b.naming.Base()+"-"+placeholder(PlaceholderRegion)),
 		Body:   Text("{\"widgets\":[\n" + strings.Join(lines, ",\n") + "\n]}"),
 	}, nil
 }
@@ -107,7 +107,7 @@ func (b *builder) graphs(s *Scope) []graph {
 	for _, d := range s.DeliveryStreams {
 		firehoses = append(firehoses, string(d.Name))
 	}
-	tables := dimTableName + "=" + b.base()
+	tables := dimTableName + "=" + b.naming.Base()
 	gs := []graph{
 		{Title: "Projector iterator age (ms)", Stat: statMaximum, Metrics: lines(namespaceLambda, dimFunctionName, projectors, metricIteratorAge)},
 		{
@@ -137,7 +137,7 @@ func (b *builder) graphs(s *Scope) []graph {
 	return append(gs,
 		graph{Title: "DynamoDB system errors", Metrics: [][]any{search("Operation,"+dimTableName, "SystemErrors", statSum, tables)}},
 		graph{Title: "Opened breakers, too-large rows and divergent duplicates", Stat: statSum, Metrics: lines(
-			catalog.MetricNamespace, catalog.MetricDimensionStore, []string{b.base()},
+			catalog.MetricNamespace, catalog.MetricDimensionStore, []string{b.naming.Base()},
 			catalog.MetricBreakerOpened, catalog.MetricRowTooLarge, catalog.MetricDivergentDuplicates)},
 	)
 }

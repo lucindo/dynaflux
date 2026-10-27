@@ -2,6 +2,8 @@ Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
 Without dynaflux.lock, every view is version 1, and generate creates the lock.
+-- go.mod --
+module example.com/app
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]

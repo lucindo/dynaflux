@@ -19,8 +19,10 @@ whose decision stands, amends it instead: the older record gets the line
 | [0001](0001-sql-parser.md) | Hand-written parser for the SQL dialect | Accepted |
 | [0002](0002-view-version-lock-file.md) | Number view versions with a committed lock file | Accepted, amended by 0007 |
 | [0003](0003-shard-identity-from-tumbling-window.md) | The projector learns its shard from a Lambda tumbling window | Accepted |
-| [0004](0004-runtime-storage-boundary.md) | Keep every protocol rule above a storage interface of DynamoDB primitives | Accepted |
+| [0004](0004-runtime-storage-boundary.md) | Keep every protocol rule above a storage interface of DynamoDB primitives | Accepted, amended by 0010 |
 | [0005](0005-public-go-value-types.md) | Go types for SQL values in generated code | Accepted |
 | [0006](0006-generated-code-contract.md) | Generated code calls six generic helpers in package `fluxgen` | Accepted |
 | [0007](0007-lock-file-format.md) | Format details of `dynaflux.lock` | Accepted |
 | [0008](0008-archive-schema-migration.md) | A custom resource served by the runtime binary migrates the archive schema | Accepted |
+| [0009](0009-emulator-choice.md) | DynamoDB Local runs every integration test | Accepted |
+| [0010](0010-runtime-entry-point.md) | `runtime.Run` starts every function, and the projector core stops sending before Lambda's deadline | Accepted |

@@ -58,7 +58,6 @@ The live table isn't an Iceberg table: the setup function never converts a table
 {
   "page": {
     "location": "s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/page/iceberg/",
-    "partition": "day(event_time)",
     "table_type": "",
     "columns": {
       "event_id": "string",

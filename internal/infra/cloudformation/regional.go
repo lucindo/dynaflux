@@ -18,10 +18,11 @@ import (
 
 // Service timeouts of the custom resources, so that a setup function that never replies
 // fails the deploy in minutes rather than an hour. The archive schema's Athena statements
-// can take minutes.
+// can take minutes; its timeout outlasts the setup function's 900 s by a minute, so that a
+// FAILED reply arrives in time even when Lambda's queue held the request.
 const (
 	lookupTimeoutSeconds        = 300
-	archiveSchemaTimeoutSeconds = 900
+	archiveSchemaTimeoutSeconds = 960
 )
 
 const (

@@ -25,7 +25,6 @@ var update = flag.Bool("update", false, "rewrite the want sections from the call
 // glueTable is a [setup.GlueTable] as glue.json writes it.
 type glueTable struct {
 	Location  string            `json:"location"`
-	Partition string            `json:"partition"`
 	TableType string            `json:"table_type"`
 	Columns   map[string]string `json:"columns"`
 }
@@ -220,7 +219,6 @@ func TestSchemaRetriesCommitConflict(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		aws := &fakeAWS{t: t, tables: map[string]setup.GlueTable{"page": {
 			Location:  "s3://prod-analytics-123456789012-us-east-1-an/warehouse/prod_analytics/page/iceberg/",
-			Partition: "day(event_time)",
 			TableType: "ICEBERG",
 			Columns:   map[string]string{"event_id": "string", "event_time": "timestamp"},
 		}}}

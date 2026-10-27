@@ -161,7 +161,7 @@ func (b *builder) setupArchiveStatements() []Statement {
 	statements := []Statement{
 		{
 			Sid:       "ArchiveQueries",
-			Actions:   []string{"athena:GetQueryExecution", "athena:GetQueryResults", "athena:StartQueryExecution", "athena:StopQueryExecution"},
+			Actions:   []string{"athena:GetQueryExecution", "athena:StartQueryExecution", "athena:StopQueryExecution"},
 			Resources: []Text{regionalARN("athena", "workgroup/"+ref(idArchiveWorkGroup, AttrName))},
 		},
 		// Athena needs these on the default database in every region.
@@ -174,7 +174,7 @@ func (b *builder) setupArchiveStatements() []Statement {
 			Sid: "ArchiveCatalog",
 			Actions: []string{
 				glueCreateDatabase, "glue:CreateTable", "glue:CreateTableOptimizer", glueGetDatabase, "glue:GetDatabases",
-				"glue:GetPartitions", glueGetTable, "glue:GetTableOptimizer", "glue:GetTables", glueUpdateTable,
+				"glue:GetPartitions", glueGetTable, "glue:GetTables", glueUpdateTable,
 				"glue:UpdateTableOptimizer",
 			},
 			Resources: archiveCatalog(db),

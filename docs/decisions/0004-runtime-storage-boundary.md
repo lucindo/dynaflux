@@ -7,6 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by [ADR 0010](0010-runtime-entry-point.md): the core, not the Lambda adapter, stops
+  sending a reserve before the context's deadline
 
 ## Context
 

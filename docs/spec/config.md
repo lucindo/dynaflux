@@ -201,7 +201,7 @@ A clause in SQL always wins over a config default: `MODE` over `defaults.view_mo
 
 | Key | Type | Default | Rules | Used by |
 |-----|------|---------|-------|---------|
-| `go.package` | string | `flux` | A lowercase Go identifier (`^[a-z][a-z0-9]*$`) that isn't a Go keyword, `main`, `dynaflux` or `runtime` (`DF6301`). Generated and user code import the Dynaflux packages `dynaflux` and `runtime`, so either name would need an import alias. | `codegen` |
+| `go.package` | string | `flux` | A lowercase Go identifier (`^[a-z][a-z0-9]*$`) that isn't a Go keyword, `main`, `dynaflux`, `runtime` or `log` (`DF6301`). Generated and user code import the Dynaflux packages `dynaflux` and `runtime`, and the runtime binary's `main.go` imports the standard `log`, so each name would need an import alias. | `codegen` |
 | `go.out` | path | `internal/flux` | Path rules (`DF6302`). Must differ from `runtime.out` and `infra.out` (`DF6303`). | `codegen` |
 
 ### `runtime`
@@ -541,7 +541,7 @@ Severity column.
 | DF6203 | error | `**` is part of a path segment, as in `dynaflux/**.sql`. | Write `dynaflux/**/*.sql`. |
 | DF6204 | error | An `sql` pattern matches no files. | Patterns are relative to the project root (the message gives it), and wildcards skip names that start with `.` or `_`, and `testdata`. |
 | DF6205 | error | A matched file is a link that is absolute, or whose target leaves the project root. A link that leaves through another link is `DF6002`. | Move the file into the project. |
-| DF6301 | error | `go.package` isn't a valid package name, or is `dynaflux` or `runtime`. | Use a short lowercase name such as `flux`. |
+| DF6301 | error | `go.package` isn't a valid package name, or is `dynaflux`, `runtime` or `log`. | Use a short lowercase name such as `flux`. |
 | DF6302 | error | An output path is empty or absolute, contains `\` or a `..` segment, or is the project root. | Use a directory below the project root, such as `internal/flux`. |
 | DF6303 | error | Two of `go.out`, `runtime.out` and `infra.out` are the same directory. | Give each output its own directory. |
 | DF6304 | error | `runtime.out` can't import `go.out`: `go.out` has an `internal` segment, and `runtime.out` is outside the directory that holds it. | Move `runtime.out` inside that directory (the message names it), or move `go.out`. |

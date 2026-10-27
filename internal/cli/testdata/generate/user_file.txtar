@@ -3,6 +3,8 @@ SPDX-License-Identifier: Apache-2.0
 
 go.out holds client.go without the generated-code line: generate refuses to
 overwrite it, and writes nothing.
+-- go.mod --
+module example.com/app
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]

@@ -16,8 +16,10 @@ import (
 	"maps"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -33,15 +35,17 @@ func generateCommand() command {
 		args:    "[-unprotect-region region]",
 		summary: "write the Go client package and templates, and update dynaflux.lock",
 		doc: `Generate checks the project as validate does. Without errors, it writes the typed
-Go client package to go.out, the CloudFormation templates to infra.out, and numbers
-the view versions in dynaflux.lock. It prints one line for each version that is
-new, current again or retained, and nothing more when no version changed.
+Go client package to go.out, the runtime binary's main.go to runtime.out, the
+CloudFormation templates to infra.out, and numbers the view versions in
+dynaflux.lock. It prints one line for each version that is new, current again or
+retained, and nothing more when no version changed. main.go imports go.out by the
+module path in the go.mod of the project root or the nearest directory above it.
 
-It leaves unchanged files alone. It won't overwrite a Go file in go.out that has no
-"// Code generated ... DO NOT EDIT." line, or a template in infra.out whose first
-line isn't "# Code generated ... DO NOT EDIT.". It overwrites
-global.stack-policy.json, which can't carry that line, only when the global.yaml
-beside it carries it.
+It leaves unchanged files alone. It won't overwrite a Go file in go.out or
+runtime.out that has no "// Code generated ... DO NOT EDIT." line, or a template
+in infra.out whose first line isn't "# Code generated ... DO NOT EDIT.". It
+overwrites global.stack-policy.json, which can't carry that line, only when the
+global.yaml beside it carries it.
 
 It compares the new templates with those it wrote last time, and writes nothing
 when a view version's table would disappear or hold another definition (DF6016),
@@ -54,8 +58,8 @@ back on.
 
 Exit status: 0 when the files are written (warnings are allowed), 1 when the project
 has an error, has no stream to deploy, fails a comparison with the last templates,
-or go.out or infra.out holds a file that isn't generated, and 2 for usage and I/O
-problems.
+or go.out, runtime.out or infra.out holds a file that isn't generated, and 2 for
+usage and I/O problems, and for a project outside a Go module.
 `,
 		setup: func(fs *flag.FlagSet) func(*cli, []string) int {
 			var opts infra.Options
@@ -144,7 +148,16 @@ func render(p *project, version string, templates []output) ([]output, error) {
 	if err != nil {
 		return nil, err
 	}
-	files, err := codegen.Package(p.cat, codegen.Options{Package: p.cfg.Go.Package, Version: version})
+	o := codegen.Options{Package: p.cfg.Go.Package, Version: version}
+	files, err := codegen.Package(p.cat, o)
+	if err != nil {
+		return nil, err
+	}
+	importPath, err := goOutImportPath(p.dir, p.cfg.Go.Out)
+	if err != nil {
+		return nil, err
+	}
+	mainGo, err := codegen.Main(p.cat, importPath, path.Base(p.cfg.Runtime.Out), o)
 	if err != nil {
 		return nil, err
 	}
@@ -152,8 +165,55 @@ func render(p *project, version string, templates []output) ([]output, error) {
 	for _, name := range slices.Sorted(maps.Keys(files)) {
 		outputs = append(outputs, output{path: path.Join(p.cfg.Go.Out, name), data: files[name]})
 	}
+	outputs = append(outputs, output{path: path.Join(p.cfg.Runtime.Out, "main.go"), data: mainGo})
 	outputs = append(outputs, templates...)
 	return append(outputs, output{path: catalog.LockFileName, data: lockData}), nil
+}
+
+// goOutImportPath returns the import path of go.out, which is relative to the project root
+// dir: the path of the module whose go.mod is in dir or the nearest directory above it,
+// joined with go.out's directory in that module.
+func goOutImportPath(dir, goOut string) (string, error) {
+	for mod := dir; ; {
+		data, err := os.ReadFile(filepath.Join(mod, "go.mod"))
+		if err == nil {
+			modPath := goModulePath(data)
+			if modPath == "" {
+				return "", fmt.Errorf("%s has no module line", filepath.Join(mod, "go.mod"))
+			}
+			rel, relErr := filepath.Rel(mod, filepath.Join(dir, filepath.FromSlash(goOut)))
+			if relErr != nil {
+				return "", relErr
+			}
+			return path.Join(modPath, filepath.ToSlash(rel)), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(mod)
+		if parent == mod {
+			return "", fmt.Errorf("no go.mod in %s or a directory above it: the main.go in runtime.out imports go.out "+
+				"by its import path, so the project must be in a Go module", dir)
+		}
+		mod = parent
+	}
+}
+
+// goModulePath returns the path in go.mod's module directive, or "" without one.
+func goModulePath(gomod []byte) string {
+	for line := range strings.Lines(string(gomod)) {
+		line, _, _ = strings.Cut(line, "//")
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module")
+		if !ok || rest == strings.TrimLeft(rest, " \t") {
+			continue // another directive, or a word that starts with module
+		}
+		rest = strings.TrimSpace(rest)
+		if unquoted, err := strconv.Unquote(rest); err == nil {
+			return unquoted
+		}
+		return rest
+	}
+	return ""
 }
 
 // write writes the outputs whose bytes changed, each through a temporary file and a
@@ -219,7 +279,7 @@ func (c *cli) checkGenerated(root *os.Root, o output, old []byte) int {
 		}
 	case path.Ext(o.path) == ".go" && !isGenerated(old):
 		c.errorf("dynaflux generate: %s has no \"// Code generated ... DO NOT EDIT.\" line, so it isn't "+
-			"generated code; move it out of go.out", o.path)
+			"generated code; move it out of %s", o.path, path.Dir(o.path))
 		return exitErrors
 	case path.Ext(o.path) == ".yaml" && !isGeneratedTemplate(old):
 		c.errorf("dynaflux generate: %s doesn't start with a \"# Code generated ... DO NOT EDIT.\" line, so it "+

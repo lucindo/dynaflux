@@ -345,12 +345,15 @@ API and Athena DDL ([ADR 0008](../decisions/0008-archive-schema-migration.md)):
 - **Create and update:** the function creates the database if it is missing. For each
   table, it creates the table if it is missing (Iceberg v2, Parquet, zstd, partitioned by
   `day(event_time)`), and otherwise adds the missing columns. It fails rather than move a
-  table, change its partitioning or change a column's type, and it never drops anything: a
-  column that the table has and the properties lack stays. Then it creates or updates each
-  table's compaction and snapshot-retention optimizers, and re-creates each
-  `<stream>_dedup` view. Each call retries `AccessDenied` for about 60 seconds, while the
-  permissions and the optimizer role that the same deploy creates take effect. It times out
-  after 900 seconds.
+  table or change a column's type, it never changes a table's partitioning, and it never
+  drops anything: a column that the table has and the properties lack stays. Then it
+  creates or updates each table's compaction and snapshot-retention optimizers, and
+  re-creates each `<stream>_dedup` view. Each call retries `AccessDenied`, including Glue
+  refusing an optimizer role it can't assume yet, for about 60 seconds, while the
+  permissions and the optimizer role that the same deploy creates take effect. An Athena
+  statement that fails from throttling runs again. The work stops 30 seconds before the
+  function's 900-second timeout, so a stuck request still replies `FAILED`, and
+  CloudFormation waits 960 seconds (`ServiceTimeout`) for the reply.
 - **Delete:** does nothing. The database, the tables and their optimizers outlive the
   stack, so a new regional stack, or an archive turned back on, finds them and goes on
   with them.
@@ -510,9 +513,9 @@ archive regions.
 |-----------|---------|-----------|-----------|
 | `Logs` | `logs:CreateLogStream`, `logs:PutLogEvents` | The function's log group | |
 | `StreamTables` | `dynamodb:DescribeTable` | The stream tables in this region | |
-| `ArchiveQueries` | `athena:GetQueryExecution`, `GetQueryResults`, `StartQueryExecution`, `StopQueryExecution` | The workgroup | |
+| `ArchiveQueries` | `athena:GetQueryExecution`, `StartQueryExecution`, `StopQueryExecution` | The workgroup | |
 | `ArchiveAthenaCatalog` | `glue:CreateDatabase`, `GetDatabase`, `GetDatabases` | The Glue catalog and `database/default`, which Athena needs in every region | |
-| `ArchiveCatalog` | `glue:CreateDatabase`, `CreateTable`, `CreateTableOptimizer`, `GetDatabase`, `GetDatabases`, `GetPartitions`, `GetTable`, `GetTableOptimizer`, `GetTables`, `UpdateTable`, `UpdateTableOptimizer` | The Glue catalog, the archive database and its tables | |
+| `ArchiveCatalog` | `glue:CreateDatabase`, `CreateTable`, `CreateTableOptimizer`, `GetDatabase`, `GetDatabases`, `GetPartitions`, `GetTable`, `GetTables`, `UpdateTable`, `UpdateTableOptimizer` | The Glue catalog, the archive database and its tables | |
 | `ArchivePassOptimizerRole` | `iam:PassRole` | The optimizer role | `iam:PassedToService` is `glue.amazonaws.com` |
 | `ArchiveFiles` | `s3:GetObject`, `s3:PutObject` | `warehouse/<database>/*` in the bucket | |
 | `ArchiveList` | `s3:ListBucket` | The bucket | `s3:prefix` is `warehouse/<database>` or starts with `warehouse/<database>/` |

@@ -317,10 +317,14 @@ func (cl *call) token(ks []store.Key) dynaflux.Token {
 	return t
 }
 
-// public returns err with the root package's *ValueError in place of the engine's.
+// public returns err with the root package's *ValueError or *ArchiveSizeError in place of
+// the engine's.
 func public(err error) error {
 	if ve, ok := errors.AsType[*engine.ValueError](err); ok {
 		return &dynaflux.ValueError{Name: ve.Name, Err: ve.Err}
+	}
+	if ae, ok := errors.AsType[*engine.ArchiveSizeError](err); ok {
+		return &dynaflux.ArchiveSizeError{Stream: ae.Stream, Size: ae.Size}
 	}
 	return err
 }

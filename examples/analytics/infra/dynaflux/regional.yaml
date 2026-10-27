@@ -557,7 +557,6 @@ Resources:
             Effect: Allow
             Action:
             - athena:GetQueryExecution
-            - athena:GetQueryResults
             - athena:StartQueryExecution
             - athena:StopQueryExecution
             Resource: !Sub arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${ArchiveWorkGroup}
@@ -580,7 +579,6 @@ Resources:
             - glue:GetDatabases
             - glue:GetPartitions
             - glue:GetTable
-            - glue:GetTableOptimizer
             - glue:GetTables
             - glue:UpdateTable
             - glue:UpdateTableOptimizer
@@ -790,7 +788,7 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       ServiceToken: !GetAtt Setup.Arn
-      ServiceTimeout: 900
+      ServiceTimeout: 960
       Database: !Sub
       - ${PrefixUnderscore}analytics
       - {PrefixUnderscore: !Join [_, !Split ["-", !Ref Prefix]]}

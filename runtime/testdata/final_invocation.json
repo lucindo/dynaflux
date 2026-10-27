@@ -1,0 +1,1 @@
+{"Records": [], "window": {"start": "2026-10-26T12:00:00Z", "end": "2026-10-26T12:15:00Z"}, "state": {}, "shardId": "shardId-00000001761480000000-0123abcd", "eventSourceARN": "arn:aws:dynamodb:us-east-1:123456789012:table/app-stream-clicks/stream/2026-10-01T00:00:00.000", "isFinalInvokeForWindow": true, "isWindowTerminatedEarly": false}

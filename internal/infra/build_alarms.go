@@ -132,9 +132,9 @@ func (b *builder) streamAlarms(stream string) []Alarm {
 
 // storeAlarms returns the alarms on the runtime's metrics.
 func (b *builder) storeAlarms() []Alarm {
-	store := []Dimension{{Name: catalog.MetricDimensionStore, Value: Text(b.base())}}
+	store := []Dimension{{Name: catalog.MetricDimensionStore, Value: Text(b.naming.Base())}}
 	alarm := func(r rule, name string) Alarm {
-		return b.alarm("", b.base(), b.tags(TagKindView, ""), r,
+		return b.alarm("", b.naming.Base(), b.tags(TagKindView, ""), r,
 			Metric{Namespace: catalog.MetricNamespace, Name: name, Statistic: statSum, Dimensions: store})
 	}
 	return []Alarm{

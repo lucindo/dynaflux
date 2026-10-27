@@ -23,7 +23,7 @@ func TestAdvanceStoresProgressAndDeadline(t *testing.T) {
 	for _, bk := range backends() {
 		t.Run(bk.name, func(t *testing.T) {
 			t.Parallel()
-			m := meta.New(bk.new(), table)
+			m := meta.New(bk.new(t), table)
 			deadline := bubbleStart.Add(42 * time.Second)
 			for _, upTo := range []int{10, 20} {
 				if err := m.Advance(t.Context(), readUnit(t, m, "u1"), seq(upTo), deadline, never); err != nil {
@@ -54,7 +54,7 @@ func TestAdvanceAlreadyHigherIsSuccess(t *testing.T) {
 	for _, bk := range backends() {
 		t.Run(bk.name, func(t *testing.T) {
 			t.Parallel()
-			m := meta.New(bk.new(), table)
+			m := meta.New(bk.new(t), table)
 			stale := readUnit(t, m, "u1")
 			first := bubbleStart.Add(time.Minute)
 			if err := m.Advance(t.Context(), stale, seq(20), first, never); err != nil {
@@ -79,7 +79,7 @@ func TestStaleAdvanceSeesNewFence(t *testing.T) {
 	for _, bk := range backends() {
 		t.Run(bk.name, func(t *testing.T) {
 			t.Parallel()
-			m := meta.New(bk.new(), table)
+			m := meta.New(bk.new(t), table)
 			advance(t, m, "u1", seq(10))
 			stale := readUnit(t, m, "u1")
 			if _, err := m.EnsureFence(t.Context(), readUnit(t, m, "u1"), version); err != nil {
@@ -183,7 +183,7 @@ func TestEnsureFence(t *testing.T) {
 		for _, bk := range backends() {
 			t.Run(tt.name+"_"+bk.name, func(t *testing.T) {
 				t.Parallel()
-				m := meta.New(bk.new(), table)
+				m := meta.New(bk.new(t), table)
 				u, err := m.EnsureFence(t.Context(), tt.setup(t, m), version)
 				if err != nil {
 					t.Fatal(err)
@@ -205,7 +205,7 @@ func TestAdvanceFromEnsuredFence(t *testing.T) {
 	for _, bk := range backends() {
 		t.Run(bk.name, func(t *testing.T) {
 			t.Parallel()
-			m := meta.New(bk.new(), table)
+			m := meta.New(bk.new(t), table)
 			u, err := m.EnsureFence(t.Context(), readUnit(t, m, "u1"), version)
 			if err == nil {
 				u, err = m.EnsureFence(t.Context(), u, "other@v1")
@@ -232,7 +232,7 @@ func TestConcurrentAdvancesAndFence(t *testing.T) {
 	for _, bk := range backends() {
 		t.Run(bk.name, func(t *testing.T) {
 			t.Parallel()
-			m := meta.New(bk.new(), table)
+			m := meta.New(bk.new(t), table)
 			for round := range 10 {
 				id := fmt.Sprintf("u%d", round)
 				errs := raceFence(t, m, id, 24)
@@ -337,11 +337,11 @@ func noListing(t *testing.T) func(context.Context) ([]string, error) {
 
 func TestFenceUnits(t *testing.T) {
 	t.Parallel()
-	for _, bk := range backends() {
+	for _, bk := range memBackends() {
 		t.Run(bk.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
-				m := meta.New(bk.new(), table)
+				m := meta.New(bk.new(t), table)
 				advance(t, m, "old", seq(10))
 				setStates(t, m, meta.Activating)
 				if _, err := m.FenceUnits(t.Context(), stream, version, listing(new(time.Time), "old", "new")); err != nil {

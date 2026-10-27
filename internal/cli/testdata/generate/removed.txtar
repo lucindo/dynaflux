@@ -2,6 +2,8 @@ Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
 The SQL no longer defines page_daily: its current version is retained.
+-- go.mod --
+module example.com/app
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]

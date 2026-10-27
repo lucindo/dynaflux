@@ -216,6 +216,7 @@ func TestLoadDiagnostics(t *testing.T) {
 		{"DF6301 uppercase package", base + "go:\n  package: Flux\n", []string{"4:12 error DF6301"}},
 		{"DF6301 Go keyword", base + "go:\n  package: func\n", []string{"4:12 error DF6301"}},
 		{"DF6301 runtime", base + "go:\n  package: runtime\n", []string{"4:12 error DF6301"}},
+		{"DF6301 log", base + "go:\n  package: log\n", []string{"4:12 error DF6301"}},
 		{"DF6302 .. before cleaning", base + "go:\n  out: internal/../flux\n", []string{"4:8 error DF6302"}},
 		{"DF6302 absolute", base + "infra:\n  out: /abs\n", []string{"4:8 error DF6302"}},
 		{"DF6302 project root", base + "infra:\n  out: ./\n", []string{"4:8 error DF6302"}},

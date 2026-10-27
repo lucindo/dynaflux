@@ -39,17 +39,17 @@ func always(string) bool { return true }
 
 type backend struct {
 	name string
-	new  func() store.Backend
+	new  func(t *testing.T) store.Backend
 }
 
-// backends are a plain in-memory store, one where every conditional write is applied and
+// memBackends are a plain in-memory store, one where every conditional write is applied and
 // then reported as a failed condition, as after an SDK retry, and one whose eventually
-// consistent reads see no write.
-func backends() []backend {
+// consistent reads see no write. Unlike [backends], they run in a synctest bubble.
+func memBackends() []backend {
 	return []backend{
-		{"mem", func() store.Backend { return mem.New() }},
-		{"retried", func() store.Backend { return storetest.RetriedWrite(mem.New()) }},
-		{"stale reads", newStaleReads},
+		{"mem", func(*testing.T) store.Backend { return mem.New() }},
+		{"retried", func(*testing.T) store.Backend { return storetest.RetriedWrite(mem.New()) }},
+		{"stale reads", func(*testing.T) store.Backend { return newStaleReads() }},
 	}
 }
 

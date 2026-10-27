@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/archive"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/expr"
 	"github.com/lucindo/dynaflux/internal/keys"
@@ -46,6 +47,21 @@ type ValueError struct {
 func (e *ValueError) Error() string { return "dynaflux: " + e.Name + ": " + e.Err.Error() }
 
 func (e *ValueError) Unwrap() error { return e.Err }
+
+// ArchiveSizeError is an event of an archived stream whose archive record could be over
+// Firehose's record limit, so no projector could archive it. It matches [ErrInvalidValue].
+type ArchiveSizeError struct {
+	Stream string
+	// Size is the record's size in bytes with the longest bookkeeping values.
+	Size int
+}
+
+func (e *ArchiveSizeError) Error() string {
+	return fmt.Sprintf("dynaflux: append to %s: %v: the event's archive record can reach %d bytes, over Firehose's record limit of %d",
+		e.Stream, ErrInvalidValue, e.Size, archive.MaxRecordSize)
+}
+
+func (e *ArchiveSizeError) Unwrap() error { return ErrInvalidValue }
 
 func invalid(name string, err error) error {
 	return &ValueError{Name: name, Err: fmt.Errorf("%w: %w", ErrInvalidValue, err)}
@@ -107,10 +123,15 @@ type stream struct {
 	// event_time, then the DEDUP BY columns. Empty without DEDUP BY.
 	idTypes []catalog.Type
 	dedup   []int // indexes in Columns of the DEDUP BY columns
+	// archive encodes the stream's archive records; nil when the stream isn't archived.
+	archive *archive.Encoder
 }
 
 func compileStream(ps *projector.Stream) *stream {
 	s := &stream{Stream: ps}
+	if ps.Def.Archive != nil {
+		s.archive = archive.NewEncoder(ps.Def)
+	}
 	index := func(name string) int {
 		return slices.IndexFunc(ps.Columns, func(c projector.Column) bool { return c.Name == name })
 	}

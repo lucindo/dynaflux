@@ -345,6 +345,21 @@ func TestValueErrorNamesTheColumn(t *testing.T) {
 	}
 }
 
+// An event whose archive record would be over Firehose's record limit fails with an
+// *ArchiveSizeError that names the stream.
+func TestArchiveSizeErrorNamesTheStream(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ev := call(1)
+		ev.Tags = []string{strings.Repeat("\x01", 180_000)} // 6 bytes each in JSON, 1 in the item
+		_, err := fluxgen.AppendEvent(t.Context(), newStore(mem.New()), loadCatalog(t), "api_calls", ev.fields())
+		ae, ok := errors.AsType[*dynaflux.ArchiveSizeError](err)
+		if !ok || ae.Stream != "api_calls" || ae.Size != 1_080_412 || !errors.Is(err, dynaflux.ErrInvalidValue) {
+			t.Errorf("got %v, want a *dynaflux.ArchiveSizeError for api_calls of 1080412 bytes", err)
+		}
+	})
+}
+
 func TestValuesRoundTrip(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {

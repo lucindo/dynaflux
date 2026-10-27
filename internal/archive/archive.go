@@ -36,10 +36,6 @@ const (
 // partitionTransform is the Iceberg transform of every archive table's partition field.
 const partitionTransform = "day"
 
-// Partitioning is the partition spec of every archive table, the day of event_time, in the
-// notation of the setup function's Glue reader.
-const Partitioning = partitionTransform + "(" + catalog.ColumnEventTime + ")"
-
 // Schema is the archive of one region: a table per stream archived there, sorted by name.
 type Schema struct {
 	Tables []Table
@@ -70,8 +66,7 @@ type Column struct {
 func SchemaFor(cat *catalog.Catalog, region string) Schema {
 	var s Schema
 	for i := range cat.Streams {
-		st := &cat.Streams[i]
-		if st.Archive != nil && slices.Contains(st.Archive.Regions, region) {
+		if st := &cat.Streams[i]; Archived(st, region) {
 			s.Tables = append(s.Tables, table(st))
 		}
 	}
@@ -79,6 +74,31 @@ func SchemaFor(cat *catalog.Catalog, region string) Schema {
 	// must not depend on the order.
 	slices.SortFunc(s.Tables, func(a, b Table) int { return strings.Compare(a.Name, b.Name) })
 	return s
+}
+
+// Archived reports whether region archives s.
+func Archived(s *catalog.Stream, region string) bool {
+	return s.Archive != nil && slices.Contains(s.Archive.Regions, region)
+}
+
+// CheckSchema compares env, the fingerprint that the template gave the projector in
+// DYNAFLUX_ARCHIVE_SCHEMA ("" when it is unset), with the one cat gives region (ADR 0008).
+// The variable must be set exactly when region archives a stream.
+func CheckSchema(cat *catalog.Catalog, region, env string) error {
+	s := SchemaFor(cat, region)
+	want := s.Fingerprint()
+	switch {
+	case len(s.Tables) == 0 && env != "":
+		return fmt.Errorf("archive: %s is set, but the projector's catalog archives nothing in %s", catalog.EnvArchiveSchema, region)
+	case len(s.Tables) == 0:
+	case env == "":
+		return fmt.Errorf("archive: %s is missing, but the projector's catalog archives in %s: deploy regional.yaml from the same dynaflux generate as the function",
+			catalog.EnvArchiveSchema, region)
+	case env != want:
+		return fmt.Errorf("archive: %s is %s, but the projector's catalog gives %s: the archive schema migration or the function's code is out of date",
+			catalog.EnvArchiveSchema, env, want)
+	}
+	return nil
 }
 
 // Fingerprint returns "sha256:" and the lowercase hex SHA-256 of the schema: every table's
@@ -140,15 +160,20 @@ func (t Table) Check() error {
 	return nil
 }
 
-func table(s *catalog.Stream) Table {
+// columns returns the columns of s's table, in order: the implicit columns, the declared
+// ones, then the bookkeeping ones. Tables and records both follow it.
+func columns(s *catalog.Stream) []catalog.Column {
 	str := catalog.Type{Kind: catalog.KindString}
-	bookkeeping := []catalog.Column{
+	return slices.Concat(catalog.ImplicitColumns(), s.Columns, []catalog.Column{
 		{Name: ColumnShard, Type: str},
 		{Name: ColumnSeq, Type: str},
 		{Name: ColumnArrival, Type: catalog.Type{Kind: catalog.KindDateTime64, Precision: catalog.DateTime64Micros}},
-	}
+	})
+}
+
+func table(s *catalog.Stream) Table {
 	t := Table{Name: catalog.IcebergTable(s.Name)}
-	for _, c := range slices.Concat(catalog.ImplicitColumns(), s.Columns, bookkeeping) {
+	for _, c := range columns(s) {
 		col := Column{Name: c.Name, Type: columnType(c.Type)}
 		if c.Default != nil {
 			col.Default = new(literal(c.Default))

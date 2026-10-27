@@ -42,8 +42,9 @@ endef
 DOCKERFILES = $(shell git ls-files --cached --others --exclude-standard -- '*Dockerfile*')
 
 .PHONY: help check-git-hooks warn-git-hooks setup-git-hooks tools tools-update \
-        test bench cross-arch fmt fix lint vuln osv gomod mod-download verify check-clean \
-        sim sim-controls sim-seed hadolint checkov infra-lint trivy semgrep
+        test bench cross-arch lambda-build fmt fix lint vuln osv gomod check-go-bound mod-download verify \
+        check-clean sim sim-controls sim-seed emulators-up emulators-down integration \
+        hadolint checkov infra-lint trivy semgrep
 
 .DEFAULT_GOAL := help
 
@@ -97,14 +98,22 @@ bench: ## Run all benchmarks with memory stats (not part of verify).
 cross-arch: ## Run the cross-architecture Float64 tests as amd64 (not part of verify).
 	GOARCH=amd64 go test -run 'CrossArchitecture|NoFusedMultiplyAdd' ./internal/agg
 
+# The example's generated main.go, built as sam build builds it for the templates' default
+# architecture, so a change to codegen or the runtime that breaks the Lambda binary fails.
+lambda-build: ## Build the example's Lambda binary for linux/arm64.
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./examples/analytics/cmd/dynaflux-runtime
+
 fmt: tools ## Format Go code with the formatters in .golangci.yml.
 	$(GOLANGCI_LINT) fmt
 
 fix: ## Run `go fix ./...`.
 	go fix ./...
 
-lint: tools ## Run `golangci-lint run ./...`.
+# The second run covers the files behind the integration build tag; the first still covers
+# the !integration ones.
+lint: tools ## Run `golangci-lint run ./...`, then again with the integration build tag.
 	$(GOLANGCI_LINT) run ./...
+	$(GOLANGCI_LINT) run --build-tags integration ./...
 
 vuln: tools ## Check dependencies for known vulnerabilities (needs network).
 	$(GOVULNCHECK) ./...
@@ -115,10 +124,34 @@ osv: tools ## Scan every lockfile in the repo with OSV-Scanner (needs network; n
 gomod: ## Run `go mod tidy`.
 	go mod tidy
 
+# Dynaflux supports Go 1.26 and later, so no module may need a newer Go. The bound is fixed
+# here: `go get` and `go mod tidy` raise go.mod's own go line to the highest of any
+# dependency, so comparing with that line could never fail.
+GO_BOUND := 1.26
+
+# The recipe sets pipefail itself because make 3.81, the one macOS ships, ignores .SHELLFLAGS.
+check-go-bound: ## Fail if go.mod's go or toolchain line, or any module's go line, is above GO_BOUND.
+	@set -euo pipefail; \
+	{ go mod edit -json | awk -F'"' '$$2 == "Toolchain" { print "go.mod", "toolchain", $$4 }'; \
+	  go list -m -f '{{.Path}} go {{.GoVersion}}' all; } | \
+	awk -v bound='$(GO_BOUND)' ' \
+	  function above(v,  p, b) { \
+	    sub(/^go/, "", v); split(v, p, "."); split(bound, b, "."); \
+	    return p[1] + 0 > b[1] + 0 || (p[1] + 0 == b[1] + 0 && p[2] + 0 > b[2] + 0); \
+	  } \
+	  NF == 3 && above($$3) { found = found "\n  " $$0 } \
+	  END { \
+	    if (found != "") { \
+	      printf "Dynaflux supports Go %s, but these need a newer Go:%s\n", bound, found > "/dev/stderr"; \
+	      print "Use module versions that support it, and keep go.mod'\''s go and toolchain lines within it." > "/dev/stderr"; \
+	      exit 1; \
+	    } \
+	  }'
+
 mod-download: ## Run `go mod download`.
 	go mod download
 
-verify: check-git-hooks tools fmt gomod lint vuln test ## Run fmt, gomod, lint, vuln, and test.
+verify: check-git-hooks tools fmt gomod check-go-bound lint vuln test lambda-build ## Run fmt, gomod, the Go version bound, lint, vuln, test and the Lambda build.
 
 check-clean: ## Fail if the working tree is dirty (CI guard: verify must not rewrite files).
 	@status="$$(git status --porcelain)"; \
@@ -146,6 +179,31 @@ sim-controls: ## Run every negative control of the simulation harness; each must
 sim-seed: ## Rerun one simulation seed verbosely: make sim-seed SCENARIO=faults SEED=17.
 	@[ -n "$(SCENARIO)" ] && [ -n "$(SEED)" ] || { echo "Usage: make sim-seed SCENARIO=<name> SEED=<n>"; exit 1; }
 	go test $(SIM_RACE) -count=1 -v -run '^TestSim$$/^$(SCENARIO)$$' ./internal/simulation -sim.seed=$(SEED)
+
+# === Integration
+
+# DynamoDB Local in Docker (docs/decisions/0009-emulator-choice.md). The container is shared
+# by every run on the machine, so no target here stops it except emulators-down.
+EMULATORS_COMPOSE := scripts/emulators/compose.yaml
+DYNAMODB_ENDPOINT := http://127.0.0.1:8000
+
+emulators-up: ## Start DynamoDB Local unless it runs, and wait until it answers (needs docker).
+	$(call require_cmd,docker,brew install --cask docker)
+	scripts/emulators/up.sh
+
+emulators-down: ## Stop DynamoDB Local and drop its tables.
+	$(call require_cmd,docker,brew install --cask docker)
+	docker compose --file $(EMULATORS_COMPOSE) down
+
+# Packages are found by their *_integration_test.go files, so a new one needs no edit here.
+integration: emulators-up ## Run the tests of every package with a *_integration_test.go file against DynamoDB Local.
+	@set -euo pipefail; \
+	pkgs="$$(go list -tags integration -f '{{.ImportPath}} {{.TestGoFiles}} {{.XTestGoFiles}}' ./... | \
+		awk '/_integration_test\.go/ { print $$1 }')"; \
+	if [ -z "$$pkgs" ]; then echo "No *_integration_test.go files found."; exit 0; fi; \
+	echo "go test -race -shuffle=on -tags integration" $$pkgs; \
+	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' \
+		go test -race -shuffle=on -tags integration $$pkgs $(GO_TEST_FLAGS)
 
 # === External scanners
 

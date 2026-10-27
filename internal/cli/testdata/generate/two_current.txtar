@@ -3,6 +3,8 @@ SPDX-License-Identifier: Apache-2.0
 
 A clean git merge left versions 1 and 2 current. The SQL defines version 2, so
 version 1 is retained, and nothing is dropped.
+-- go.mod --
+module example.com/app
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]

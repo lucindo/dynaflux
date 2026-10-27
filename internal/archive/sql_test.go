@@ -13,8 +13,10 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/lucindo/dynaflux/internal/archive"
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/txtar"
 )
 
@@ -23,6 +25,7 @@ var update = flag.Bool("update", false, "rewrite the want/ sections from the gen
 const (
 	minimalConfig = "store: analytics\nregions: [us-east-1]\n"
 	wantPrefix    = "want/"
+	eventsPrefix  = "events/"
 	db            = "prod_analytics"
 	warehouse     = "s3://prod-analytics-123456789012-us-east-1-an/warehouse"
 )
@@ -32,7 +35,10 @@ const (
 //     dynaflux.yaml gets a minimal one.
 //   - "-- want/<table>.create.sql --" and "-- want/<table>.dedup.sql --" hold each table's
 //     CREATE TABLE and dedup view, and "-- want/fingerprint --" the schema's fingerprint.
-//     go test -update rewrites them; review the diff.
+//   - "-- events/<stream> --" holds events, one per line ([readEvents]), and
+//     "-- want/<stream>.records --" their archive records.
+//
+// go test -update rewrites the want/ sections; review the diff.
 func TestGolden(t *testing.T) {
 	t.Parallel()
 	paths, err := filepath.Glob("testdata/*.txtar")
@@ -71,13 +77,8 @@ func TestAddColumns(t *testing.T) {
 
 func generate(t *testing.T, ar *txtar.Archive) map[string][]byte {
 	t.Helper()
-	fsys := fstest.MapFS{"dynaflux.yaml": {Data: []byte(minimalConfig)}}
-	for _, f := range ar.Files {
-		if !strings.HasPrefix(f.Name, wantPrefix) {
-			fsys[f.Name] = &fstest.MapFile{Data: f.Data}
-		}
-	}
-	s := archive.SchemaFor(loadProject(t, fsys), "us-east-1")
+	cat := project(t, ar)
+	s := archive.SchemaFor(cat, "us-east-1")
 	files := map[string][]byte{"fingerprint": []byte(s.Fingerprint() + "\n")}
 	for _, tb := range s.Tables {
 		if err := tb.Check(); err != nil {
@@ -86,7 +87,27 @@ func generate(t *testing.T, ar *txtar.Archive) map[string][]byte {
 		files[tb.Name+".create.sql"] = []byte(archive.CreateTable(db, archive.Location(warehouse, db, tb.Name), tb) + "\n")
 		files[tb.Name+".dedup.sql"] = []byte(archive.DedupView(db, tb) + "\n")
 	}
+	for stream, events := range readEvents(t, cat, ar) {
+		enc := archive.NewEncoder(stream)
+		var b []byte
+		for _, vals := range events {
+			b = append(enc.AppendRecord(b, vals, unit, paddedSeq, time.Unix(arrivalSeconds, 0)), '\n')
+		}
+		files[stream.Name+".records"] = b
+	}
 	return files
+}
+
+// project loads the project that ar's files other than its want/ and events/ sections hold.
+func project(t *testing.T, ar *txtar.Archive) *catalog.Catalog {
+	t.Helper()
+	fsys := fstest.MapFS{"dynaflux.yaml": {Data: []byte(minimalConfig)}}
+	for _, f := range ar.Files {
+		if !strings.HasPrefix(f.Name, wantPrefix) && !strings.HasPrefix(f.Name, eventsPrefix) {
+			fsys[f.Name] = &fstest.MapFile{Data: f.Data}
+		}
+	}
+	return loadProject(t, fsys)
 }
 
 func checkWant(t *testing.T, ar *txtar.Archive, files map[string][]byte) {

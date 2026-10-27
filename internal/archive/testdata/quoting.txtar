@@ -13,6 +13,8 @@ CREATE STREAM order (
     "values" String DEFAULT 'line\nbreak'
 )
 PRIMARY KEY (user);
+-- events/order --
+["2024-05-31","it's \"quoted\" \\ here","1",["it's","tab\there"],null,"line\nbreak","01JB8Z9X4Q7M3N2P5R6S8T0V1Z","2024-05-31 13:45:00.000123","2024-05-31 13:45:01.000000","eu-west-1"]
 -- want/fingerprint --
 sha256:4ae9651e706a6a01747af860357d07b1cf4d60208daac22e0603c3145144be54
 -- want/order.create.sql --
@@ -51,3 +53,5 @@ FROM (
     PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
   FROM "prod_analytics"."order")
 WHERE "_dedup_rn" = 1
+-- want/order.records --
+{"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V1Z","event_time":1717163100000123,"ingest_time":1717163101000000,"origin_region":"eu-west-1","date":"2024-05-31","user":"it's \"quoted\" \\ here","select":1,"from":["it's","tab\there"],"values":"line\nbreak","_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":1761475200000000}

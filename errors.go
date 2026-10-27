@@ -17,8 +17,10 @@ var (
 	ErrDuplicate = engine.ErrDuplicate // "dynaflux: duplicate event"
 	// ErrOutsideWindow is an event_time outside the stream's ACCEPT window.
 	ErrOutsideWindow = engine.ErrOutsideWindow // "dynaflux: event_time outside the ACCEPT window"
-	// ErrInvalidValue is a value that Dynaflux can't store, which a [ValueError] names, or
-	// an event over DynamoDB's 400 KB item limit.
+	// ErrInvalidValue is a value that Dynaflux can't store, which a [ValueError] names, an
+	// event over DynamoDB's 400 KB item limit, or an event of an archived stream whose
+	// archive record could be over Firehose's record limit, which an [ArchiveSizeError]
+	// names.
 	ErrInvalidValue = engine.ErrInvalidValue // "invalid value"
 	// ErrNotFound is a :one query that found no row.
 	ErrNotFound = engine.ErrNotFound // "dynaflux: no row found"
@@ -44,6 +46,20 @@ type ValueError struct {
 func (e *ValueError) Error() string { return "dynaflux: " + e.Name + ": " + e.Err.Error() }
 
 func (e *ValueError) Unwrap() error { return e.Err }
+
+// ArchiveSizeError is an event of an archived stream whose archive record, with the longest
+// shard ID, sequence number and arrival time, could be over Firehose's record limit of
+// 1,024,000 bytes, so no projector could archive it. It matches [ErrInvalidValue].
+type ArchiveSizeError struct {
+	Stream string
+	Size   int // the record's size in bytes
+}
+
+func (e *ArchiveSizeError) Error() string {
+	return (&engine.ArchiveSizeError{Stream: e.Stream, Size: e.Size}).Error()
+}
+
+func (*ArchiveSizeError) Unwrap() error { return ErrInvalidValue }
 
 // BatchError is the error of a batch append. Errs lines up with the events, nil for each
 // one the call stored.

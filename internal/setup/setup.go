@@ -39,9 +39,9 @@ var (
 	// ErrAccessDenied is AWS refusing a call for lack of permission, including Glue refusing
 	// a role that it can't assume yet.
 	ErrAccessDenied = errors.New("access denied")
-	// ErrConflict is an Athena statement that failed because another writer, such as
-	// Firehose, committed to the Iceberg table first.
-	ErrConflict = errors.New("commit conflict on an Iceberg table")
+	// ErrConflict is a write that failed because another writer changed the same thing
+	// first, such as Firehose committing to the Iceberg table during an Athena statement.
+	ErrConflict = errors.New("conflict with another writer")
 )
 
 // New roles and grants, which a deploy can create or change just before a request, and other
@@ -90,12 +90,6 @@ type StreamTable struct {
 // GlueTable is a table of the Glue Data Catalog.
 type GlueTable struct {
 	Location string
-	// Partition is the table's current Iceberg partition spec. Glue's PartitionKeys are
-	// empty for an Iceberg table, so it comes from the metadata file that the table's
-	// metadata_location parameter names. Each field is written as in Athena's PARTITIONED
-	// BY, such as day(event_time), or event_time for identity, and fields are separated by
-	// ", ". It is "" for an unpartitioned table.
-	Partition string
 	// TableType is the table_type parameter, "ICEBERG" for an Iceberg table.
 	TableType string
 	// Columns maps each column's name to its type.

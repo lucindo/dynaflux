@@ -1,9 +1,10 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Package codegen writes the typed Go client that dynaflux generate puts in go.out. Its
-// methods call the helpers of package fluxgen. The output depends only on the catalog and
-// the options, and is formatted with go/format.
+// Package codegen writes the typed Go client that dynaflux generate puts in go.out, and the
+// main.go of the runtime binary that it puts in runtime.out. The client's methods call the
+// helpers of package fluxgen. The output depends only on the catalog and the options, and is
+// formatted with go/format.
 package codegen
 
 import (
@@ -13,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"go/format"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -59,6 +61,34 @@ func Package(cat *catalog.Catalog, o Options) (map[string][]byte, error) {
 		}
 	}
 	return files, nil
+}
+
+// Main returns the main.go of the runtime binary of cat's store, which dynaflux generate
+// writes to runtime.out. importPath is the client package's, and command the binary's name,
+// runtime.out's last element.
+func Main(cat *catalog.Catalog, importPath, command string, o Options) ([]byte, error) {
+	if cat == nil || importPath == "" || command == "" || o.Package == "" || o.Version == "" ||
+		strings.ContainsAny(o.Version+importPath+command, "\r\n\"") {
+		return nil, errors.New("codegen: need a catalog, an import path, a command, a package name and a one-line version")
+	}
+	tmpl, err := template.ParseFS(templateFS, "templates/main.go.tmpl")
+	if err != nil {
+		return nil, fmt.Errorf("codegen: %w", err)
+	}
+	var buf bytes.Buffer
+	err = tmpl.Execute(&buf, struct {
+		Version, Command, Store, Package, ImportPath string
+		// Alias is set when the import path's last element isn't the package's name.
+		Alias bool
+	}{o.Version, command, cat.Store, o.Package, importPath, path.Base(importPath) != o.Package})
+	if err != nil {
+		return nil, fmt.Errorf("codegen: main.go: %w", err)
+	}
+	src, err := format.Source(buf.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("codegen: main.go isn't valid Go: %w", err)
+	}
+	return src, nil
 }
 
 type model struct {

@@ -141,11 +141,6 @@ func (b *builder) fit(limit int, name string) Text {
 	return Text(name)
 }
 
-// base returns {prefix}{store}, which starts every name of the store.
-func (b *builder) base() string {
-	return b.naming.Prefix + b.cat.Store
-}
-
 // tags returns the tags of a resource of kind that belongs to the stream or view called
 // name, or to the whole store when name is empty.
 func (b *builder) tags(kind, name string) map[string]string {

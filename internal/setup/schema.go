@@ -147,17 +147,16 @@ func (t *tableProps) table() archive.Table {
 	return archive.Table{Name: t.Name, Columns: cols}
 }
 
-// missing returns t's columns that live lacks, in order. It fails when live is elsewhere,
-// partitioned otherwise or not an Iceberg table, or when a column's type differs: fixing
-// any of those would rewrite the archived events, so it is left to a person.
+// missing returns t's columns that live lacks, in order. It fails when live is elsewhere or
+// not an Iceberg table, or when a column's type differs: fixing any of those would rewrite
+// the archived events, so it is left to a person. Partitioning isn't compared: it doesn't
+// change what a query returns, and only Dynaflux's DDL creates tables at t's location.
 func (t *tableProps) missing(live GlueTable) ([]archive.Column, error) {
 	switch {
 	case !strings.EqualFold(live.TableType, "ICEBERG"):
 		return nil, fmt.Errorf("it isn't an Iceberg table (table_type %q), and Dynaflux doesn't convert tables", live.TableType)
 	case strings.TrimSuffix(live.Location, "/") != strings.TrimSuffix(t.Location, "/"):
 		return nil, fmt.Errorf("it is at %s, not %s, and Dynaflux doesn't move tables", live.Location, t.Location)
-	case live.Partition != archive.Partitioning:
-		return nil, fmt.Errorf("its partition spec is (%s), not (%s), and Dynaflux doesn't repartition tables", live.Partition, archive.Partitioning)
 	}
 	var missing []archive.Column
 	var differ []string
