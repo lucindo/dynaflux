@@ -760,7 +760,7 @@ archived streams and 60 provisioned view versions pass the limit. Roles have the
 | The backfill function, its state machine, their roles and log groups, the backfill alarm and dashboard widget | M5 | M5 builds the backfill itself. A function that can't run a backfill isn't worth deploying. |
 | The query function, direct invoke, function URLs, API Gateway HTTP and REST APIs, custom domains and Route 53 records | M6 | The query handler and its front doors arrive together in M6, with their authentication settings ([config.md](config.md#http)). |
 | Permissions to read the archive for a backfill or a query | M5, M6 | They follow the archive reader's design. |
-| IAM policies for your application and for operators | M5 | The two-region example shows the application's. M5 defines the operators' together with the commands. |
+| IAM policies for your application and for operators | M5 | The [two-region example](../../examples/analytics/README.md#use-it-from-an-application) shows the application's. M5 defines the operators' together with the commands. |
 | Checks against the deployed stacks: deployed regions, foreign event source mappings, the archive schema in each region, optimizer runs, the lock against the deployed catalog | M5 | `dynaflux diff` and `status` need the deployed state. |
 | Targeting another environment from the operate commands (`--prefix`) | M5 | The prefix is a deploy-time parameter ([§2](#2-parameters)). |
 | Orphan-file removal for the archive tables | When a store needs it | Table locations already can't overlap ([§7.3](#73-tables-and-columns)). |

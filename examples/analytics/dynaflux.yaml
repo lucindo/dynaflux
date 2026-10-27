@@ -2,4 +2,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
 store: analytics
+prefix: demo-
 regions: [us-east-1, us-west-2]
