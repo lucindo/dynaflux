@@ -81,12 +81,10 @@ func Config(tb testing.TB, rec *Recorder) aws.Config {
 // Tables creates every table of the regional and global scopes of m (from internal/infra)
 // with a unique prefix: keys, PAY_PER_REQUEST, the stream view and the TTL attribute exactly
 // as the manifest says, so a disagreement between the templates and the runtime fails here.
-// It fails the test when cfg.Region isn't Region. The tables are deleted when the test ends.
+// DynamoDB Local keeps a database per region, so only clients in cfg.Region see the tables.
+// The tables are deleted when the test ends.
 func Tables(tb testing.TB, cfg aws.Config, m *infra.Manifest) catalog.Naming {
 	tb.Helper()
-	if cfg.Region != Region {
-		tb.Fatalf("emulatortest: region %q: DynamoDB Local keeps the suite's tables in %s", cfg.Region, Region)
-	}
 	prefix := uniquePrefix()
 	c := admin(cfg)
 	for _, spec := range slices.Concat(m.Global.Tables, m.Regional.Tables) {

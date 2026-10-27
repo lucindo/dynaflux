@@ -14,13 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/lucindo/dynaflux/internal/emulatortest"
-	"github.com/lucindo/dynaflux/internal/infra"
 )
 
 // Each attempt is a call of its own, so a test sees retries.
@@ -128,25 +126,5 @@ func TestConfigRefusesOtherHosts(t *testing.T) {
 				t.Errorf("Config fails with %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-// DynamoDB Local keeps a database per region, so tables made for another region are missing
-// from the suite's.
-func TestTablesRefusesOtherRegions(t *testing.T) {
-	t.Parallel()
-	got := fatal(t, func(tb testing.TB) {
-		tb.Helper()
-		// Loopback and fake credentials, so a broken check can't reach AWS.
-		emulatortest.Tables(tb, aws.Config{
-			Region:       "eu-west-1",
-			BaseEndpoint: new("http://127.0.0.1:1"),
-			Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
-				return aws.Credentials{AccessKeyID: "fake", SecretAccessKey: "fake"}, nil
-			}),
-		}, &infra.Manifest{})
-	})
-	if want := `emulatortest: region "eu-west-1": DynamoDB Local keeps the suite's tables in us-east-1`; got != want {
-		t.Errorf("Tables fails with %q, want %q", got, want)
 	}
 }

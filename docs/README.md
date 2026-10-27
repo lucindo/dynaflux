@@ -30,4 +30,4 @@ it.
 | Document | What it covers |
 |----------|----------------|
 | [runbooks/simulation.md](runbooks/simulation.md) | The simulation harness: its test tiers and how long they take, rerunning a failing seed, and the negative controls. |
-| [runbooks/e2e.md](runbooks/e2e.md) | The maintainer's procedure for the end-to-end suite on AWS, with the one-time experiments whose answers go into the specifications. |
+| [runbooks/e2e.md](runbooks/e2e.md) | The end-to-end suite on DynamoDB Local, and the maintainer's procedure for it on AWS, with the one-time experiments whose answers go into the specifications. |
