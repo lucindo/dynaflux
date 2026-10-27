@@ -1,0 +1,111 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A merge lost the lock's rebuild counts, so the current version holds a count its view no
+longer has.
+-- dynaflux/streams.sql --
+CREATE STREAM page_views (user_id String, page String, duration_ms UInt32)
+PRIMARY KEY (user_id);
+-- dynaflux/views.sql --
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+-- dynaflux.lock --
+{
+  "format": 1,
+  "views": {
+    "page_daily": [
+      {
+        "number": 2,
+        "state": "current",
+        "fingerprint": "d0eb1175efd0445afbca855c998bda064667c9c29f36fe4b17865c8fd91399c0",
+        "mode": "async",
+        "rebuild": 1,
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toStartOfDay",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      },
+      {
+        "number": 1,
+        "state": "retained",
+        "fingerprint": "1242f0a6792f3ab9edc9e9f6a438396eb1d3ff79c2876c0f18f39bce4ca88ed5",
+        "mode": "async",
+        "stream": "page_views",
+        "keys": [
+          {
+            "name": "page",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "page"
+            }
+          },
+          {
+            "name": "day",
+            "expr": {
+              "op": "toStartOfDay",
+              "type": "DateTime",
+              "args": [
+                {
+                  "op": "column",
+                  "type": "DateTime64(6)",
+                  "name": "event_time"
+                }
+              ]
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "views"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}
+-- want --
+dynaflux.lock:1:1: error DF6013
+-- want-text --
+dynaflux.lock:1:1: error DF6013: can't use dynaflux.lock: page_daily@v2 has rebuild count 1, more than its view's 0
+  hint: if it has merge conflicts, keep the lock of the branch that merged first and run dynaflux generate; undo hand edits, and don't delete the file, which renumbers every view

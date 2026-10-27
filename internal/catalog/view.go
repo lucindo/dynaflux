@@ -47,6 +47,10 @@ type ViewVersion struct {
 	Fingerprint string       `json:"fingerprint"`
 	// Mode can change in place, so it isn't part of the fingerprint.
 	Mode Mode `json:"mode"`
+	// Rebuild is the view's rebuild count in dynaflux.lock when the version was defined. It
+	// is part of the fingerprint, so dynaflux generate -rebuild gives an unchanged definition
+	// a new version.
+	Rebuild int `json:"rebuild,omitzero"`
 	// Stream is the source stream.
 	Stream    string     `json:"stream"`
 	ArrayJoin *ArrayJoin `json:"array_join,omitzero"`
@@ -169,19 +173,20 @@ func (a *Aggregate) check(merge bool) error {
 	return checkExprs(0, slices.Concat(pointers(a.Args), []*Expr{a.Cond})...)
 }
 
-// VersionState is the lifecycle state of a view version in dynaflux.lock. Retired versions
-// aren't in the catalog.
+// VersionState is the lifecycle state of a view version in dynaflux.lock. The catalog's
+// views hold current and retained versions, and [Catalog.Retired] names the retired ones.
 type VersionState string
 
 // Version states.
 const (
 	StateCurrent  VersionState = "current"  // Defined by the SQL files; queries read it.
 	StateRetained VersionState = "retained" // An older version that is still maintained.
+	StateRetired  VersionState = "retired"  // Removed by dynaflux retire; its number is never reused.
 )
 
 func (s VersionState) known() bool {
 	switch s {
-	case StateCurrent, StateRetained:
+	case StateCurrent, StateRetained, StateRetired:
 		return true
 	}
 	return false

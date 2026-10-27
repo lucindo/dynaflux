@@ -118,9 +118,9 @@ func (p *project) checkResourceNames() {
 		case declQuery:
 		}
 	}
-	for name, vs := range p.lock.Views {
-		if d, ok := p.tables[name]; !ok || d.kind != declView {
-			c.Views = append(c.Views, catalog.View{Name: name, Versions: vs})
+	for _, v := range p.views {
+		if d, ok := p.tables[v.Name]; !ok || d.kind != declView {
+			c.Views = append(c.Views, v)
 		}
 	}
 	base := len(p.cfg.Prefix) + len(p.cfg.Store)

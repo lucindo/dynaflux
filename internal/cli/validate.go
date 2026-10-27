@@ -64,27 +64,15 @@ type project struct {
 
 // load finds the project that governs the working directory and compiles it. It returns
 // the diagnostics and the exit status they call for. When there is no project to compile,
-// it reports that itself.
-func (c *cli) load() (*project, []diag.Diagnostic, int) {
-	path, err := config.Find(c.workdir)
-	if errors.Is(err, config.ErrNotFound) {
-		c.errorf("error DF6001: %v\n  hint: run the command inside your project, or create %s at its root",
-			err, config.FileName)
-		return nil, nil, exitUsage
-	}
-	if err != nil {
-		c.errorf("dynaflux: %v", err)
-		return nil, nil, exitUsage
-	}
-	dir := filepath.Dir(path)
-	// The os.Root keeps every read inside the project, links included.
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		c.errorf("dynaflux: %v", err)
-		return nil, nil, exitUsage
+// it reports that itself. It first raises the rebuild count of each view in rebuild.
+func (c *cli) load(rebuild ...string) (*project, []diag.Diagnostic, int) {
+	root, status := c.projectRoot()
+	if status != exitOK {
+		return nil, nil, status
 	}
 	defer root.Close()
-	r, ds := validate.Compile(root.FS(), dir)
+	dir := root.Name()
+	r, ds := validate.Compile(root.FS(), dir, rebuild...)
 	switch {
 	case slices.ContainsFunc(ds, func(d diag.Diagnostic) bool { return d.Code == codeUnreadable }):
 		return nil, ds, exitUsage
@@ -93,6 +81,27 @@ func (c *cli) load() (*project, []diag.Diagnostic, int) {
 	default:
 		return &project{dir: dir, cfg: r.Config, cat: r.Catalog, lock: r.Lock, lockChanges: r.LockChanges}, ds, exitOK
 	}
+}
+
+// projectRoot finds the project root that governs the working directory and opens it, or
+// reports why it can't. The [os.Root] keeps every read inside the project, links included.
+func (c *cli) projectRoot() (*os.Root, int) {
+	path, err := config.Find(c.workdir)
+	if errors.Is(err, config.ErrNotFound) {
+		c.errorf("error DF6001: %v\n  hint: run the command inside your project, or create %s at its root",
+			err, config.FileName)
+		return nil, exitUsage
+	}
+	if err != nil {
+		c.errorf("dynaflux: %v", err)
+		return nil, exitUsage
+	}
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		c.errorf("dynaflux: %v", err)
+		return nil, exitUsage
+	}
+	return root, exitOK
 }
 
 // diagnostics writes ds and returns status, or exitUsage when the write fails.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // check enforces the invariants that [Unmarshal] promises.
@@ -39,6 +40,9 @@ func check(c *Catalog) error {
 		if err := checkView(&c.Views[i]); err != nil {
 			return err
 		}
+	}
+	if err := checkRetired(c); err != nil {
+		return err
 	}
 	for i := range c.Queries {
 		if err := checkQuery(&c.Queries[i]); err != nil {
@@ -101,8 +105,12 @@ func checkView(v *View) error {
 	current := 0
 	for i := range v.Versions {
 		vv := &v.Versions[i]
-		if vv.State == StateCurrent {
+		switch vv.State {
+		case StateCurrent:
 			current++
+		case StateRetired:
+			return fmt.Errorf("view %s: %s is retired, so only the retired list names it", v.Name, VersionID(v.Name, vv.Number))
+		case StateRetained:
 		}
 		if err := checkVersion(vv); err != nil {
 			return fmt.Errorf("view %s: %w", VersionID(v.Name, vv.Number), err)
@@ -118,6 +126,8 @@ func checkVersion(vv *ViewVersion) error {
 	switch {
 	case vv.Number < 1:
 		return errors.New("version numbers start at 1")
+	case vv.Rebuild < 0:
+		return fmt.Errorf("rebuild count %d is negative", vv.Rebuild)
 	case vv.Split < 1 || vv.Split > MaxSplit:
 		return fmt.Errorf("split %d is not between 1 and %d", vv.Split, MaxSplit)
 	case vv.PartitionKeyLen < 1 || vv.PartitionKeyLen > len(vv.Keys):
@@ -150,6 +160,28 @@ func checkVersion(vv *ViewVersion) error {
 		return fmt.Errorf("fingerprint %q doesn't match the definition, whose fingerprint is %s", vv.Fingerprint, fp)
 	}
 	return nil
+}
+
+// checkRetired checks that each retired version ID names a version once, and that no
+// view of the catalog holds it.
+func checkRetired(c *Catalog) error {
+	for _, id := range c.Retired {
+		view, number, ok := parseVersionID(id)
+		if !ok {
+			return fmt.Errorf("invalid retired version %q", id)
+		}
+		if v, found := c.View(view); found && slices.ContainsFunc(v.Versions, func(vv ViewVersion) bool { return vv.Number == number }) {
+			return fmt.Errorf("retired version %s is a version of view %s", id, view)
+		}
+	}
+	return unique("retired version", c.Retired, func(id string) string { return id })
+}
+
+// parseVersionID splits a version ID that [VersionID] wrote into its view and number.
+func parseVersionID(id string) (string, int, bool) {
+	view, n, found := strings.Cut(id, "@v")
+	number, err := strconv.Atoi(n)
+	return view, number, found && err == nil && IsName(view) && number >= 1 && VersionID(view, number) == id
 }
 
 // checkVersionNames checks the names a view version defines: its columns, which become

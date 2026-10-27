@@ -57,6 +57,7 @@ func TestGenerate(t *testing.T) {
 		{"revert", result{0, "page_daily@v1: current again\npage_daily@v2: retained\n", ""}},
 		{"removed", result{0, "page_daily@v1: retained\n", ""}},
 		{"two_current", result{0, "page_daily@v1: retained\n", ""}},
+		{"retired", result{0, "page_daily@v2: retained\npage_daily@v3: new\n", ""}},
 		{"conflict", result{1, "", "dynaflux.lock:4:1: error DF6013: can't use dynaflux.lock: invalid JSON: "}},
 		{"user_file", result{1, "", "dynaflux generate: internal/flux/client.go has no \"// Code generated"}},
 		{
@@ -164,6 +165,44 @@ func snapshot(t *testing.T, dir string) map[string][]byte {
 		t.Fatal(err)
 	}
 	return files
+}
+
+// -rebuild gives the current definition a new version once; the next run keeps it.
+func TestGenerateRebuild(t *testing.T) {
+	t.Parallel()
+	dir := writeProject(t, "generate/rebuild")
+	if got := run(dir, "generate", "-rebuild", "page_daily"); got != (result{0, "page_daily@v1: retained\npage_daily@v2: new\n", ""}) {
+		t.Fatalf("generate -rebuild: %+v", got)
+	}
+	lock, err := os.ReadFile(filepath.Join(dir, "dynaflux.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkLock(t, "generate/rebuild", lock)
+	if got := run(dir, "generate"); got != (result{0, "", ""}) {
+		t.Errorf("generate after -rebuild: %+v", got)
+	}
+	if got := run(dir, "generate", "-rebuild", "page_daily"); got != (result{0, "page_daily@v2: retained\npage_daily@v3: new\n", ""}) {
+		t.Errorf("a second generate -rebuild: %+v", got)
+	}
+}
+
+// -rebuild names a view that the SQL files define: not a stream, an unknown name, or a view
+// that only the lock still holds.
+func TestGenerateRebuildNeedsAView(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"clicks", "page_views", "page_daily"} {
+		dir := writeProject(t, "generate/removed")
+		before := snapshot(t, dir)
+		got := run(dir, "generate", "-rebuild", name)
+		want := "dynaflux generate: -rebuild " + name + ": the SQL files define no view " + name + "\n"
+		if got.status != 2 || !strings.HasPrefix(got.stderr, want) {
+			t.Errorf("-rebuild %s: got %+v, want status 2 and stderr starting with %q", name, got, want)
+		}
+		if after := snapshot(t, dir); !maps.EqualFunc(before, after, slices.Equal) {
+			t.Errorf("-rebuild %s changed files", name)
+		}
+	}
 }
 
 // TestGenerateExampleIsCurrent checks that the code, templates and lock committed in

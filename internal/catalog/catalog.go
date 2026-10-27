@@ -3,7 +3,10 @@
 
 package catalog
 
-import "slices"
+import (
+	"iter"
+	"slices"
+)
 
 // StorageFormatVersion is the newest storage format: new streams and view versions get it,
 // and the runtime reads every format from 1 up to it. It versions everything stored: key
@@ -30,7 +33,10 @@ type Catalog struct {
 	PruneWindowSeconds int      `json:"prune_window_seconds"`
 	Streams            []Stream `json:"streams,omitempty"`
 	Views              []View   `json:"views,omitempty"`
-	Queries            []Query  `json:"queries,omitempty"`
+	// Retired are the IDs of the retired view versions, such as page_daily@v1. A projector
+	// counts their fences as settled.
+	Retired []string `json:"retired,omitempty"`
+	Queries []Query  `json:"queries,omitempty"`
 }
 
 // Stream returns the stream named name.
@@ -40,6 +46,38 @@ func (c *Catalog) Stream(name string) (*Stream, bool) {
 		return nil, false
 	}
 	return &c.Streams[i], true
+}
+
+// ExactHandoff reports whether region archives every event of stream, local and
+// replicated: only that archive can fill a version by the fenced handoff there.
+func (c *Catalog) ExactHandoff(region, stream string) bool {
+	s, ok := c.Stream(stream)
+	return ok && s.Archive != nil && s.Archive.Events == ArchiveEventsAll && slices.Contains(s.Archive.Regions, region)
+}
+
+// Versions yields each view version with its ID, such as page_daily@v2, in the order of
+// Views.
+func (c *Catalog) Versions() iter.Seq2[string, *ViewVersion] {
+	return func(yield func(string, *ViewVersion) bool) {
+		for i := range c.Views {
+			v := &c.Views[i]
+			for j := range v.Versions {
+				if !yield(VersionID(v.Name, v.Versions[j].Number), &v.Versions[j]) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// Version returns the view version whose ID is id.
+func (c *Catalog) Version(id string) (*ViewVersion, bool) {
+	for vid, vv := range c.Versions() {
+		if vid == id {
+			return vv, true
+		}
+	}
+	return nil, false
 }
 
 // View returns the view named name.

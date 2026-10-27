@@ -30,6 +30,19 @@ func TestGenerateGuards(t *testing.T) {
 	}{
 		{"retained version dropped", "generate/changed", dropRetained, dropped},
 		{
+			"version retired with another fingerprint", "generate/changed", func(t *testing.T, dir string) {
+				t.Helper()
+				editLock(t, dir, func(l *catalog.Lock) {
+					retire(t, l, 1)
+					l.Views["page_daily"][1].Fingerprint = l.Views["page_daily"][0].Fingerprint
+				})
+			},
+			"dynaflux.lock:1:1: error DF6016: page_daily@v1 is retired in dynaflux.lock with another fingerprint than its " +
+				"table in the regional.yaml that generate wrote last time\n" +
+				"  hint: restore dynaflux.lock from version control and run dynaflux generate again; " +
+				"to start over on purpose, delete the old templates first\n",
+		},
+		{
 			"lock lost", "generate/changed", func(t *testing.T, dir string) {
 				t.Helper()
 				if err := os.Remove(filepath.Join(dir, "dynaflux.lock")); err != nil {
@@ -163,6 +176,14 @@ func TestGenerateUnprotectRegion(t *testing.T) {
 // merge could.
 func dropRetained(t *testing.T, dir string) {
 	t.Helper()
+	editLock(t, dir, func(l *catalog.Lock) {
+		l.Views["page_daily"] = slices.DeleteFunc(l.Views["page_daily"], func(v catalog.ViewVersion) bool { return v.Number == 1 })
+	})
+}
+
+// editLock rewrites the dynaflux.lock in dir with edit.
+func editLock(t *testing.T, dir string, edit func(l *catalog.Lock)) {
+	t.Helper()
 	p := filepath.Join(dir, "dynaflux.lock")
 	data, err := os.ReadFile(p)
 	if err != nil {
@@ -172,12 +193,39 @@ func dropRetained(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lock.Views["page_daily"] = slices.DeleteFunc(lock.Views["page_daily"], func(v catalog.ViewVersion) bool { return v.Number == 1 })
+	edit(lock)
 	if data, err = catalog.MarshalLock(lock); err != nil {
 		t.Fatal(err)
 	}
 	if err = os.WriteFile(p, data, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func retire(t *testing.T, l *catalog.Lock, number int) {
+	t.Helper()
+	if err := l.Retire("page_daily", number); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Once dynaflux retire retired a version in the lock, generate drops its table.
+func TestGenerateDropsRetiredTable(t *testing.T) {
+	t.Parallel()
+	dir := writeProject(t, "generate/changed")
+	if got := run(dir, "generate"); got.status != 0 {
+		t.Fatalf("first run: %+v", got)
+	}
+	editLock(t, dir, func(l *catalog.Lock) { retire(t, l, 1) })
+	if got := run(dir, "generate"); got != (result{0, "", ""}) {
+		t.Fatalf("generate after retire: %+v", got)
+	}
+	regional, err := os.ReadFile(filepath.Join(dir, "infra/dynaflux/regional.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(regional), "page_daily-v1") || !strings.Contains(string(regional), "page_daily-v2") {
+		t.Errorf("regional.yaml should hold the table of page_daily@v2 and not of v1:\n%s", regional)
 	}
 }
 

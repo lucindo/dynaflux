@@ -4,6 +4,8 @@
 package catalog_test
 
 import (
+	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -28,6 +30,47 @@ func TestCatalogLookups(t *testing.T) {
 	removed := catalog.View{Name: "old", Versions: []catalog.ViewVersion{pageDailyV1()}}
 	if cur, ok := removed.Current(); ok {
 		t.Errorf("Current() of a view with only retained versions = v%d", cur.Number)
+	}
+	var ids []string
+	for id, vv := range c.Versions() {
+		ids = append(ids, fmt.Sprintf("%s %s v%d", id, vv.Stream, vv.Number))
+	}
+	want := []string{"page_daily@v1 page_views v1", "page_daily@v2 page_views v2", "quota_usage@v1 api_calls v1", "tag_hourly@v1 page_views v1"}
+	if !slices.Equal(ids, want) {
+		t.Errorf("Versions() = %q, want %q", ids, want)
+	}
+	if vv, ok := c.Version("page_daily@v2"); !ok || vv.Number != 2 {
+		t.Errorf("Version(page_daily@v2) = %+v, %v; want v2", vv, ok)
+	}
+	if _, ok := c.Version("page_daily@v3"); ok {
+		t.Error("Version(page_daily@v3) found a version")
+	}
+}
+
+func TestExactHandoff(t *testing.T) {
+	t.Parallel()
+	c := fixture(t)
+	local := fixture(t)
+	local.Streams[1].Archive.Events = catalog.ArchiveEventsLocal
+	tests := []struct {
+		name           string
+		c              *catalog.Catalog
+		region, stream string
+		want           bool
+	}{
+		{"archived with events all", c, "us-west-2", "page_views", true},
+		{"archived with events local", local, "us-west-2", "page_views", false},
+		{"region that doesn't archive", c, "eu-west-1", "page_views", false},
+		{"stream that isn't archived", c, "us-east-1", "api_calls", false},
+		{"unknown stream", c, "us-east-1", "clicks", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.c.ExactHandoff(tt.region, tt.stream); got != tt.want {
+				t.Errorf("ExactHandoff(%s, %s) = %v, want %v", tt.region, tt.stream, got, tt.want)
+			}
+		})
 	}
 }
 

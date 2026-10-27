@@ -19,7 +19,7 @@ import (
 
 const goldenPath = "testdata/catalog.json"
 
-var update = flag.Bool("update", false, "write "+goldenPath+" from the fixture") //nolint:gochecknoglobals // go test flags are package variables
+var update = flag.Bool("update", false, "write the golden files in testdata") //nolint:gochecknoglobals // go test flags are package variables
 
 func marshalFixture(t *testing.T) []byte {
 	t.Helper()
@@ -104,6 +104,7 @@ func TestMarshalSortsUnorderedLists(t *testing.T) {
 				slices.Reverse(vv.Aggregates)
 			}
 		}
+		slices.Reverse(c.Retired)
 		slices.Reverse(c.Queries)
 		return c
 	}
@@ -166,6 +167,21 @@ func TestMarshalRejectsInvalidCatalog(t *testing.T) {
 		{"version 0", func(c *catalog.Catalog) { c.Views[1].Versions[0].Number = 0 }, "view quota_usage@v0: version numbers start at 1"},
 		{"two current versions", func(c *catalog.Catalog) { c.Views[0].Versions[0].State = catalog.StateCurrent },
 			"view page_daily: 2 versions are current"},
+		{"retired version in a view", func(c *catalog.Catalog) { c.Views[0].Versions[0].State = catalog.StateRetired },
+			"view page_daily: page_daily@v1 is retired, so only the retired list names it"},
+		{"negative rebuild count", func(c *catalog.Catalog) { c.Views[1].Versions[0].Rebuild = -1 },
+			"quota_usage@v1: rebuild count -1 is negative"},
+		{"retired list holds a view's version", func(c *catalog.Catalog) { c.Retired = append(c.Retired, "tag_hourly@v1") },
+			"retired version tag_hourly@v1 is a version of view tag_hourly"},
+		{"retired version twice", func(c *catalog.Catalog) { c.Retired = append(c.Retired, "page_hourly@v1") },
+			"retired version page_hourly@v1 appears twice"},
+		{"retired version 0", func(c *catalog.Catalog) { c.Retired[0] = "page_hourly@v0" }, `invalid retired version "page_hourly@v0"`},
+		{"retired version with a leading zero", func(c *catalog.Catalog) { c.Retired[0] = "page_hourly@v01" },
+			`invalid retired version "page_hourly@v01"`},
+		{"retired version without a number", func(c *catalog.Catalog) { c.Retired[0] = "page_hourly" },
+			`invalid retired version "page_hourly"`},
+		{"retired version of an invalid view name", func(c *catalog.Catalog) { c.Retired[0] = "Page_hourly@v1" },
+			`invalid retired version "Page_hourly@v1"`},
 		{"no split", func(c *catalog.Catalog) { c.Views[2].Versions[0].Split = 0 }, "tag_hourly@v1: split 0 is not between 1 and 16"},
 		{"too much split", func(c *catalog.Catalog) { c.Views[2].Versions[0].Split = 17 }, "tag_hourly@v1: split 17 is not between 1 and 16"},
 		{"empty partition key", func(c *catalog.Catalog) { c.Views[1].Versions[0].PartitionKeyLen = 0 },
@@ -418,7 +434,10 @@ func TestUnmarshalRejects(t *testing.T) {
 		{"null op", `"op":"notEquals"`, `"op":null`, `unknown expression op ""`},
 		{"non-canonical type", `"type":"String"`, `"type":"LowCardinality(String)"`, `invalid type "LowCardinality(String)"`},
 		{"unknown mode", `"mode":"sync"`, `"mode":"eventual"`, `unknown view mode "eventual"`},
-		{"unknown state", `"state":"retained"`, `"state":"retired"`, `unknown version state "retired"`},
+		{"unknown state", `"state":"retained"`, `"state":"deleted"`, `unknown version state "deleted"`},
+		{"retired state", `"state":"retained"`, `"state":"retired"`, "page_daily@v1 is retired, so only the retired list names it"},
+		{"unsorted retired list", `"page_hourly@v1","page_hourly@v2"`, `"page_hourly@v2","page_hourly@v1"`, "not in canonical form"},
+		{"explicit zero rebuild count", `"mode":"sync",`, `"mode":"sync","rebuild":0,`, "not in canonical form"},
 		{"plural interval unit", `"log_retention":"2 DAY"`, `"log_retention":"2 DAYS"`, `invalid interval "2 DAYS"`},
 		{"zero retention", `"log_retention":"2 DAY"`, `"log_retention":"0 DAY"`, `invalid log retention "0 DAY"`},
 		{"retention in minutes", `"log_retention":"2 DAY"`, `"log_retention":"90 MINUTE"`, `invalid log retention "90 MINUTE"`},

@@ -72,6 +72,7 @@ func (p *project) compileView(d *decl, s *sql.CreateView) {
 	vv.TTL = v.ttl()
 	vv.Split = split(d.st, s.Split)
 	vv.Mode = v.mode()
+	vv.Rebuild = p.lock.Rebuilds[d.name]
 	// Fingerprint fails only on a type that doesn't marshal, which the checks never
 	// produce. The fingerprint would then stay empty, and catalog.Marshal reject it.
 	if fp, err := catalog.Fingerprint(vv); err == nil {

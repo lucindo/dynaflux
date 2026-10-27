@@ -38,9 +38,10 @@ type Result struct {
 }
 
 // Compile is [Load] that also returns the lock that numbers the catalog's views, so
-// dynaflux generate writes the lock that the catalog was compiled with. It returns a
-// result exactly when no diagnostic is an error.
-func Compile(fsys fs.FS, root string) (*Result, []diag.Diagnostic) {
+// dynaflux generate writes the lock that the catalog was compiled with. It first raises
+// the rebuild count of each view in rebuild by one, as dynaflux generate -rebuild does
+// (sql.md §9.9). It returns a result exactly when no diagnostic is an error.
+func Compile(fsys fs.FS, root string, rebuild ...string) (*Result, []diag.Diagnostic) {
 	cfg, ds := config.Load(fsys)
 	if cfg == nil {
 		return nil, ds
@@ -51,6 +52,12 @@ func Compile(fsys fs.FS, root string) (*Result, []diag.Diagnostic) {
 	if diag.HasErrors(fileDiags) || diag.HasErrors(lockDiags) {
 		diag.Sort(ds)
 		return nil, ds
+	}
+	for _, view := range rebuild {
+		if lock.Rebuilds == nil {
+			lock.Rebuilds = map[string]int{}
+		}
+		lock.Rebuilds[view]++
 	}
 	p := &project{cfg: cfg, lock: lock, tables: map[string]*decl{}, queries: map[string]*decl{}}
 	for _, path := range paths {
@@ -132,6 +139,7 @@ func (p *project) catalog() *catalog.Catalog {
 		Regions:            p.cfg.Regions,
 		PruneWindowSeconds: p.cfg.Runtime.PruneWindowSeconds,
 		Views:              p.views,
+		Retired:            p.next.Retired(),
 	}
 	for _, d := range p.decls {
 		switch {

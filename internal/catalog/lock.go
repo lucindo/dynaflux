@@ -21,12 +21,22 @@ const LockFileName = "dynaflux.lock"
 // LockFormatVersion is the layout version of dynaflux.lock.
 const LockFormatVersion = 1
 
-// Lock is dynaflux.lock, which numbers the versions of every view. A retired version would
-// stay in it so that its number is never reused, but until dynaflux retire exists no lock
-// holds one, so the catalog holds every version in the lock.
+// Lock is dynaflux.lock, which numbers the versions of every view.
 type Lock struct {
-	// Views maps a view name to its versions, newest first.
+	// Views maps a view name to its versions, newest first. A retired version keeps only its
+	// Number, State and Fingerprint, so that its number is never reused.
 	Views map[string][]ViewVersion
+	// Rebuilds maps a view to its rebuild count, which dynaflux generate -rebuild raises by
+	// one; a view never rebuilt has none. The compiler gives the count to the view's
+	// definition (ViewVersion.Rebuild).
+	Rebuilds map[string]int
+}
+
+// retiredEntry is a retired version as dynaflux.lock holds it: all that numbering needs.
+type retiredEntry struct {
+	Number      int          `json:"number"`
+	State       VersionState `json:"state"`
+	Fingerprint string       `json:"fingerprint"`
 }
 
 // LockChangeKind says how [Lock.Apply] changed a version.
@@ -55,10 +65,11 @@ func (c LockChange) String() string {
 // version of a view, which a clean git merge can leave and [Lock.Apply] repairs. It
 // rejects everything else that isn't a lock [MarshalLock] could write: a format other
 // than [LockFormatVersion], a key repeated in one object or not a lower-case name, unknown
-// fields, unknown states (retired too), a view without versions or with a repeated
-// number, and an entry that isn't a valid view version, such as a hand-edited one, whose
-// definition no longer matches its fingerprint. A JSON syntax error wraps a
-// [*json.SyntaxError], whose Offset locates it.
+// fields, unknown states, a view without versions or with a repeated number, a retired
+// entry with more than its number, state and fingerprint, an entry that isn't a valid view
+// version, such as a hand-edited one, whose definition no longer matches its fingerprint,
+// and a rebuild count below 1, of a view the lock doesn't hold, or below an entry's. A
+// JSON syntax error wraps a [*json.SyntaxError], whose Offset locates it.
 func ParseLock(data []byte) (*Lock, error) {
 	// The probe rejects syntax errors and trailing data, and reads the format before the
 	// strict decode, so a newer lock gets a format error rather than an unknown field.
@@ -77,13 +88,14 @@ func ParseLock(data []byte) (*Lock, error) {
 		return nil, err
 	}
 	var raw struct {
-		Format int                          `json:"format"`
-		Views  map[string][]json.RawMessage `json:"views"`
+		Format  int                          `json:"format"`
+		Rebuild map[string]int               `json:"rebuild"`
+		Views   map[string][]json.RawMessage `json:"views"`
 	}
 	if err := strictDecode(data, &raw); err != nil {
 		return nil, err
 	}
-	l := &Lock{Views: make(map[string][]ViewVersion, len(raw.Views))}
+	l := &Lock{Views: make(map[string][]ViewVersion, len(raw.Views)), Rebuilds: raw.Rebuild}
 	for name, entries := range raw.Views {
 		vs, err := parseLockedView(name, entries)
 		if err != nil {
@@ -91,7 +103,32 @@ func ParseLock(data []byte) (*Lock, error) {
 		}
 		l.Views[name] = vs
 	}
+	if err := l.checkRebuilds(); err != nil {
+		return nil, err
+	}
 	return l, nil
+}
+
+// checkRebuilds checks that each rebuild count is of a view in l, at least 1, and at least
+// the count of each of the view's versions.
+func (l *Lock) checkRebuilds() error {
+	for _, name := range slices.Sorted(maps.Keys(l.Rebuilds)) {
+		if _, ok := l.Views[name]; !ok {
+			return fmt.Errorf("rebuild names view %s, which the lock doesn't hold", name)
+		}
+		if n := l.Rebuilds[name]; n < 1 {
+			return fmt.Errorf("view %s has rebuild count %d; it must be at least 1", name, n)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(l.Views)) {
+		for _, vv := range l.Views[name] {
+			if vv.Rebuild > l.Rebuilds[name] {
+				return fmt.Errorf("%s has rebuild count %d, more than its view's %d",
+					VersionID(name, vv.Number), vv.Rebuild, l.Rebuilds[name])
+			}
+		}
+	}
+	return nil
 }
 
 // parseLockedView decodes and checks the entries of one view, and sorts them newest first.
@@ -101,20 +138,9 @@ func parseLockedView(name string, entries []json.RawMessage) ([]ViewVersion, err
 	}
 	vs := make([]ViewVersion, len(entries))
 	for i, e := range entries {
-		vv := &vs[i]
-		if err := strictDecode(e, vv); err != nil {
-			return nil, fmt.Errorf("view %s, entry %d: %w", name, i+1, err)
-		}
-		id := VersionID(name, vv.Number)
-		// UnmarshalText rejects the unknown states and modes, but an absent one skips it.
-		switch {
-		case !vv.State.known():
-			return nil, fmt.Errorf("%s has no state", id)
-		case !vv.Mode.known():
-			return nil, fmt.Errorf("%s has no mode", id)
-		}
-		if err := checkVersion(vv); err != nil {
-			return nil, fmt.Errorf("%s: %w", id, err)
+		var err error
+		if vs[i], err = parseLockEntry(name, i+1, e); err != nil {
+			return nil, err
 		}
 	}
 	slices.SortFunc(vs, newestFirst)
@@ -124,6 +150,47 @@ func parseLockedView(name string, entries []json.RawMessage) ([]ViewVersion, err
 		}
 	}
 	return vs, nil
+}
+
+// parseLockEntry decodes and checks entry n of view.
+func parseLockEntry(view string, n int, data []byte) (ViewVersion, error) {
+	var head struct {
+		State VersionState `json:"state"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return ViewVersion{}, fmt.Errorf("view %s, entry %d: %w", view, n, err)
+	}
+	if head.State == StateRetired {
+		var r retiredEntry
+		if err := strictDecode(data, &r); err != nil {
+			return ViewVersion{}, fmt.Errorf("view %s, entry %d: a retired entry holds only its number, state and fingerprint: %w",
+				view, n, err)
+		}
+		id := VersionID(view, r.Number)
+		switch {
+		case r.Number < 1:
+			return ViewVersion{}, fmt.Errorf("%s: version numbers start at 1", id)
+		case len(r.Fingerprint) != 64 || strings.Trim(r.Fingerprint, "0123456789abcdef") != "":
+			return ViewVersion{}, fmt.Errorf("%s: fingerprint %q isn't 64 lowercase hex digits", id, r.Fingerprint)
+		}
+		return ViewVersion{Number: r.Number, State: r.State, Fingerprint: r.Fingerprint}, nil
+	}
+	var vv ViewVersion
+	if err := strictDecode(data, &vv); err != nil {
+		return ViewVersion{}, fmt.Errorf("view %s, entry %d: %w", view, n, err)
+	}
+	id := VersionID(view, vv.Number)
+	// UnmarshalText rejects the unknown states and modes, but an absent one skips it.
+	switch {
+	case !vv.State.known():
+		return ViewVersion{}, fmt.Errorf("%s has no state", id)
+	case !vv.Mode.known():
+		return ViewVersion{}, fmt.Errorf("%s has no mode", id)
+	}
+	if err := checkVersion(&vv); err != nil {
+		return ViewVersion{}, fmt.Errorf("%s: %w", id, err)
+	}
+	return vv, nil
 }
 
 // checkKeys checks the keys of the value that dec reads next, at path. encoding/json
@@ -178,13 +245,15 @@ func newestFirst(a, b ViewVersion) int {
 }
 
 // Apply numbers the views that the SQL files define (sql.md §9.9). defs maps each to its
-// definition, whose Fingerprint the compiler has set. A definition with the fingerprint
-// of a version in the lock takes that version's number, and otherwise the view's next
-// number; it is current, and every other version is retained. So the SQL alone decides
-// which version is current, and a view the SQL no longer defines keeps its versions,
-// retained. Apply returns the new lock and the changes, sorted by view and number.
+// definition, which the compiler gave the view's rebuild count and then its Fingerprint. A
+// definition with the fingerprint of a version in the lock that isn't retired takes that
+// version's number, and otherwise the view's next number; it is current, and every other
+// version that isn't retired is retained. So the SQL alone decides which version is
+// current, a view the SQL no longer defines keeps its versions, retained, and a retired
+// number never comes back. Apply returns the new lock and the changes, sorted by view and
+// number.
 func (l *Lock) Apply(defs map[string]ViewVersion) (*Lock, []LockChange) {
-	next := &Lock{Views: make(map[string][]ViewVersion, len(l.Views))}
+	next := &Lock{Views: make(map[string][]ViewVersion, len(l.Views)), Rebuilds: maps.Clone(l.Rebuilds)}
 	for name, vs := range l.Views {
 		vs = slices.Clone(vs)
 		for i := range vs {
@@ -219,7 +288,8 @@ func (l *Lock) Apply(defs map[string]ViewVersion) (*Lock, []LockChange) {
 func (l *Lock) define(view string, def ViewVersion) LockChange {
 	def.State = StateCurrent
 	vs := l.Views[view]
-	if i := slices.IndexFunc(vs, func(vv ViewVersion) bool { return vv.Fingerprint == def.Fingerprint }); i >= 0 {
+	i := slices.IndexFunc(vs, func(vv ViewVersion) bool { return vv.State != StateRetired && vv.Fingerprint == def.Fingerprint })
+	if i >= 0 {
 		// The definition can differ from the locked one only in MODE, which changes in place.
 		def.Number = vs[i].Number
 		vs[i] = def
@@ -243,43 +313,86 @@ func (l *Lock) state(view string, number int) VersionState {
 	return ""
 }
 
-// CatalogViews returns the views of the catalog that l numbers: every version, in name
-// order and oldest first.
+// Retire marks a retained version retired, which keeps only its number and fingerprint.
+// Retiring a retired version does nothing. It fails for a version that is current or that
+// l doesn't hold.
+func (l *Lock) Retire(view string, number int) error {
+	vs := l.Views[view]
+	i := slices.IndexFunc(vs, func(vv ViewVersion) bool { return vv.Number == number })
+	id := VersionID(view, number)
+	switch {
+	case i < 0:
+		return fmt.Errorf("retire %s: %s doesn't hold it", id, LockFileName)
+	case vs[i].State == StateCurrent:
+		return fmt.Errorf("retire %s: it is the current version", id)
+	}
+	vs[i] = ViewVersion{Number: number, State: StateRetired, Fingerprint: vs[i].Fingerprint}
+	return nil
+}
+
+// CatalogViews returns the views of the catalog that l numbers: every version that isn't
+// retired, in name order and oldest first.
 func (l *Lock) CatalogViews() []View {
 	views := make([]View, 0, len(l.Views))
 	for _, name := range slices.Sorted(maps.Keys(l.Views)) {
-		vs := slices.Clone(l.Views[name])
+		vs := slices.DeleteFunc(slices.Clone(l.Views[name]), func(vv ViewVersion) bool { return vv.State == StateRetired })
+		if len(vs) == 0 {
+			continue
+		}
 		slices.SortFunc(vs, func(a, b ViewVersion) int { return cmp.Compare(a.Number, b.Number) })
 		views = append(views, View{Name: name, Versions: vs})
 	}
 	return views
 }
 
-// MarshalLock writes l as dynaflux.lock: JSON indented by two spaces, views by name and
-// their versions newest first, so a new version adds lines at the top of its view and
-// branches that change different views merge cleanly. It fails for a lock that
-// [ParseLock] would reject, so dynaflux generate never writes a lock it can't read back.
+// Retired returns the IDs of the retired versions in l, sorted, as [Catalog.Retired]
+// holds them.
+func (l *Lock) Retired() []string {
+	var ids []string
+	for name, vs := range l.Views {
+		for _, vv := range vs {
+			if vv.State == StateRetired {
+				ids = append(ids, VersionID(name, vv.Number))
+			}
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// MarshalLock writes l as dynaflux.lock: JSON indented by two spaces, the rebuild counts,
+// then views by name and their versions newest first, so a new version adds lines at the
+// top of its view and branches that change different views merge cleanly. It fails for a
+// lock that [ParseLock] would reject, so dynaflux generate never writes a lock it can't
+// read back.
 func MarshalLock(l *Lock) ([]byte, error) {
 	if l == nil {
 		return nil, errors.New("marshal lock: lock is nil")
 	}
-	views := make(map[string][]ViewVersion, len(l.Views))
+	views := make(map[string][]any, len(l.Views))
 	for name, vs := range l.Views {
 		vs = slices.Clone(vs)
-		for i := range vs {
-			vs[i].Aggregates = sortedAggregates(vs[i].Aggregates)
-		}
 		slices.SortFunc(vs, newestFirst)
-		views[name] = vs
+		entries := make([]any, len(vs))
+		for i, vv := range vs {
+			if vv.State == StateRetired {
+				entries[i] = retiredEntry{vv.Number, vv.State, vv.Fingerprint}
+				continue
+			}
+			vv.Aggregates = sortedAggregates(vv.Aggregates)
+			entries[i] = vv
+		}
+		views[name] = entries
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	err := enc.Encode(struct {
-		Format int                      `json:"format"`
-		Views  map[string][]ViewVersion `json:"views"`
-	}{LockFormatVersion, views})
+		Format  int              `json:"format"`
+		Rebuild map[string]int   `json:"rebuild,omitempty"`
+		Views   map[string][]any `json:"views"`
+	}{LockFormatVersion, l.Rebuilds, views})
 	if err != nil {
 		return nil, fmt.Errorf("marshal lock: %w", err)
 	}

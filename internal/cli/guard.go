@@ -19,9 +19,10 @@ import (
 
 // checkPrevious compares templates, the new ones, with those that generate wrote last time
 // in infra.out, and refuses changes that would lose data or fail when deployed: a view
-// version's table that disappears or holds another definition (DF6016), a change of more
-// than one replica region (DF6017), and the removal of a region whose replicas are still
-// protected (DF6018). A template that isn't generated is left to write's check.
+// version's table that disappears, unless the lock retires the version, or holds another
+// definition (DF6016), a change of more than one replica region (DF6017), and the removal
+// of a region whose replicas are still protected (DF6018). A template that isn't generated
+// is left to write's check.
 func (c *cli) checkPrevious(root *os.Root, p *project, templates []output) int {
 	var old, current [2][]byte
 	for i, name := range []string{cloudformation.GlobalTemplate, cloudformation.RegionalTemplate} {
@@ -50,7 +51,7 @@ func (c *cli) checkPrevious(root *os.Root, p *project, templates []output) int {
 		c.errorf("dynaflux generate: %v", err)
 		return exitErrors
 	}
-	ds := droppedVersions(before.Views, after.Views)
+	ds := droppedVersions(before.Views, after.Views, p.lock)
 	// Without a global.yaml from last time, every region is new.
 	if len(before.Regions) > 0 {
 		ds = append(ds, changedRegions(before, after.Regions, p.cfg.RegionsPos)...)
@@ -63,18 +64,32 @@ func (c *cli) checkPrevious(root *os.Root, p *project, templates []output) int {
 }
 
 // droppedVersions reports each view version whose table the last regional.yaml has and the
-// new one lacks or gives another fingerprint. Only a lost, reverted or badly merged
-// dynaflux.lock does that, and deploying would delete the table or write rows of another
-// definition into it.
-func droppedVersions(before, after []cloudformation.ViewTable) []diag.Diagnostic {
+// new one lacks or gives another fingerprint, unless lock retires that version. Only a
+// lost, reverted or badly merged dynaflux.lock does that, and deploying would delete the
+// table or write rows of another definition into it.
+func droppedVersions(before, after []cloudformation.ViewTable, lock *catalog.Lock) []diag.Diagnostic {
 	const hint = "restore dynaflux.lock from version control and run dynaflux generate again; " +
 		"to start over on purpose, delete the old templates first"
+	retired := map[string]string{} // version ID → fingerprint
+	for name, vs := range lock.Views {
+		for _, vv := range vs {
+			if vv.State == catalog.StateRetired {
+				retired[catalog.VersionID(name, vv.Number)] = vv.Fingerprint
+			}
+		}
+	}
 	var ds []diag.Diagnostic
 	for _, v := range before {
 		id := catalog.VersionID(v.View, v.Version)
 		i := slices.IndexFunc(after, func(w cloudformation.ViewTable) bool { return w.View == v.View && w.Version == v.Version })
+		fp, isRetired := retired[id]
 		var msg string
 		switch {
+		case i < 0 && isRetired && fp == v.Fingerprint:
+			continue
+		case i < 0 && isRetired:
+			msg = fmt.Sprintf("%s is retired in dynaflux.lock with another fingerprint than its table in the regional.yaml that "+
+				"generate wrote last time", id)
 		case i < 0:
 			msg = fmt.Sprintf("%s has a table in the regional.yaml that generate wrote last time, but dynaflux.lock no longer "+
 				"holds the version; deploying would delete the table", id)

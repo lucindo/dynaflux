@@ -277,8 +277,9 @@
           {
             "number": 1,
             "state": "current",
-            "fingerprint": "5f93bf7a2634e6e6758f37d25a2ea4c4fa0ac575ae62271efc8f51d7a1ffb308",
+            "fingerprint": "12da6627a6504c5c193c5d190278ada195d2f68fdaf90d2300078969508af13c",
             "mode": "sync",
+            "rebuild": 1,
             "stream": "api_calls",
             "keys": [
               {
@@ -439,6 +440,10 @@
           }
         ]
       }
+    ],
+    "retired": [
+      "page_hourly@v1",
+      "page_hourly@v2"
     ],
     "queries": [
       {

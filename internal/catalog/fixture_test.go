@@ -47,9 +47,10 @@ func interval(n int, unit catalog.Unit) catalog.Interval {
 
 // fixture is the store of sql.md §12.1 and §12.2, extended so that it uses every catalog
 // field: page_views gives tags a DEFAULT; api_calls has a go:type, LOG RETENTION FOREVER,
-// SHARDS 4 and no archive; page_daily has a retained v1; quota_usage adds a countIf and a
-// quantile; tag_hourly has SPLIT 2; and RecentPageViews filters on referrer and sorts
-// NULLS FIRST. Lists are in canonical order, and fingerprints are computed.
+// SHARDS 4 and no archive; page_daily has a retained v1; quota_usage was rebuilt once and
+// adds a countIf and a quantile; tag_hourly has SPLIT 2; the dropped view page_hourly has
+// two retired versions; and RecentPageViews filters on referrer and sorts NULLS FIRST.
+// Lists are in canonical order, and fingerprints are computed.
 func fixture(t *testing.T) *catalog.Catalog {
 	t.Helper()
 	c := &catalog.Catalog{
@@ -62,6 +63,7 @@ func fixture(t *testing.T) *catalog.Catalog {
 			{Name: "quota_usage", Versions: []catalog.ViewVersion{quotaUsage()}},
 			{Name: "tag_hourly", Versions: []catalog.ViewVersion{tagHourly()}},
 		},
+		Retired: []string{"page_hourly@v1", "page_hourly@v2"},
 		Queries: []catalog.Query{pageStats(), quotaUsed(), recentPageViews(), tagTotals()},
 	}
 	for i := range c.Views {
@@ -184,10 +186,11 @@ func quotaUsage() catalog.ViewVersion {
 		col("units", u32T()))
 	p90.Params = []float64{0.9}
 	return catalog.ViewVersion{
-		Number: 1,
-		State:  catalog.StateCurrent,
-		Mode:   catalog.ModeSync,
-		Stream: "api_calls",
+		Number:  1,
+		State:   catalog.StateCurrent,
+		Mode:    catalog.ModeSync,
+		Rebuild: 1,
+		Stream:  "api_calls",
 		Keys: []catalog.NamedExpr{
 			{Name: "account_id", Expr: col("account_id", strT())},
 			{Name: "month", Expr: call(catalog.OpToStartOfMonth, dateT(), col("event_time", microsT()))},

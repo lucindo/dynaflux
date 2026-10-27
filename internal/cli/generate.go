@@ -32,7 +32,7 @@ func generateCommand() command {
 	return command{
 		name:    "generate",
 		alias:   "gen",
-		args:    "[-unprotect-region region]",
+		args:    "[-unprotect-region region] [-rebuild view]",
 		summary: "write the Go client package and templates, and update dynaflux.lock",
 		doc: `Generate checks the project as validate does. Without errors, it writes the typed
 Go client package to go.out, the runtime binary's main.go to runtime.out, the
@@ -49,12 +49,16 @@ global.yaml beside it carries it.
 
 It compares the new templates with those it wrote last time, and writes nothing
 when a view version's table would disappear or hold another definition (DF6016),
-when the replica regions would change by more than one region (DF6017), or when
-a region would go before a run with -unprotect-region for it was deployed
-(DF6018).
+unless dynaflux.lock retires the version, when the replica regions would change by
+more than one region (DF6017), or when a region would go before a run with
+-unprotect-region for it was deployed (DF6018).
 
 -unprotect-region applies to one run: the next run without it turns protection
 back on.
+
+-rebuild gives a view's unchanged definition a new version, for a backfill to fill
+again after a gap or a fix in Dynaflux. It raises the view's rebuild count in
+dynaflux.lock by one.
 
 Exit status: 0 when the files are written (warnings are allowed), 1 when the project
 has an error, has no stream to deploy, fails a comparison with the last templates,
@@ -63,23 +67,38 @@ usage and I/O problems, and for a project outside a Go module.
 `,
 		setup: func(fs *flag.FlagSet) func(*cli, []string) int {
 			var opts infra.Options
+			var rebuild string
 			fs.StringVar(&opts.UnprotectRegion, "unprotect-region", "",
 				"turn off deletion protection on the stream table replicas in `region`, the first step of removing it from regions")
-			return func(c *cli, args []string) int { return c.generate(opts, args) }
+			fs.StringVar(&rebuild, "rebuild", "", "give the current definition of `view` a new version")
+			return func(c *cli, args []string) int { return c.generate(opts, rebuild, args) }
 		},
 	}
 }
 
-func (c *cli) generate(opts infra.Options, args []string) int {
+func (c *cli) generate(opts infra.Options, rebuild string, args []string) int {
 	if len(args) > 0 {
 		return c.usageError("generate", "unexpected arguments: "+strings.Join(args, " "))
 	}
-	p, ds, status := c.load()
+	var rebuilds []string
+	if rebuild != "" {
+		rebuilds = []string{rebuild}
+	}
+	p, ds, status := c.load(rebuilds...)
 	if status = c.diagnostics(ds, status); status != exitOK {
 		return status
 	}
 	if r := opts.UnprotectRegion; r != "" && !slices.Contains(p.cfg.Regions, r) {
 		return c.usageError("generate", fmt.Sprintf("-unprotect-region %s isn't in regions (%s)", r, strings.Join(p.cfg.Regions, ", ")))
+	}
+	if rebuild != "" {
+		v, ok := p.cat.View(rebuild)
+		if ok {
+			_, ok = v.Current()
+		}
+		if !ok {
+			return c.usageError("generate", fmt.Sprintf("-rebuild %s: the SQL files define no view %s", rebuild, rebuild))
+		}
 	}
 	root, err := os.OpenRoot(p.dir)
 	if err != nil {

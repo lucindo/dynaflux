@@ -71,7 +71,8 @@ func Marshal(c *Catalog) ([]byte, error) {
 //   - PruneWindowSeconds, Shards, Split and PartitionKeyLen are in range, and storage
 //     formats are supported
 //   - a view has versions, their numbers are unique and at least 1, at most one is
-//     current, and each version's Fingerprint matches its definition
+//     current, none is retired, and each version's Fingerprint matches its definition
+//   - Retired holds unique version IDs, none of a version that a view holds
 //   - a query's key range has a bound, and its OrderBy is empty only for an aggregation
 //     without GROUP BY
 //   - every Expr has the fields and argument count its Op takes, and every aggregate the
@@ -157,6 +158,7 @@ func canonical(c *Catalog) *Catalog {
 		out.Views[i].Versions = versions
 	}
 	slices.SortStableFunc(out.Views, func(a, b View) int { return strings.Compare(a.Name, b.Name) })
+	out.Retired = slices.Sorted(slices.Values(c.Retired))
 	out.Queries = slices.Clone(c.Queries)
 	slices.SortStableFunc(out.Queries, func(a, b Query) int { return strings.Compare(a.Name, b.Name) })
 	return &out
