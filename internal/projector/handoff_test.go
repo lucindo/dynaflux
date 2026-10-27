@@ -24,9 +24,10 @@ const pageTotals = "page_totals@v1"
 
 // archiveLog is an archive that keeps what it is given, or fails with err.
 type archiveLog struct {
-	mu   sync.Mutex
-	recs []projector.BackfillRecord
-	err  error
+	mu       sync.Mutex
+	recs     []projector.BackfillRecord
+	arrivals []time.Time // of recs
+	err      error
 }
 
 func (a *archiveLog) Archive(_ context.Context, _, unit string, recs []projector.Record) error {
@@ -37,16 +38,18 @@ func (a *archiveLog) Archive(_ context.Context, _, unit string, recs []projector
 	}
 	for _, r := range recs {
 		a.recs = append(a.recs, projector.BackfillRecord{Unit: unit, Seq: r.Seq, Item: r.New})
+		a.arrivals = append(a.arrivals, r.Arrival)
 	}
 	return nil
 }
 
+// seqs returns the archived records as their sequence numbers and arrivals.
 func (a *archiveLog) seqs() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := make([]string, len(a.recs))
 	for i, r := range a.recs {
-		out[i] = r.Seq
+		out[i] = r.Seq + " at " + a.arrivals[i].Format(time.RFC3339)
 	}
 	return out
 }
@@ -72,13 +75,15 @@ func TestHandleArchivesOnlyInserts(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newFixture(t, nil)
 		a, b := f.click(t, "u1", "/a", 100), f.click(t, "u2", "/a", 200)
+		arrival := start.Add(-time.Second)
 		res := f.handle(t,
-			insert(1, a),
-			projector.Record{Op: projector.Modify, Seq: seq(2), Old: a, New: b},
-			projector.Record{Op: projector.Remove, Seq: seq(3), Old: a},
+			projector.Record{Op: projector.Insert, Seq: seq(1), Arrival: arrival, New: a},
+			projector.Record{Op: projector.Modify, Seq: seq(2), Arrival: arrival, Old: a, New: b},
+			projector.Record{Op: projector.Remove, Seq: seq(3), Arrival: arrival, Old: a},
 		)
-		if got := f.archive.seqs(); res.Stats.Divergent != 1 || !slices.Equal(got, []string{seq(1)}) {
-			t.Errorf("archived %v with %d divergent, want [%s] and 1", got, res.Stats.Divergent, seq(1))
+		want := []string{seq(1) + " at 1999-12-31T23:59:59Z"}
+		if got := f.archive.seqs(); res.Stats.Divergent != 1 || !slices.Equal(got, want) {
+			t.Errorf("archived %v with %d divergent, want %v and 1", got, res.Stats.Divergent, want)
 		}
 	})
 }
@@ -133,6 +138,26 @@ func TestHandleAppliesFencedVersionAboveItsFence(t *testing.T) {
 			t.Errorf("page_totals /a is %q, want %q", got, want)
 		}
 	})
+}
+
+// The cached view states' age is on the wall clock: states stamped an hour ahead, as after
+// the clock stepped back, are read again. The stamp keeps no monotonic reading, which stops
+// while Lambda freezes the environment. The test runs outside synctest, whose clock has no
+// monotonic reading.
+func TestHandleRereadsStatesStampedAhead(t *testing.T) {
+	t.Parallel()
+	f := newPendingFixture(t, nil)
+	c1, c2 := f.click(t, "u1", "/a", 100), f.click(t, "u2", "/a", 200)
+	f.handle(t, insert(1, c1))
+	f.activate(t, pageTotals)
+	f.core.SetStatesAt(time.Now().Add(time.Hour).Round(0))
+	f.handle(t, insert(2, c2))
+	if got, want := f.row(t, pageTotals, page("/a")), "/a 200 2.00 200 200 1 1"; got != want {
+		t.Errorf("page_totals /a is %q, want %q", got, want)
+	}
+	if at := f.core.StatesAt(); at != at.Round(0) {
+		t.Errorf("the view states are stamped %v, with a monotonic reading", at)
+	}
 }
 
 // A batch whose cached states predate an activation finds the version's fence on the unit

@@ -9,6 +9,8 @@ package projector
 
 import (
 	"fmt"
+	"iter"
+	"maps"
 	"slices"
 
 	"github.com/lucindo/dynaflux/internal/agg"
@@ -85,6 +87,9 @@ func Compile(cat *catalog.Catalog) (*Compiled, error) {
 	}
 	return c, nil
 }
+
+// Streams returns every compiled stream, in no order.
+func (c *Compiled) Streams() iter.Seq[*Stream] { return maps.Values(c.streams) }
 
 // Stream returns the compiled stream named name.
 func (c *Compiled) Stream(name string) (*Stream, bool) {

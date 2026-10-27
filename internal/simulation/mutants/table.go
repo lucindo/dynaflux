@@ -45,11 +45,14 @@ const (
 	d23a          = "d23a"
 	regions       = "regions"
 	pruneBoundary = "TestPruneBoundary"
+	lateProgress  = "TestLateProgress"
 	always        = "if true {"
 	prune         = "time.Since(u.ProgressAt) > c.window"
 	skip          = "\trecs = slices.DeleteFunc(recs, func(r record) bool { return r.seq <= rc.unit.Progress })"
-	advance       = "c.advance(ctx, rc, recs, failed, deadline)"
-	archive       = "\tif err = c.archive(ctx, b, recs); err != nil {\n\t\treturn Result{}, err\n\t}"
+	advance       = "c.advance(progressCtx, rc, recs, failed, deadline)"
+	archive       = "\tif err = c.archive(ctx, b, recs); err != nil {\n\t\treturn err\n\t}"
+	applies       = "if r := &recs[i]; r.Op == Insert {"
+	noInsert      = "if inserts == 0 {" // a batch without an INSERT returns early
 	statesAt      = "statesAt time.Time                 // when the read that returned states was sent"
 	fence         = "\t\tif _, ok := u.Fences[version]; ok {\n\t\t\treturn u, nil\n\t\t}"
 	// fenceBody follows fence in EnsureFence, up to the fence's value.
@@ -215,17 +218,21 @@ func liveControls() []control {
 	}
 }
 
+// everyBatch is the More of a mutant that applies or archives records other than INSERTs:
+// batches without an INSERT reach it too.
+func everyBatch() [][2]string { return [][2]string{{noInsert, "if inserts < 0 {"}} }
+
 // regionControls returns the controls of what a region's change stream holds besides its
 // own appends, of an append that finds its event stored, and of a batch's rows and unit
 // item (S9 requirements 1 and 3).
 func regionControls() []control {
-	const op = "\t\t\tif err = c.evaluate(ctx, rs, s, r, rc, broken, &res.Stats); err != nil {\n\t\t\t\treturn Result{}, err\n\t\t\t}"
 	return []control{
 		{
 			ID:       "C19", // a MODIFY, a cross-region duplicate, is applied
 			File:     handle,
-			Old:      "\t\tcase Modify:\n\t\t\tif !s.SamePayload(r.Old, r.New) {\n\t\t\t\tres.Stats.Divergent++\n\t\t\t}",
-			New:      "\t\tcase Modify:\n" + op,
+			Old:      applies,
+			New:      "if r := &recs[i]; r.Op != Remove {",
+			More:     everyBatch(),
 			Scenario: regions,
 			Seeds:    20,
 			Want:     p1,
@@ -233,8 +240,9 @@ func regionControls() []control {
 		{
 			ID:       "C20", // a REMOVE, an expired event, is applied as its old image
 			File:     handle,
-			Old:      "\t\tcase Remove:\n\t\t}",
-			New:      "\t\tcase Remove:\n\t\t\tr.New = r.Old\n" + op + "\n\t\t}",
+			Old:      applies,
+			New:      "if r := &recs[i]; r.Op != Modify {\n\t\t\tif r.Op == Remove {\n\t\t\t\tr.New = r.Old\n\t\t\t}",
+			More:     everyBatch(),
 			Scenario: regions,
 			Seeds:    20,
 			Want:     p1,
@@ -341,9 +349,25 @@ func fenceControls() []control {
 		{
 			ID:      "C37", // cached view states never expire
 			File:    handle,
-			Old:     "time.Since(at) < meta.MaxViewStateAge",
-			New:     "time.Since(at) < 1<<62",
+			Old:     "age < meta.MaxViewStateAge",
+			New:     "age < 1<<62",
 			Test:    "TestHandleAppliesFencedVersionAboveItsFence",
+			Package: core,
+		},
+		{
+			ID:      "C50", // the view states' age is on the monotonic clock, which a freeze stops
+			File:    handle,
+			Old:     "sent := time.Now().Round(0)",
+			New:     "sent := time.Now()",
+			Test:    "TestHandleRereadsStatesStampedAhead",
+			Package: core,
+		},
+		{
+			ID:      "C51", // cached view states stamped ahead, by a clock that stepped back, are fresh
+			File:    handle,
+			Old:     "age >= 0 && ",
+			New:     "",
+			Test:    "TestHandleRereadsStatesStampedAhead",
 			Package: core,
 		},
 	}
@@ -355,9 +379,9 @@ func handoffControls() []control {
 		{
 			ID:   "C33", // a batch archives before it fences its unit
 			File: handle,
-			Old:  archive + "\n\tvar res Result",
-			New:  "\tvar res Result",
-			More: [][2]string{{"\trc, err := c.reach(ctx, b.Stream, b.Unit)", archive + "\n\trc, err := c.reach(ctx, b.Stream, b.Unit)"}},
+			Old:  archive + "\n\trs := &rows{",
+			New:  "\trs := &rows{",
+			More: [][2]string{{"\trc, err := c.reach(ctx, b.Stream, b.Unit)", strings.Replace(archive, "err =", "err :=", 1) + "\n\trc, err := c.reach(ctx, b.Stream, b.Unit)"}},
 			Test: "TestUnitFencesItselfBeforeItArchives",
 		},
 		{
@@ -438,6 +462,7 @@ func backfillControls() []control {
 			File:     handle,
 			Old:      "if recs[i].Op == Insert {",
 			New:      "if recs[i].Op != Modify {",
+			More:     everyBatch(),
 			Scenario: regions,
 			Seeds:    20,
 			Want:     p3,
@@ -690,9 +715,8 @@ func progressControls() []control {
 		{
 			ID:       "C13", // progress_at is when the advancing invocation started
 			File:     handle,
-			Old:      "deadline, ok := ctx.Deadline()",
-			New:      "deadline, ok := ctx.Deadline()\n\tstart := time.Now()",
-			More:     [][2]string{{advance, "c.advance(ctx, rc, recs, failed, start)"}},
+			Old:      "c.apply(rowCtx, ctx, b, s, recs, deadline, &res)",
+			New:      "c.apply(rowCtx, ctx, b, s, recs, time.Now(), &res)",
 			Scenario: d23a,
 			Seeds:    100,
 			Want:     p1,
@@ -701,7 +725,7 @@ func progressControls() []control {
 			ID:   "C15c", // progress_at a microsecond before the deadline
 			File: handle,
 			Old:  advance,
-			New:  "c.advance(ctx, rc, recs, failed, deadline.Add(-time.Microsecond))",
+			New:  "c.advance(progressCtx, rc, recs, failed, deadline.Add(-time.Microsecond))",
 			Test: pruneBoundary,
 		},
 		{
@@ -709,14 +733,14 @@ func progressControls() []control {
 			File: handle,
 			Old:  "lifetime: w - catalog.LifetimeMarginSeconds*time.Second,",
 			New:  "lifetime: w - (catalog.LifetimeMarginSeconds-1)*time.Second,",
-			Test: "TestLateProgress",
+			Test: lateProgress,
 		},
 		{
 			ID:   "C41", // an invocation may live longer than W − 60 s
 			File: handle,
 			Old:  "left > c.lifetime {",
 			New:  "false {",
-			Test: "TestLateProgress",
+			Test: lateProgress,
 		},
 		{
 			ID:       "C43", // the progress write outlives the invocation's deadline
@@ -726,6 +750,28 @@ func progressControls() []control {
 			Scenario: d23a,
 			Seeds:    10,
 			Want:     p7,
+		},
+		{
+			ID:   "C47", // no reserve: the core sends until its deadline
+			File: handle,
+			Old:  "reserve := min(maxReserve, left/reserveShare)",
+			New:  "reserve := time.Duration(0)",
+			Test: lateProgress,
+		},
+		{
+			ID:   "C48", // progress_at is the send cutoff, not the deadline
+			File: handle,
+			Old:  advance,
+			New:  "c.advance(progressCtx, rc, recs, failed, func() time.Time { d, _ := progressCtx.Deadline(); return d }())",
+			Test: pruneBoundary,
+		},
+		{
+			ID:      "C49", // the progress write stops with the rows, so a hung row fails the batch
+			File:    handle,
+			Old:     advance,
+			New:     "c.advance(ctx, rc, recs, failed, deadline)",
+			Test:    "TestHandleStopsSendingAtTheCutoff",
+			Package: core,
 		},
 	}
 }

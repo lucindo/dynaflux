@@ -11,6 +11,7 @@ import (
 	"maps"
 	"math/big"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -268,16 +269,36 @@ func (f *fixture) row(t *testing.T, version string, key ...expr.Value) string {
 
 func page(p string) expr.Value { return expr.String(p) }
 
-func TestHandleEmptyBatchSendsNoRequest(t *testing.T) {
+// TestHandleWithoutInsertSendsNoRequest: TTL deletes reach the projector as REMOVE records,
+// and a batch of them, or of MODIFY records, costs no store call.
+func TestHandleWithoutInsertSendsNoRequest(t *testing.T) {
 	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		calls := &callCount{}
-		f := newFixture(t, func(b store.Backend) store.Backend { calls.Backend = b; return calls })
-		f.handle(t)
-		if n := calls.n.Load(); n != 0 {
-			t.Errorf("an empty batch made %d store calls, want 0", n)
-		}
-	})
+	tests := []struct {
+		name      string
+		recs      func(a, b store.Item) []projector.Record
+		divergent int
+	}{
+		{"no record", func(_, _ store.Item) []projector.Record { return nil }, 0},
+		{"REMOVE records", func(a, b store.Item) []projector.Record {
+			return []projector.Record{{Op: projector.Remove, Seq: seq(1), Old: a}, {Op: projector.Remove, Seq: seq(2), Old: b}}
+		}, 0},
+		{"a MODIFY with another payload and a REMOVE", func(a, b store.Item) []projector.Record {
+			return []projector.Record{{Op: projector.Modify, Seq: seq(1), Old: a, New: b}, {Op: projector.Remove, Seq: seq(2), Old: b}}
+		}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				calls := &callCount{}
+				f := newFixture(t, func(b store.Backend) store.Backend { calls.Backend = b; return calls })
+				res := f.handle(t, tt.recs(f.click(t, "u1", "/a", 100), f.click(t, "u1", "/a", 200))...)
+				if n, archived := calls.n.Load(), f.archive.seqs(); n != 0 || len(archived) > 0 || res.Stats.Divergent != tt.divergent {
+					t.Errorf("%d store calls, archived %v, %d divergent; want 0, none, %d", n, archived, res.Stats.Divergent, tt.divergent)
+				}
+			})
+		})
+	}
 }
 
 func TestHandleAppliesEachRecordOnce(t *testing.T) {
@@ -473,6 +494,93 @@ func TestHandleReportsOnlyBreakersItOpens(t *testing.T) {
 		}
 		if got := states["page_rates@v1"].Failure; len(res.Stats.Broken) > 0 || got == nil || got.Error != "first" {
 			t.Errorf("Broken %v with failure %+v, want none reported and the first failure kept", res.Stats.Broken, got)
+		}
+	})
+}
+
+// TestHandleSkipsVersionItFoundBroken: once a batch finds a version broken, whether it opened
+// the breaker or another unit's batch had, the core's later batches skip the version before
+// the view states it read expire.
+func TestHandleSkipsVersionItFoundBroken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		otherOpener bool // another unit opens the breaker after the batch read the view states
+	}{
+		{"opened by the batch", false},
+		{"opened by another unit", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				var f *fixture
+				var wrap func(store.Backend) store.Backend
+				if tt.otherOpener {
+					wrap = openBreakerAfterViewStates(t, &f)
+				}
+				f = newFixture(t, wrap)
+				res := f.handle(t, insert(1, f.click(t, "u1", "/a", 0))) // page_rates divides by ms
+				if opened := slices.Equal(res.Stats.Broken, []string{"page_rates@v1"}); opened == tt.otherOpener {
+					t.Fatalf("Broken %v, want page_rates@v1 reported: %v", res.Stats.Broken, !tt.otherOpener)
+				}
+				f.handle(t, insert(2, f.click(t, "u2", "/b", 100)))
+				if got := f.row(t, "page_rates@v1", page("/b")); got != "" {
+					t.Errorf("page_rates /b is %q, want no row: the version is broken", got)
+				}
+				if got, want := f.row(t, "page_users@v1", page("/b")), "/b 1"; got != want {
+					t.Errorf("page_users /b is %q, want %q", got, want)
+				}
+			})
+		})
+	}
+}
+
+// openBreakerAfterViewStates returns a wrap whose backend opens page_rates' breaker for
+// another unit once the core has read the view states.
+func openBreakerAfterViewStates(t *testing.T, f **fixture) func(store.Backend) store.Backend {
+	t.Helper()
+	other := meta.Failure{Unit: "shardId-2", Seq: padSeq(t, seq(9)), EventID: "e", Error: "other"}
+	return func(b store.Backend) store.Backend {
+		return &afterViewStates{Backend: b, do: func(ctx context.Context) {
+			if _, err := (*f).meta.MarkBroken(ctx, "page_rates@v1", other); err != nil {
+				t.Error(err)
+			}
+		}}
+	}
+}
+
+// TestHandleReportsStatsOfAFailedBatch: a breaker opened by a batch that then fails is
+// reported by that batch, since its retry finds the version broken already.
+func TestHandleReportsStatsOfAFailedBatch(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		f := newFixture(t, failPuts(pageTotalsTable, "", fmt.Errorf("rejected: %w", store.ErrInvalidRequest)))
+		a, b := f.click(t, "u1", "/a", 0), f.click(t, "u1", "/a", 100) // page_rates divides by ms
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		res, err := f.core.Handle(ctx, projector.Batch{Stream: "clicks", Unit: unit, Records: []projector.Record{
+			insert(1, a), {Op: projector.Modify, Seq: seq(2), Old: a, New: b},
+		}})
+		want := projector.Stats{Divergent: 1, Broken: []string{"page_rates@v1"}}
+		if !errors.Is(err, store.ErrInvalidRequest) || res.FailedSeq != "" || res.RowErr != nil || !reflect.DeepEqual(res.Stats, want) {
+			t.Errorf("Handle = %+v, %v; want only Stats %+v, and ErrInvalidRequest", res, err, want)
+		}
+	})
+}
+
+// TestHandleCountsRowsTooLarge: a row whose item would be over DynamoDB's limit fails the
+// row, not the batch, and is counted.
+func TestHandleCountsRowsTooLarge(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		f := newFixture(t, failPuts(pageTotalsTable, "/b", fmt.Errorf("item is 400,001 bytes: %w", store.ErrTooLarge)))
+		res := f.handle(t, insert(1, f.click(t, "u1", "/a", 100)), insert(2, f.click(t, "u1", "/b", 100)), insert(3, f.click(t, "u2", "/b", 100)))
+		if res.FailedSeq != seq(2) || res.Stats.TooLarge != 1 || len(res.Stats.Broken) > 0 {
+			t.Errorf("FailedSeq %q with %+v, want %q, 1 row too large and no breaker", res.FailedSeq, res.Stats, seq(2))
+		}
+		if got, want := f.row(t, pageTotals, page("/a")), "/a 100 1.00 100 100 1 1"; got != want {
+			t.Errorf("page_totals /a is %q, want %q", got, want)
 		}
 	})
 }

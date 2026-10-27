@@ -41,7 +41,7 @@ var (
 type invocation struct {
 	id       string
 	deadline time.Time     // zero for harness actors
-	empty    bool          // a core invocation without records
+	noInsert bool          // a core invocation whose batch holds no INSERT
 	stallAt  int           // the request whose response stalls; -1 for none
 	stall    time.Duration // how long before the deadline the stalled response returns
 	// taken is set when a writer's write of an event found another call's event at its key.
@@ -225,8 +225,8 @@ func (rg *region) enter(ctx context.Context, k kind, op string) (time.Duration, 
 		runtime.Goexit()
 	}
 	r.count(&r.stats.Requests)
-	if inv.empty {
-		r.violatef("P9: %s: %s for an empty batch", inv.id, op)
+	if inv.noInsert {
+		r.violatef("P9: %s: %s for a batch without an INSERT", inv.id, op)
 	}
 	core := !inv.deadline.IsZero()
 	if d, has := ctx.Deadline(); core && (!has || d.After(inv.deadline)) {

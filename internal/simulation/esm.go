@@ -131,10 +131,14 @@ type call struct {
 func (m *mapping) invoke(l *lane, id string, rng *rand.Rand, recs []projector.Record) outcome {
 	r := m.rg.run
 	b := projector.Batch{Stream: l.unit.s.name, Unit: l.unit.id, Records: make([]projector.Record, len(recs))}
+	inserts := 0
 	for i, rec := range recs {
 		b.Records[i] = cloneRecord(rec)
+		if rec.Op == projector.Insert {
+			inserts++
+		}
 	}
-	o := m.rg.invoke(id, rng, len(recs), func(ctx context.Context, core Core) (projector.Result, error) {
+	o := m.rg.invoke(id, rng, inserts, func(ctx context.Context, core Core) (projector.Result, error) {
 		return core.Handle(ctx, b)
 	})
 	if o.err == nil {
@@ -161,13 +165,14 @@ func (r *run) checkReported(id string, b projector.Batch, res projector.Result) 
 	r.mu.Unlock()
 }
 
-// invoke runs f, which handles n records, as one invocation on a warm container, and
-// waits for its result or its deadline, whichever comes first.
+// invoke runs f, which applies n records, the INSERTs of a batch or a backfill chunk, as one
+// invocation on a warm container, and waits for its result or its deadline, whichever comes
+// first.
 func (rg *region) invoke(id string, rng *rand.Rand, n int, f func(context.Context, Core) (projector.Result, error)) outcome {
 	r := rg.run
 	e := r.sc.ESM
 	core := rg.acquire(id, rng)
-	inv := &invocation{id: id, deadline: time.Now().Add(e.Timeout), empty: n == 0, stallAt: -1}
+	inv := &invocation{id: id, deadline: time.Now().Add(e.Timeout), noInsert: n == 0, stallAt: -1}
 	if n > 0 && chance(rng, e.Slow) {
 		inv.stallAt = rng.IntN(stallSpread * n)
 		inv.stall = between(rng, -time.Millisecond, e.Timeout/stallFraction)

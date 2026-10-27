@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -34,7 +35,10 @@ const (
 type Record struct {
 	Op Op
 	// Seq is the sequence number as delivered: 21 to 40 decimal digits.
-	Seq      string
+	Seq string
+	// Arrival is when the record entered the stream, in whole seconds: the archive's
+	// _arrival. Zero when unknown.
+	Arrival  time.Time
 	New, Old store.Item
 }
 
@@ -46,7 +50,7 @@ type Batch struct {
 	Records []Record
 }
 
-// Result is the outcome of a batch that didn't fail as a whole.
+// Result is the outcome of a batch. A batch that failed as a whole sets only Stats.
 type Result struct {
 	// FailedSeq is the lowest sequence number to deliver again, as delivered; "" when every
 	// row was written.
@@ -63,6 +67,8 @@ type Stats struct {
 	Divergent int
 	// Broken lists the view versions whose breaker this batch opened.
 	Broken []string
+	// TooLarge counts the rows that failed with [store.ErrTooLarge].
+	TooLarge int
 }
 
 // Archiver writes a batch's INSERT records to the stream's archive, from which a backfill
@@ -70,6 +76,9 @@ type Stats struct {
 type Archiver interface {
 	Archive(ctx context.Context, stream, unit string, recs []Record) error
 }
+
+// ErrArchive fails a batch whose INSERT records the [Archiver] didn't write.
+var ErrArchive = errors.New("projector: archive")
 
 // Config configures a [Core].
 type Config struct {
@@ -101,6 +110,14 @@ type Core struct {
 // rowParallelism bounds the rows a batch writes at once.
 const rowParallelism = 16
 
+// Handle stops sending a reserve before the deadline: maxReserve, or the time left divided
+// by reserveShare when that is less. Requests in flight end at the cutoff, and the reserve
+// leaves time to close their connections and reply before Lambda stops the invocation.
+const (
+	maxReserve   = 2 * time.Second
+	reserveShare = 10
+)
+
 // New returns a Core that writes c's views to b and archives what it applies to a, nil
 // when this region doesn't archive.
 func New(c *Compiled, b store.Backend, a Archiver, cfg Config) *Core {
@@ -126,10 +143,13 @@ type record struct {
 }
 
 // Handle applies a batch to every view version of its stream that the batch reaches,
-// archives its INSERT records and advances the unit's progress past what it applied. ctx
-// must have a deadline, at most the prune window less its margin away, or Handle fails with
-// [ErrLifetime]; nothing is sent after it. Handle returns an error only to fail the whole
-// batch. A row that fails sets FailedSeq, and every row is finished before Handle returns.
+// archives its INSERT records and advances the unit's progress past what it applied; a batch
+// without an INSERT sends nothing. ctx's deadline is the invocation's: at most the
+// prune window less its margin away, or Handle fails with [ErrLifetime]. Handle sends
+// nothing after the deadline less a reserve of min(2 s, a tenth of the time left), and
+// stamps progress with the deadline itself. Handle returns an error only to fail the whole
+// batch, with the batch's Stats either way. A row that fails sets FailedSeq, and every row
+// is finished before Handle returns.
 func (c *Core) Handle(ctx context.Context, b Batch) (Result, error) {
 	if len(b.Records) == 0 {
 		return Result{}, nil
@@ -138,7 +158,8 @@ func (c *Core) Handle(ctx context.Context, b Batch) (Result, error) {
 	if !ok || b.Unit == "" {
 		return Result{}, errors.New("projector: a batch needs a delivery unit and a context with a deadline")
 	}
-	if left := time.Until(deadline); left > c.lifetime {
+	left := time.Until(deadline)
+	if left > c.lifetime {
 		return Result{}, fmt.Errorf("%w: the deadline is %v away, and a prune window of %v allows %v", ErrLifetime, left, c.window, c.lifetime)
 	}
 	s, ok := c.c.streams[b.Stream]
@@ -149,26 +170,12 @@ func (c *Core) Handle(ctx context.Context, b Batch) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	rc, err := c.reach(ctx, b.Stream, b.Unit)
-	if err != nil {
-		return Result{}, fmt.Errorf("projector: %w", err)
-	}
-	// Records at or below progress, read after the invocation started, were applied, and a row
-	// may have dropped their marks since (S9 rule 1).
-	recs = slices.DeleteFunc(recs, func(r record) bool { return r.seq <= rc.unit.Progress })
-	if err = c.archive(ctx, b, recs); err != nil {
-		return Result{}, err
-	}
 	var res Result
-	rs := &rows{owner: keys.OwnerLive, groups: map[groupKey]*rowGroup{}}
-	broken := map[*view]bool{}
-	for i := range recs {
-		r := &recs[i]
+	inserts := 0
+	for _, r := range recs {
 		switch r.Op {
 		case Insert:
-			if err = c.evaluate(ctx, rs, s, r, rc, broken, &res.Stats); err != nil {
-				return Result{}, err
-			}
+			inserts++
 		case Modify:
 			if !s.SamePayload(r.Old, r.New) {
 				res.Stats.Divergent++
@@ -176,15 +183,51 @@ func (c *Core) Handle(ctx context.Context, b Batch) (Result, error) {
 		case Remove:
 		}
 	}
-	groups := slices.DeleteFunc(rs.order, func(g *rowGroup) bool { return broken[g.v] })
-	failed, err := c.finish(ctx, b.Stream, rc.unit.Key, groups, &res)
-	if err != nil {
-		return Result{}, err
+	// Only an INSERT changes a view or the archive, and progress may stay below the rest.
+	if inserts == 0 {
+		return res, nil
 	}
-	if err = c.advance(ctx, rc, recs, failed, deadline); err != nil {
-		return Result{}, err
+	reserve := min(maxReserve, left/reserveShare)
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(-reserve))
+	defer cancel()
+	// All but the progress write stop half a reserve earlier, so a row that never answers
+	// still leaves time to checkpoint the rows written below it.
+	rowCtx, cancelRows := context.WithDeadline(ctx, deadline.Add(-reserve-reserve/2))
+	defer cancelRows()
+	if err = c.apply(rowCtx, ctx, b, s, recs, deadline, &res); err != nil {
+		return Result{Stats: res.Stats}, err
 	}
 	return res, nil
+}
+
+// apply is Handle's work on a batch with an INSERT, in recs. It sends with ctx, but writes
+// progress with progressCtx and stamps it with deadline.
+func (c *Core) apply(ctx, progressCtx context.Context, b Batch, s *Stream, recs []record, deadline time.Time, res *Result) error {
+	rc, err := c.reach(ctx, b.Stream, b.Unit)
+	if err != nil {
+		return fmt.Errorf("projector: %w", err)
+	}
+	// Records at or below progress, read after the invocation started, were applied, and a row
+	// may have dropped their marks since (S9 rule 1).
+	recs = slices.DeleteFunc(recs, func(r record) bool { return r.seq <= rc.unit.Progress })
+	if err = c.archive(ctx, b, recs); err != nil {
+		return err
+	}
+	rs := &rows{owner: keys.OwnerLive, groups: map[groupKey]*rowGroup{}}
+	broken := map[*view]bool{}
+	for i := range recs {
+		if r := &recs[i]; r.Op == Insert {
+			if err = c.evaluate(ctx, rs, s, r, rc, broken, &res.Stats); err != nil {
+				return err
+			}
+		}
+	}
+	groups := slices.DeleteFunc(rs.order, func(g *rowGroup) bool { return broken[g.v] })
+	failed, err := c.finish(ctx, b.Stream, rc.unit.Key, groups, res)
+	if err != nil {
+		return err
+	}
+	return c.advance(progressCtx, rc, recs, failed, deadline)
 }
 
 // sortRecords pads sequence numbers, sorts the records by them and drops repeats: Lambda
@@ -258,15 +301,16 @@ func (c *Core) reach(ctx context.Context, stream, unitID string) (*reach, error)
 }
 
 // viewStates returns the view states, read at most meta.MaxViewStateAge ago unless fresh is
-// set.
+// set. The age is on the wall clock, since the monotonic one may stop while Lambda freezes
+// the environment; a negative age, from a clock that stepped back, counts as expired.
 func (c *Core) viewStates(ctx context.Context, fresh bool) (map[string]meta.ViewState, error) {
 	c.mu.Lock()
 	states, at := c.states, c.statesAt
 	c.mu.Unlock()
-	if !fresh && states != nil && time.Since(at) < meta.MaxViewStateAge {
+	if age := time.Since(at); !fresh && states != nil && age >= 0 && age < meta.MaxViewStateAge {
 		return states, nil
 	}
-	sent := time.Now()
+	sent := time.Now().Round(0)
 	states, err := c.meta.ViewStates(ctx)
 	if err != nil {
 		return nil, err
@@ -321,7 +365,7 @@ func (c *Core) archive(ctx context.Context, b Batch, recs []record) error {
 		return nil
 	}
 	if err := c.a.Archive(ctx, b.Stream, b.Unit, ins); err != nil {
-		return fmt.Errorf("projector: archive: %w", err)
+		return fmt.Errorf("%w: %w", ErrArchive, err)
 	}
 	return nil
 }
@@ -351,8 +395,8 @@ func (c *Core) evaluate(ctx context.Context, rs *rows, s *Stream, r *record, rc 
 	return nil
 }
 
-// breakVersion opens v's breaker with the record whose evaluation failed with cause, and
-// reports whether this call opened it.
+// breakVersion opens v's breaker with the record whose evaluation failed with cause, marks v
+// broken in the cached view states, and reports whether this call opened the breaker.
 func (c *Core) breakVersion(ctx context.Context, v *view, r *record, vals []expr.Value, cause error) (bool, error) {
 	f := meta.Failure{
 		Unit:    r.unit,
@@ -365,7 +409,24 @@ func (c *Core) breakVersion(ctx context.Context, v *view, r *record, vals []expr
 	if err != nil {
 		return false, fmt.Errorf("projector: %w", err)
 	}
+	c.cacheBroken(v.id)
 	return opened, nil
+}
+
+// cacheBroken marks version broken in the cached view states, so the core's next batches
+// skip it before the states expire. Broken is final, so the mark can't go stale.
+func (c *Core) cacheBroken(version string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.states == nil { // a backfill reads no states, and the first read finds the version broken
+		return
+	}
+	// Batches in flight hold the old map.
+	states := maps.Clone(c.states)
+	vs := states[version]
+	vs.Version, vs.State = version, meta.Broken
+	states[version] = vs
+	c.states = states
 }
 
 // finish writes the rows of unit own's records, sets FailedSeq to the lowest sequence number
@@ -375,12 +436,16 @@ func (c *Core) finish(ctx context.Context, stream, own string, groups []*rowGrou
 	errs := c.applyRows(ctx, stream, own, groups)
 	lowest := ""
 	var failed []error
+	var invalid error
 	for i, err := range errs {
-		if err == nil {
+		switch {
+		case err == nil:
 			continue
-		}
-		if errors.Is(err, store.ErrInvalidRequest) {
-			return "", err
+		case errors.Is(err, store.ErrInvalidRequest):
+			invalid = cmp.Or(invalid, err)
+			continue
+		case errors.Is(err, store.ErrTooLarge):
+			res.Stats.TooLarge++
 		}
 		failed = append(failed, err)
 		for _, ct := range groups[i].contribs {
@@ -388,6 +453,9 @@ func (c *Core) finish(ctx context.Context, stream, own string, groups []*rowGrou
 				lowest, res.FailedSeq = ct.seq, ct.delivered
 			}
 		}
+	}
+	if invalid != nil {
+		return "", invalid
 	}
 	res.RowErr = errors.Join(failed...)
 	return lowest, nil

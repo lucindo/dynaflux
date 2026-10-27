@@ -532,11 +532,21 @@ One per delivery unit of each stream, in each region:
 | `pk` | `unit#`, the stream name, `#`, the unit key (§4.2): `unit#page_views#0F3KZ8M1QW7RD`. Each unit has its own partition. |
 | `sk` | `!` |
 | `id` | S: the unit's full ID, for diagnostics. |
-| `progress` | S, 40 digits: the last sequence number fully applied and archived. Absent before the first advance. |
-| `progress_at` | N: the deadline, in microseconds, of the invocation that last raised `progress`. |
+| `progress` | S, 40 digits: the last sequence number fully applied and archived. Absent before the first advance. "Archived" means in this region's archive only when the region archives the stream with `archive.events: all` (below). |
+| `progress_at` | N: the deadline, in microseconds, of the invocation that last raised `progress`: the one in Lambda's context, not the earlier cutoff at which the projector stops sending. |
 | `fences` | M: view version ID (`page_daily@v2`) → S, 40 digits: the fence. Absent when there are none. |
 | `_v` | N, as §7.1. |
 | `_ttl` | 400 days after the last write, as §5.4. The item must outlive every record of its unit that can still be delivered, which needs at least 25 hours. |
+
+In a region that archives the stream, the projector raises `progress` only after Firehose
+accepted the archive records of the batch's `INSERT` records. With `archive.events: all`,
+the region archives every `INSERT`, so its archive holds every event that the unit
+delivered at or below `progress`, under the unit's ID and the record's sequence number: a
+backfill can hand off at `progress` from that archive alone. With `archive.events: local`,
+the region archives only the events it accepted. A replicated event at or below `progress`
+is in the archive of the region that accepted it, under that region's unit and sequence
+number, so a backfill can't hand off from this region's archive and reads the stream table
+instead.
 
 ### 8.2 View-state item
 

@@ -6,6 +6,7 @@ package projector
 import (
 	"fmt"
 	"reflect"
+	"slices"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/expr"
@@ -56,6 +57,10 @@ func compileStream(def *catalog.Stream) (*Stream, error) {
 	}
 	return s, nil
 }
+
+// Index returns the index of the declared or implicit column name in the values that Decode
+// returns, or -1 when the stream has no such column.
+func (s *Stream) Index(name string) int { return slices.Index(s.names(), name) }
 
 // names returns the names of a decoded event's values.
 func (s *Stream) names() []string {

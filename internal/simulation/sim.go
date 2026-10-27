@@ -31,7 +31,8 @@
 //     a core carries a context that ends by its invocation's deadline: in Lambda, only the
 //     context stops a request.
 //   - P8: no core panics.
-//   - P9: an empty batch makes no request.
+//   - P9: a batch without an INSERT, such as an empty one or one of TTL deletes, makes no
+//     request.
 //
 // A run also fails when one invocation has two identical requests in flight (D3): the
 // seed can't order them, so the run wouldn't replay. It fails, too, when an append returns

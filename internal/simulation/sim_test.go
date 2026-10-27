@@ -316,6 +316,10 @@ func TestPropertiesCatchBugs(t *testing.T) {
 	small.Regions, small.Events, small.Budget = 1, 60, 10*time.Minute
 	empty := small
 	empty.ESM.Empty = 0.5
+	// Events appended in both regions reach each stream as an INSERT and a MODIFY, some in
+	// batches of their own.
+	modified := small
+	modified.Regions, modified.Duplicate = 2, 1
 	pruned := small
 	pruned.Topology.UnitRecords, pruned.WriteGap = 2, 5*time.Second
 	sys := newPageViews(t)
@@ -332,7 +336,8 @@ func TestPropertiesCatchBugs(t *testing.T) {
 		{"high-water marks kept past P4's window", pruned, &shortW, noBug, "P4:"},
 		{"a unit never drains", small, sys, alwaysFail, "P6:"},
 		{"a panic", small, sys, panics, "P8:"},
-		{"a request for an empty batch", empty, sys, emptyCall, "P9:"},
+		{"a request for an empty batch", empty, sys, idleCall, "P9:"},
+		{"a request for a batch of MODIFY records", modified, sys, idleCall, "P9:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -354,7 +359,7 @@ const (
 	noBug      bug = iota
 	alwaysFail     // fails every batch
 	panics         // panics once
-	emptyCall      // reads the store for an empty batch
+	idleCall       // reads the store for a batch without an INSERT
 )
 
 // buggy is pageViews with a defect in its cores.
@@ -382,7 +387,7 @@ func (c buggyCore) Handle(ctx context.Context, b projector.Batch) (projector.Res
 		return projector.Result{}, errors.New("stuck")
 	case c.sys.bug == panics && c.sys.once.CompareAndSwap(false, true):
 		panic("boom")
-	case c.sys.bug == emptyCall && len(b.Records) == 0:
+	case c.sys.bug == idleCall && !slices.ContainsFunc(b.Records, func(r projector.Record) bool { return r.Op == projector.Insert }):
 		_, err := c.b.Get(ctx, metaTable(), store.Key{PK: "view", SK: pageRates}, true)
 		return projector.Result{}, err
 	}

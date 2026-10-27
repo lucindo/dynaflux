@@ -25,6 +25,9 @@ const (
 	margin = catalog.LifetimeMarginSeconds * time.Second
 	// lifetime is the longest invocation a core with W = window accepts.
 	lifetime = window - margin
+	// rowsStop is how long before the deadline such an invocation sends its last row write:
+	// its reserve of 2 s, less than a tenth of its lifetime, and half that again.
+	rowsStop = 3 * time.Second
 )
 
 // liveHandoff is newHandoff with site_totals live too.
@@ -68,9 +71,10 @@ func TestPruneBoundary(t *testing.T) {
 
 // TestLateProgress: J applies S's record to the row, but its progress write is in flight
 // when J times out, and lands late. I, a redelivery of J's batch, starts just before it
-// lands, reads the old progress, and writes the row at the end of its life. T writes the row
-// at the first instant W lets it drop S's mark. I writes first as long as it lives at most
-// W − 60 s and the late write lands at most 60 s late: W ≥ lifetime + lateness.
+// lands, reads the old progress, and writes the row at the last instant it sends. T writes
+// the row at the first instant W lets it drop S's mark. I writes first as long as it lives
+// at most W − 60 s and the late write lands at most 60 s late: W ≥ lifetime + lateness. I
+// writes no row in the last rowsStop of its life, so the bound is exact at 60 s plus that.
 func TestLateProgress(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -78,11 +82,11 @@ func TestLateProgress(t *testing.T) {
 		late     time.Duration // after J's deadline, when J's progress write lands
 		lifetime time.Duration // of I
 		err      error         // I's
-		twice    bool          // S's record counts twice: the margin is exact
+		twice    bool          // S's record counts twice: the bound is exact
 	}{
-		{"the write lands at the margin", margin, lifetime, nil, false},
+		{"the write lands at the margin and rowsStop", margin + rowsStop, lifetime, nil, false},
 		{"I lives longer than W allows", margin, lifetime + time.Second, projector.ErrLifetime, false},
-		{"the write lands after the margin", margin + time.Second, lifetime, nil, true},
+		{"the write lands after the margin and rowsStop", margin + rowsStop + time.Second, lifetime, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -203,8 +207,9 @@ func (l *lateProgress) Put(ctx context.Context, table string, it store.Item, c s
 	return ctx.Err()
 }
 
-// lastInstant sends each request to a view table a microsecond before its caller's
-// deadline: an invocation that stalled, then wrote at the last instant it could.
+// lastInstant sends each request to a view table a microsecond before its context's
+// deadline, the core's cutoff for rows: an invocation that stalled, then wrote at the last
+// instant it could.
 type lastInstant struct{ store.Backend }
 
 func (l lastInstant) wait(ctx context.Context, table string) {
