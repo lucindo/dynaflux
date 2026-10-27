@@ -29,8 +29,8 @@ jobs:
           # The runner's cached Go can lag a security release.
           check-latest: true
           cache: false
-      # Not setup-go's cache: it gives both jobs one key, and the first job to save would
-      # decide what both restore.
+      # Not setup-go's cache: it gives every job one key, and the first job to save would
+      # decide what all of them restore.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -62,5 +62,31 @@ jobs:
           key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
           restore-keys: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-
       - run: make integration
+      - run: make e2e-emulator
       - if: always()
         run: make emulators-down
+
+  infra-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-
+      # The version the templates were designed against (Makefile, infra-lint). The runner
+      # image ships pipx.
+      - run: pipx install cfn-lint==1.58.0
+      - run: make infra-lint
