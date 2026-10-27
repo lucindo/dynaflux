@@ -273,6 +273,12 @@ Resources:
           NoncurrentVersionExpiration:
             NoncurrentDays: 30
           ExpiredObjectDeleteMarker: true
+        - Id: backfill-staging
+          Status: Enabled
+          Prefix: backfill/
+          ExpirationInDays: 30
+          NoncurrentVersionExpiration:
+            NoncurrentDays: 1
       Tags:
       - Key: dynaflux:kind
         Value: bucket
@@ -295,6 +301,26 @@ Resources:
           Condition:
             Bool:
               aws:SecureTransport: "false"
+  LogsBackfill:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Prefix}analytics-at-the-limit-x-backfill
+      RetentionInDays: 30
+      Tags:
+      - Key: dynaflux:kind
+        Value: backfill
+      - Key: dynaflux:store
+        Value: analytics-at-the-limit-x
+  LogsBackfillStateMachine:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/vendedlogs/states/${Prefix}analytics-at-the-limit-x-backfill
+      RetentionInDays: 30
+      Tags:
+      - Key: dynaflux:kind
+        Value: backfill
+      - Key: dynaflux:store
+        Value: analytics-at-the-limit-x
   LogsProjector:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -313,6 +339,138 @@ Resources:
       Tags:
       - Key: dynaflux:kind
         Value: setup
+      - Key: dynaflux:store
+        Value: analytics-at-the-limit-x
+  RoleBackfill:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: dynaflux
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Sid: Logs
+            Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: !GetAtt LogsBackfill.Arn
+          - Sid: Meta
+            Effect: Allow
+            Action:
+            - dynamodb:BatchGetItem
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:Query
+            Resource: !GetAtt Meta.Arn
+          - Sid: Metrics
+            Effect: Allow
+            Action: cloudwatch:GetMetricData
+            Resource: "*"
+          - Sid: Staging
+            Effect: Allow
+            Action:
+            - s3:DeleteObject
+            - s3:GetObject
+            - s3:PutObject
+            Resource: !Sub ${Bucket.Arn}/backfill/*
+          - Sid: StagingList
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt Bucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix: backfill/*
+      Tags:
+      - Key: dynaflux:kind
+        Value: backfill
+      - Key: dynaflux:store
+        Value: analytics-at-the-limit-x
+  RoleBackfillPolicy1:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Roles:
+      - !Ref RoleBackfill
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Sid: StreamScan
+          Effect: Allow
+          Action: dynamodb:Scan
+          Resource:
+          - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a_1
+          - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a__b
+        - Sid: StreamTables
+          Effect: Allow
+          Action: dynamodb:DescribeTable
+          Resource:
+          - !Sub arn:${AWS::Partition}:dynamodb:ap-northeast-1:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a_1
+          - !Sub arn:${AWS::Partition}:dynamodb:ap-northeast-1:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a__b
+          - !Sub arn:${AWS::Partition}:dynamodb:us-east-1:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a_1
+          - !Sub arn:${AWS::Partition}:dynamodb:us-east-1:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a__b
+        - Sid: Streams
+          Effect: Allow
+          Action: dynamodb:DescribeStream
+          Resource:
+          - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a_1/stream/*
+          - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a__b/stream/*
+        - Sid: Views
+          Effect: Allow
+          Action:
+          - dynamodb:BatchGetItem
+          - dynamodb:GetItem
+          - dynamodb:PutItem
+          Resource: !GetAtt ViewV2X8c90cb56V1.Arn
+  RoleBackfillStateMachine:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: states.amazonaws.com
+          Action: sts:AssumeRole
+          Condition:
+            StringEquals:
+              aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+      - PolicyName: dynaflux
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Sid: Step
+            Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource:
+            - !GetAtt Backfill.Arn
+            - !Sub ${Backfill.Arn}:*
+          - Sid: Continue
+            Effect: Allow
+            Action: states:StartExecution
+            Resource: !Sub arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${Prefix}analytics-at-the-limit-x-backfill
+          - Sid: Logs
+            Effect: Allow
+            Action:
+            - logs:CreateLogDelivery
+            - logs:DeleteLogDelivery
+            - logs:DescribeLogGroups
+            - logs:DescribeResourcePolicies
+            - logs:GetLogDelivery
+            - logs:ListLogDeliveries
+            - logs:PutResourcePolicy
+            - logs:UpdateLogDelivery
+            Resource: "*"
+      Tags:
+      - Key: dynaflux:kind
+        Value: backfill
       - Key: dynaflux:store
         Value: analytics-at-the-limit-x
   RoleProjector:
@@ -410,11 +568,43 @@ Resources:
             Resource:
             - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a_1
             - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-at-the-limit-x-stream-a__b
+          - Sid: Meta
+            Effect: Allow
+            Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:Query
+            Resource: !GetAtt Meta.Arn
       Tags:
       - Key: dynaflux:kind
         Value: setup
       - Key: dynaflux:store
         Value: analytics-at-the-limit-x
+  Backfill:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: go1.x
+    Properties:
+      FunctionName: !Sub ${Prefix}analytics-at-the-limit-x-backfill
+      CodeUri: ../../cmd/dynaflux-runtime
+      Runtime: provided.al2023
+      Handler: bootstrap
+      Architectures:
+      - arm64
+      MemorySize: 3008
+      Timeout: 900
+      Role: !GetAtt RoleBackfill.Arn
+      LoggingConfig:
+        LogGroup: !Ref LogsBackfill
+        LogFormat: JSON
+      Environment:
+        Variables:
+          DYNAFLUX_MODE: backfill
+          DYNAFLUX_PREFIX: !Ref Prefix
+          DYNAFLUX_STORE: analytics-at-the-limit-x
+      Tags:
+        dynaflux:kind: backfill
+        dynaflux:store: analytics-at-the-limit-x
   Projector:
     Type: AWS::Serverless::Function
     Metadata:
@@ -521,6 +711,107 @@ Resources:
       MetricsConfig:
         Metrics:
         - EventCount
+  BackfillStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub ${Prefix}analytics-at-the-limit-x-backfill
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt RoleBackfillStateMachine.Arn
+      LoggingConfiguration:
+        Level: ERROR
+        IncludeExecutionData: false
+        Destinations:
+        - CloudWatchLogsLogGroup:
+            LogGroupArn: !GetAtt LogsBackfillStateMachine.Arn
+      DefinitionSubstitutions:
+        Function: !GetAtt Backfill.Arn
+        LambdaInvoke: !Sub arn:${AWS::Partition}:states:::lambda:invoke
+        StartExecution: !Sub arn:${AWS::Partition}:states:::states:startExecution
+      Definition:
+        Comment: "Dynaflux backfill: runs a job's steps until it needs no more, waiting as each step asks, and continues in a new execution after 1000 steps."
+        QueryLanguage: JSONata
+        StartAt: Step
+        States:
+          Step:
+            Type: Task
+            Resource: ${LambdaInvoke}
+            Arguments:
+              FunctionName: ${Function}
+              Payload:
+                job: "{% $states.input.job %}"
+                attempt: "{% $states.input.attempt %}"
+                execution: "{% $states.context.Execution.Id %}"
+            Output: "{% $merge([$states.input, {'steps': $states.input.steps + 1, 'done': $states.result.Payload.done, 'wait': $states.result.Payload.wait_seconds}]) %}"
+            Retry:
+            - ErrorEquals:
+              - Lambda.ServiceException
+              - Lambda.AWSLambdaException
+              - Lambda.SdkClientException
+              - Lambda.TooManyRequestsException
+              IntervalSeconds: 2
+              MaxAttempts: 6
+              BackoffRate: 2
+              JitterStrategy: FULL
+            - ErrorEquals:
+              - States.ALL
+              IntervalSeconds: 30
+              MaxAttempts: 5
+              BackoffRate: 2
+              JitterStrategy: FULL
+            Next: Route
+          Route:
+            Type: Choice
+            Choices:
+            - Condition: "{% $states.input.done %}"
+              Next: Done
+            - Condition: "{% $states.input.steps >= 1000 %}"
+              Next: Continue
+            - Condition: "{% $states.input.wait > 0 %}"
+              Next: Wait
+            Default: Step
+          Wait:
+            Type: Wait
+            Seconds: "{% $states.input.wait %}"
+            Next: Step
+          Continue:
+            Type: Task
+            Resource: ${StartExecution}
+            Arguments:
+              StateMachineArn: "{% $states.context.StateMachine.Id %}"
+              Name: "{% $states.input.name & '-a' & $states.input.attempt & '-c' & ($states.input.k + 1) %}"
+              Input:
+                job: "{% $states.input.job %}"
+                attempt: "{% $states.input.attempt %}"
+                name: "{% $states.input.name %}"
+                k: "{% $states.input.k + 1 %}"
+                steps: 0
+            Retry:
+            - ErrorEquals:
+              - States.ALL
+              IntervalSeconds: 2
+              MaxAttempts: 6
+              BackoffRate: 2
+              JitterStrategy: FULL
+            End: true
+          Done:
+            Type: Succeed
+      Tags:
+      - Key: dynaflux:kind
+        Value: backfill
+      - Key: dynaflux:store
+        Value: analytics-at-the-limit-x
+  Catalog:
+    Type: Custom::DynafluxCatalog
+    DependsOn:
+    - Backfill
+    - Projector
+    - RoleBackfillPolicy1
+    Properties:
+      ServiceToken: !GetAtt Setup.Arn
+      ServiceTimeout: 300
+      MetaTable: !Ref Meta
+      CatalogHash: 4cca3eb80f2ec345866a061297ef2cea27344a71c26bb777264f6dffc12e8edc
+      Generator: v0.0.0-test
   AlarmDiscardedMappingA1X1426674c:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -648,6 +939,35 @@ Resources:
       Tags:
       - Key: dynaflux:kind
         Value: projector
+      - Key: dynaflux:store
+        Value: analytics-at-the-limit-x
+  AlarmFailedBackfillStateMachine:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Prefix}analytics-at-the-limit-x-backfill-failed
+      AlarmDescription: "critical: a backfill execution failed after its retries, so its job stopped. The backfill function's log group says why; dynaflux backfill resumes the job from its last chunk."
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+      - Name: StateMachineArn
+        Value: !GetAtt BackfillStateMachine.Arn
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+      - HasAlarmTopicArn
+      - - !Ref AlarmTopicArn
+      - !Ref AWS::NoValue
+      OKActions: !If
+      - HasAlarmTopicArn
+      - - !Ref AlarmTopicArn
+      - !Ref AWS::NoValue
+      Tags:
+      - Key: dynaflux:kind
+        Value: backfill
       - Key: dynaflux:store
         Value: analytics-at-the-limit-x
   AlarmGapRiskProjector:
@@ -925,12 +1245,13 @@ Resources:
       DashboardName: !Sub ${Prefix}analytics-at-the-limit-x-${AWS::Region}
       DashboardBody: !Sub |-
         {"widgets":[
-        {"type":"alarm","x":0,"y":0,"width":24,"height":6,"properties":{"title":"Alarms","alarms":["arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-a_1-discarded","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-a__b-discarded","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-errors","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-gap-risk","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-lag","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-a_1-polling","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-a__b-polling","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-rows-too-large","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-throttles","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-views-broken","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-stream-a_1-write-throttles","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-stream-a__b-write-throttles"],"sortBy":"stateUpdatedTimestamp"}},
+        {"type":"alarm","x":0,"y":0,"width":24,"height":6,"properties":{"title":"Alarms","alarms":["arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-a_1-discarded","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-a__b-discarded","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-errors","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-backfill-failed","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-gap-risk","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-lag","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-a_1-polling","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-a__b-polling","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-rows-too-large","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-projector-throttles","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-views-broken","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-stream-a_1-write-throttles","arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Prefix}analytics-at-the-limit-x-stream-a__b-write-throttles"],"sortBy":"stateUpdatedTimestamp"}},
         {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"title":"Projector iterator age (ms)","region":"${AWS::Region}","stat":"Maximum","period":300,"metrics":[["AWS/Lambda","IteratorAge","FunctionName","${Prefix}analytics-at-the-limit-x-projector"]]}},
         {"type":"metric","x":12,"y":6,"width":12,"height":6,"properties":{"title":"Projector invocations, errors and throttles","region":"${AWS::Region}","stat":"Sum","period":300,"metrics":[["AWS/Lambda","Invocations","FunctionName","${Prefix}analytics-at-the-limit-x-projector"],["AWS/Lambda","Errors","FunctionName","${Prefix}analytics-at-the-limit-x-projector"],["AWS/Lambda","Throttles","FunctionName","${Prefix}analytics-at-the-limit-x-projector"]]}},
         {"type":"metric","x":0,"y":12,"width":12,"height":6,"properties":{"title":"Consumed write capacity units","region":"${AWS::Region}","period":300,"metrics":[[{"expression":"SEARCH('{AWS/DynamoDB,TableName} MetricName=\"ConsumedWriteCapacityUnits\" TableName=${Prefix}analytics-at-the-limit-x', 'Sum', 300)"}]]}},
         {"type":"metric","x":12,"y":12,"width":12,"height":6,"properties":{"title":"Throttled reads and writes","region":"${AWS::Region}","period":300,"metrics":[[{"expression":"SEARCH('{AWS/DynamoDB,TableName} MetricName=\"ReadThrottleEvents\" TableName=${Prefix}analytics-at-the-limit-x', 'Sum', 300)"}],[{"expression":"SEARCH('{AWS/DynamoDB,TableName} MetricName=\"WriteThrottleEvents\" TableName=${Prefix}analytics-at-the-limit-x', 'Sum', 300)"}]]}},
         {"type":"metric","x":0,"y":18,"width":12,"height":6,"properties":{"title":"Replication latency to the other regions (ms)","region":"${AWS::Region}","period":300,"metrics":[[{"expression":"SEARCH('{AWS/DynamoDB,ReceivingRegion,TableName} MetricName=\"ReplicationLatency\" TableName=${Prefix}analytics-at-the-limit-x', 'Maximum', 300)"}]]}},
-        {"type":"metric","x":12,"y":18,"width":12,"height":6,"properties":{"title":"DynamoDB system errors","region":"${AWS::Region}","period":300,"metrics":[[{"expression":"SEARCH('{AWS/DynamoDB,Operation,TableName} MetricName=\"SystemErrors\" TableName=${Prefix}analytics-at-the-limit-x', 'Sum', 300)"}]]}},
-        {"type":"metric","x":0,"y":24,"width":12,"height":6,"properties":{"title":"Opened breakers, too-large rows and divergent duplicates","region":"${AWS::Region}","stat":"Sum","period":300,"metrics":[["Dynaflux","BreakerOpened","Store","${Prefix}analytics-at-the-limit-x"],["Dynaflux","RowTooLarge","Store","${Prefix}analytics-at-the-limit-x"],["Dynaflux","DivergentDuplicates","Store","${Prefix}analytics-at-the-limit-x"]]}}
+        {"type":"metric","x":12,"y":18,"width":12,"height":6,"properties":{"title":"Backfill executions","region":"${AWS::Region}","stat":"Sum","period":300,"metrics":[["AWS/States","ExecutionsStarted","StateMachineArn","arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${Prefix}analytics-at-the-limit-x-backfill"],["AWS/States","ExecutionsSucceeded","StateMachineArn","arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${Prefix}analytics-at-the-limit-x-backfill"],["AWS/States","ExecutionsFailed","StateMachineArn","arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${Prefix}analytics-at-the-limit-x-backfill"]]}},
+        {"type":"metric","x":0,"y":24,"width":12,"height":6,"properties":{"title":"DynamoDB system errors","region":"${AWS::Region}","period":300,"metrics":[[{"expression":"SEARCH('{AWS/DynamoDB,Operation,TableName} MetricName=\"SystemErrors\" TableName=${Prefix}analytics-at-the-limit-x', 'Sum', 300)"}]]}},
+        {"type":"metric","x":12,"y":24,"width":12,"height":6,"properties":{"title":"Opened breakers, too-large rows and divergent duplicates","region":"${AWS::Region}","stat":"Sum","period":300,"metrics":[["Dynaflux","BreakerOpened","Store","${Prefix}analytics-at-the-limit-x"],["Dynaflux","RowTooLarge","Store","${Prefix}analytics-at-the-limit-x"],["Dynaflux","DivergentDuplicates","Store","${Prefix}analytics-at-the-limit-x"]]}}
         ]}

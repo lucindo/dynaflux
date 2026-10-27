@@ -15,9 +15,9 @@ type Deployment struct {
 }
 
 // Resolve returns t as deployment d reads it, references included, as IAM sees a policy
-// statement. It resolves references to tables, delivery streams, archive workgroups and
-// roles only, and fails on any other. CloudFormation names a role when it creates it, so a
-// role's ID stands in for its name.
+// statement. It resolves references to tables, buckets, delivery streams, archive workgroups
+// and roles only, and fails on any other. CloudFormation names a role when it creates it, so
+// a role's ID stands in for its name.
 func (m *Manifest) Resolve(t Text, d Deployment) (string, error) {
 	segs, err := t.Segments()
 	if err != nil {
@@ -62,6 +62,9 @@ func (m *Manifest) resolveRef(ref Ref, d Deployment) (string, error) {
 		if i := slices.IndexFunc(s.Tables, func(t Table) bool { return t.ID == ref.ID }); i >= 0 {
 			name, service, resource = s.Tables[i].Name, "dynamodb", "table/"
 		}
+		if i := slices.IndexFunc(s.Buckets, func(x Bucket) bool { return x.ID == ref.ID }); i >= 0 {
+			name, service = s.Buckets[i].Name, "s3"
+		}
 		if i := slices.IndexFunc(s.DeliveryStreams, func(ds DeliveryStream) bool { return ds.ID == ref.ID }); i >= 0 {
 			name, service, resource = s.DeliveryStreams[i].Name, "firehose", "deliverystream/"
 		}
@@ -73,18 +76,21 @@ func (m *Manifest) resolveRef(ref Ref, d Deployment) (string, error) {
 		}
 	}
 	if service == "" {
-		return "", fmt.Errorf("infra: ${ref:%s.%s}: Resolve resolves references to tables, delivery streams, "+
+		return "", fmt.Errorf("infra: ${ref:%s.%s}: Resolve resolves references to tables, buckets, delivery streams, "+
 			"archive workgroups and roles only", ref.ID, ref.Attr)
 	}
 	n, err := m.Resolve(name, d)
 	if err != nil {
 		return "", err
 	}
-	region := d.Region
-	if service == "iam" {
+	region, account := d.Region, d.Account
+	switch service {
+	case "iam":
 		region = "" // IAM is global
+	case "s3":
+		region, account = "", "" // bucket ARNs hold neither
 	}
-	arn := "arn:" + d.Partition + ":" + service + ":" + region + ":" + d.Account + ":" + resource + n
+	arn := "arn:" + d.Partition + ":" + service + ":" + region + ":" + account + ":" + resource + n
 	switch {
 	case ref.Attr == AttrName:
 		return n, nil

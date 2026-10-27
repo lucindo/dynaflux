@@ -6,12 +6,18 @@ package infra
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 )
 
-// maxRolePolicySize is IAM's limit on the inline policies of one role, in characters
-// without whitespace.
-const maxRolePolicySize = 10240
+// IAM's limits, in characters without whitespace for sizes: the inline policies of one role,
+// one managed policy, and the managed policies attached to a role by default.
+const (
+	maxRolePolicySize    = 10240
+	maxManagedPolicySize = 6144
+	maxManagedPolicies   = 10
+)
 
 // The longest values that a deployed policy can hold in place of a substitution.
 const (
@@ -42,13 +48,10 @@ func (m *Manifest) checkPolicySizes(w worstCase, projectorPerStream bool) error 
 	if projectorPerStream {
 		fix = "retire old view versions"
 	}
-	w.prefixLen, w.byID = m.Prefix.MaxLen, map[string]entry{}
-	for _, e := range m.entries() {
-		w.byID[e.id] = e
-	}
+	w = m.resolving(w)
 	for _, s := range []Scope{m.Global, m.Regional} {
 		for _, r := range s.Roles {
-			size, err := w.policySize(r)
+			size, err := w.policySize(r.Statements)
 			if err != nil {
 				return fmt.Errorf("infra: %s: %w", r.ID, err)
 			}
@@ -56,9 +59,99 @@ func (m *Manifest) checkPolicySizes(w worstCase, projectorPerStream bool) error 
 				return fmt.Errorf("infra: the policies of role %s can reach %d characters, over IAM's limit of %d per role; %s",
 					r.ID, size, maxRolePolicySize, fix)
 			}
+			if err = w.checkManaged(r); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// resolving returns w with the longest prefix that m's names allow and m's resources, which
+// references name.
+func (m *Manifest) resolving(w worstCase) worstCase {
+	w.prefixLen, w.byID = m.Prefix.MaxLen, map[string]entry{}
+	for _, e := range m.entries() {
+		w.byID[e.id] = e
+	}
+	return w
+}
+
+// checkManaged fails when a managed policy of r is over IAM's limit, or r has more than IAM
+// attaches to a role by default.
+func (w worstCase) checkManaged(r Role) error {
+	if len(r.Managed) > maxManagedPolicies {
+		return fmt.Errorf("infra: role %s needs %d managed policies, and IAM attaches at most %d to a role by default; "+
+			"retire old view versions, or split the streams across stores", r.ID, len(r.Managed), maxManagedPolicies)
+	}
+	for _, p := range r.Managed {
+		size, err := w.policySize(p.Statements)
+		if err != nil {
+			return fmt.Errorf("infra: %s: %w", p.ID, err)
+		}
+		if size > maxManagedPolicySize {
+			return fmt.Errorf("infra: managed policy %s can reach %d characters, over IAM's limit of %d", p.ID, size, maxManagedPolicySize)
+		}
+	}
+	return nil
+}
+
+// packManaged splits the managed statements of each role of roles into as few policies as
+// fit IAM's limit on one, each statement in order and its resources in order, and numbers
+// them. A resource that alone overflows a policy gets one, which checkManaged then reports.
+func (w worstCase) packManaged(roles []Role) error {
+	for i := range roles {
+		r := &roles[i]
+		if len(r.Managed) == 0 {
+			continue
+		}
+		var all []Statement
+		for _, p := range r.Managed {
+			all = append(all, p.Statements...)
+		}
+		packed, err := w.pack(all)
+		if err != nil {
+			return fmt.Errorf("infra: %s: %w", r.ID, err)
+		}
+		r.Managed = r.Managed[:0]
+		for n, sts := range packed {
+			r.Managed = append(r.Managed, ManagedPolicy{ID: r.ID + "Policy" + strconv.Itoa(n+1), Statements: sts})
+		}
+	}
+	return nil
+}
+
+// pack splits statements into policies of at most maxManagedPolicySize characters.
+func (w worstCase) pack(statements []Statement) ([][]Statement, error) {
+	var packed [][]Statement
+	var cur []Statement
+	for _, st := range statements {
+		for _, res := range st.Resources {
+			next := withResource(cur, st, res)
+			size, err := w.policySize(next)
+			if err != nil {
+				return nil, err
+			}
+			if size > maxManagedPolicySize && len(cur) > 0 {
+				packed = append(packed, cur)
+				next = withResource(nil, st, res)
+			}
+			cur = next
+		}
+	}
+	return append(packed, cur), nil
+}
+
+// withResource returns sts with res added to statement st: to its last statement when that
+// is st's, or else to a new copy of st.
+func withResource(sts []Statement, st Statement, res Text) []Statement {
+	out := slices.Clone(sts)
+	if n := len(out); n > 0 && out[n-1].Sid == st.Sid {
+		out[n-1].Resources = append(slices.Clone(out[n-1].Resources), res)
+		return out
+	}
+	st.Resources = []Text{res}
+	return append(out, st)
 }
 
 // worstCase resolves texts to the longest values they can take when deployed: the longest
@@ -71,9 +164,9 @@ type worstCase struct {
 	byID map[string]entry
 }
 
-func (w worstCase) policySize(r Role) (int, error) {
+func (w worstCase) policySize(statements []Statement) (int, error) {
 	doc := policyDocument{Version: "2012-10-17"}
-	for _, st := range r.Statements {
+	for _, st := range statements {
 		ps := policyStatement{Sid: st.Sid, Effect: "Allow", Action: st.Actions}
 		for _, res := range st.Resources {
 			v, err := w.text(res)

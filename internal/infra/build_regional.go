@@ -4,6 +4,7 @@
 package infra
 
 import (
+	"cmp"
 	"maps"
 	"slices"
 	"strconv"
@@ -32,20 +33,27 @@ const (
 // IAM names that several statements use.
 const (
 	sidLogs            = "Logs"
+	sidMeta            = "Meta"
 	condStringEquals   = "StringEquals"
+	condStringLike     = "StringLike"
 	s3GetObject        = "s3:GetObject"
 	s3PutObject        = "s3:PutObject"
+	s3DeleteObject     = "s3:DeleteObject"
 	s3ListBucket       = "s3:ListBucket"
 	logsPutLogEvents   = "logs:PutLogEvents"
 	glueCreateDatabase = "glue:CreateDatabase"
 	glueGetDatabase    = "glue:GetDatabase"
 	glueGetTable       = "glue:GetTable"
 	glueUpdateTable    = "glue:UpdateTable"
+	dynamoGetItem      = "dynamodb:GetItem"
+	dynamoBatchGetItem = "dynamodb:BatchGetItem"
+	dynamoPutItem      = "dynamodb:PutItem"
 )
 
 // regional returns the regional scope: the meta table and a table per view version, the
-// bucket, the projectors and the setup function with their log groups and roles, a lookup
-// and a mapping per stream, the archive, and the alarms that watch them.
+// bucket, the projectors, the setup function and the backfill function with their log groups
+// and roles, the backfill state machine, a lookup and a mapping per stream, the archive, the
+// catalog's registration, and the alarms that watch them.
 func (b *builder) regional() Scope {
 	s := Scope{Tables: b.regionalTables(), Buckets: []Bucket{b.bucket()}}
 	if b.cfg.Runtime.Split == config.SplitStream {
@@ -56,6 +64,7 @@ func (b *builder) regional() Scope {
 		b.addFunction(&s, b.projector(idProjector, b.naming.ProjectorFunction(), "", b.cat.Streams...))
 	}
 	b.addFunction(&s, b.setup())
+	b.addBackfill(&s)
 	for _, st := range b.cat.Streams {
 		s.StreamLookups = append(s.StreamLookups, StreamLookup{
 			Common: Common{ID: lookupID(st.Name)}, Handler: ref(idSetup, AttrARN), Table: ref(streamID(st.Name), AttrName),
@@ -72,8 +81,23 @@ func (b *builder) regional() Scope {
 	sortByID(s.StreamLookups)
 	sortByID(s.Mappings)
 	sortByID(s.DeliveryStreams)
+	s.Catalogs = []CatalogRegistration{b.catalogRegistration(s.Functions)}
 	s.Alarms = b.alarms(&s)
 	return s
+}
+
+// catalogRegistration returns the registration of the catalog, after every function.
+func (b *builder) catalogRegistration(functions []Function) CatalogRegistration {
+	var after []string
+	for _, f := range functions {
+		if f.ID != idSetup {
+			after = append(after, f.ID)
+		}
+	}
+	return CatalogRegistration{
+		Common: Common{ID: idCatalog}, Handler: ref(idSetup, AttrARN), MetaTable: ref(idMeta, AttrName),
+		Hash: b.catalogHash, After: after,
+	}
 }
 
 // regionalTables returns the meta table and the table of every version in the catalog,
@@ -108,7 +132,10 @@ func (b *builder) bucket() Bucket {
 			b.naming.Bucket(placeholder(PlaceholderAccount), placeholder(PlaceholderRegion))),
 		NoncurrentExpiryDays: noncurrentExpiryDays,
 		AbortMultipartDays:   abortMultipartDays,
-		Deletion:             DeletionRetainExceptOnCreate,
+		Expiries: []Expiry{{
+			ID: "backfill-staging", Prefix: backfillStaging, Days: stagingExpiryDays, NoncurrentDays: stagingNoncurrentDays,
+		}},
+		Deletion: DeletionRetainExceptOnCreate,
 	}
 }
 
@@ -120,10 +147,13 @@ type function struct {
 	mode           string
 	tags           map[string]string
 	timeoutSeconds int
+	// memoryMB is the function's memory; 0 means runtime.memory_mb.
+	memoryMB int
 	// env holds the environment variables besides those of every function.
 	env map[string]Text
-	// statements are the role's statements besides the one for the log group.
-	statements []Statement
+	// statements are the role's statements besides the one for the log group, and managed
+	// those that grow with the store, which go in managed policies.
+	statements, managed []Statement
 }
 
 // addFunction adds f to s, with a log group that only it writes and a role that only it
@@ -144,6 +174,9 @@ func (b *builder) addFunction(s *Scope, f function) {
 		Service:    ServiceLambda,
 		Statements: append([]Statement{writeLogs}, f.statements...),
 	}
+	if len(f.managed) > 0 {
+		role.Managed = []ManagedPolicy{{Statements: f.managed}}
+	}
 	env := map[string]Text{
 		catalog.EnvMode:   Text(f.mode),
 		catalog.EnvStore:  Text(b.cat.Store),
@@ -161,7 +194,7 @@ func (b *builder) addFunction(s *Scope, f function) {
 		Runtime:        FunctionRuntime,
 		Handler:        FunctionHandler,
 		Arch:           string(b.cfg.Runtime.Arch),
-		MemoryMB:       b.cfg.Runtime.MemoryMB,
+		MemoryMB:       cmp.Or(f.memoryMB, b.cfg.Runtime.MemoryMB),
 		TimeoutSeconds: f.timeoutSeconds,
 		Code:           b.code,
 		Env:            env,
@@ -194,10 +227,10 @@ func (b *builder) projector(id, name, owner string, streams ...catalog.Stream) f
 	statements := []Statement{
 		{Sid: "ReadStreams", Actions: []string{"dynamodb:DescribeStream", "dynamodb:GetRecords", "dynamodb:GetShardIterator"}, Resources: streamARNs},
 		{Sid: "ListStreams", Actions: []string{"dynamodb:ListStreams"}, Resources: []Text{"*"}},
-		{Sid: "Meta", Actions: []string{"dynamodb:BatchGetItem", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query"}, Resources: []Text{ref(idMeta, AttrARN)}},
+		metaBatchStatement(),
 	}
 	if len(viewARNs) > 0 {
-		statements = append(statements, Statement{Sid: "Views", Actions: []string{"dynamodb:BatchGetItem", "dynamodb:GetItem", "dynamodb:PutItem"}, Resources: viewARNs})
+		statements = append(statements, Statement{Sid: "Views", Actions: []string{dynamoBatchGetItem, dynamoGetItem, dynamoPutItem}, Resources: viewARNs})
 	}
 	if len(archiveARNs) > 0 {
 		statements = append(statements, Statement{Sid: "Archive", ArchiveOnly: b.archiveOnly, Actions: []string{"firehose:PutRecordBatch"}, Resources: archiveARNs})
@@ -219,15 +252,32 @@ func (b *builder) projector(id, name, owner string, streams ...catalog.Stream) f
 	}
 }
 
-// setup returns the function that serves the templates' deploy-time requests (ADR 0008). It
-// never writes view rows, so its timeout isn't bound by runtime.prune_window_seconds.
+// metaStatement allows reading and writing items of the meta table, one at a time.
+func metaStatement() Statement {
+	return Statement{Sid: sidMeta, Actions: []string{dynamoGetItem, dynamoPutItem, "dynamodb:Query"}, Resources: []Text{ref(idMeta, AttrARN)}}
+}
+
+// metaBatchStatement is metaStatement with reads by batch too: a function that writes view
+// rows reads the items of the units whose marks the rows hold.
+func metaBatchStatement() Statement {
+	st := metaStatement()
+	st.Actions = append([]string{dynamoBatchGetItem}, st.Actions...)
+	return st
+}
+
+// setup returns the function that serves the templates' deploy-time requests (ADR 0008,
+// 0013). It never writes view rows, so its timeout isn't bound by
+// runtime.prune_window_seconds.
 func (b *builder) setup() function {
 	var tables []Text
 	for _, s := range b.cat.Streams {
 		tables = append(tables, ref(streamID(s.Name), AttrARN))
 	}
 	slices.Sort(tables)
-	statements := []Statement{{Sid: "StreamTables", Actions: []string{"dynamodb:DescribeTable"}, Resources: tables}}
+	statements := []Statement{
+		{Sid: "StreamTables", Actions: []string{"dynamodb:DescribeTable"}, Resources: tables},
+		metaStatement(),
+	}
 	if b.archives() {
 		statements = append(statements, b.setupArchiveStatements()...)
 	}

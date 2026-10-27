@@ -12,17 +12,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+
 	"github.com/lucindo/dynaflux"
 	"github.com/lucindo/dynaflux/examples/analytics/internal/flux"
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/emulatortest"
 	"github.com/lucindo/dynaflux/internal/infra"
+	"github.com/lucindo/dynaflux/internal/meta"
+	"github.com/lucindo/dynaflux/internal/store/dynamo"
 	"github.com/lucindo/dynaflux/internal/validate"
 )
 
-// openClient returns the generated client on a store that dynaflux.Open backs with
-// DynamoDB Local: the tables of the example's templates, made for this test. No projector
-// runs, so the views stay empty.
-func openClient(t *testing.T) *flux.Client {
+// deployment is the example's store on DynamoDB Local: the tables of its templates, made
+// for one test. No projector runs, so the views stay empty.
+type deployment struct {
+	aws    aws.Config
+	naming catalog.Naming
+	cat    *catalog.Catalog
+}
+
+func deploy(t *testing.T) deployment {
 	t.Helper()
 	cfg, cat, ds := validate.Load(os.DirFS("."), ".")
 	if cat == nil {
@@ -33,12 +44,22 @@ func openClient(t *testing.T) *flux.Client {
 		t.Fatal(err)
 	}
 	awsCfg := emulatortest.Config(t, nil)
-	n := emulatortest.Tables(t, awsCfg, m)
-	s, err := dynaflux.Open(dynaflux.Config{AWS: awsCfg, Prefix: n.Prefix})
+	return deployment{aws: awsCfg, naming: emulatortest.Tables(t, awsCfg, m), cat: cat}
+}
+
+// client returns the generated client on a store that dynaflux.Open backs with d.
+func (d deployment) client(t *testing.T) *flux.Client {
+	t.Helper()
+	s, err := dynaflux.Open(dynaflux.Config{AWS: d.aws, Prefix: d.naming.Prefix})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return flux.New(s)
+}
+
+func openClient(t *testing.T) *flux.Client {
+	t.Helper()
+	return deploy(t).client(t)
 }
 
 // appendPageViews appends two page views of u1, at - 2h and at - 1h, and one of u2.
@@ -106,9 +127,28 @@ func TestOpenQueries(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(recent, want) {
 		t.Errorf("RecentPageViews = %+v, %v; want %+v", recent, err, want)
 	}
+}
+
+func TestOpenQueryNeedsALiveVersion(t *testing.T) {
+	t.Parallel()
+	d := deploy(t)
+	c := d.client(t)
+	at := time.Now().UTC()
+	params := flux.PageStatsParams{Page: "/home", From: at.Add(-48 * time.Hour), To: at}
+	// No backfill ran, so page_daily@v1 has no state item.
+	const want = "dynaflux: query PageStats: view version not ready: page_daily@v1 is pending_backfill in us-east-1"
+	if _, err := c.PageStats(t.Context(), params); !errors.Is(err, dynaflux.ErrViewNotReady) || err.Error() != want {
+		t.Errorf("PageStats of a pending version: %v, want %q", err, want)
+	}
 	// An error here would be a view table that isn't where the templates put it.
-	stats, err := c.PageStats(t.Context(), flux.PageStatsParams{Page: "/home", From: at.Add(-48 * time.Hour), To: at})
-	if err != nil || len(stats) != 0 {
-		t.Errorf("PageStats of a view nothing projected = %+v, %v; want no rows", stats, err)
+	if stats, err := c.PageStats(t.Context(), params, dynaflux.AllowPartial()); err != nil || len(stats) != 0 {
+		t.Errorf("PageStats with AllowPartial = %+v, %v; want no rows", stats, err)
+	}
+	if err := meta.New(dynamo.New(dynamodb.NewFromConfig(d.aws)), d.naming.MetaTable()).SetLive(t.Context(), d.cat); err != nil {
+		t.Fatal(err)
+	}
+	// A new client, since c keeps the states it read for 30 seconds.
+	if stats, err := d.client(t).PageStats(t.Context(), params); err != nil || len(stats) != 0 {
+		t.Errorf("PageStats of a live version = %+v, %v; want no rows", stats, err)
 	}
 }

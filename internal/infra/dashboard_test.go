@@ -14,7 +14,7 @@ import (
 )
 
 // CloudWatch's alarm widget lists at most 100 alarms. 15 archived streams, each with its
-// own projector, have 15 × 9 + 2 = 137.
+// own projector, have 15 × 9 + 3 = 138.
 func TestDashboardSplitsAlarms(t *testing.T) {
 	t.Parallel()
 	var sql strings.Builder
@@ -42,7 +42,7 @@ func TestDashboardSplitsAlarms(t *testing.T) {
 			sizes = append(sizes, len(w.Properties.Alarms))
 		}
 	}
-	if want := []int{100, 37}; !slices.Equal(sizes, want) {
+	if want := []int{100, 38}; !slices.Equal(sizes, want) {
 		t.Errorf("alarm widgets list %v alarms, want %v", sizes, want)
 	}
 }

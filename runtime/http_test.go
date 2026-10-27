@@ -162,7 +162,8 @@ func putUntil(t *testing.T, srv *tlsServer, c aws.HTTPClient, timeout time.Durat
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-	it := store.Item{"pk": s("p"), "sk": s("a"), "v": s(strings.Repeat("x", size))}
+	str := func(v string) store.Value { return store.Value{Type: store.S, Str: v} }
+	it := store.Item{"pk": str("p"), "sk": str("a"), "v": str(strings.Repeat("x", size))}
 	err := b.Put(ctx, "t", it, store.Cond{})
 	returned := time.Now()
 	if n := rec.InFlight(); n != 0 {

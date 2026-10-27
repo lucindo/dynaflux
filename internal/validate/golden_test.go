@@ -48,6 +48,7 @@ func deferredCodes() map[string]string {
 		"DF6016": "generate reports it against its previous templates, not validate",
 		"DF6017": "generate reports it against its previous templates, not validate",
 		"DF6018": "generate reports it against its previous templates, not validate",
+		"DF6019": "generate reports it after compiling, not validate; internal/cli tests it",
 	}
 }
 

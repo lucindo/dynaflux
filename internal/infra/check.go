@@ -23,9 +23,12 @@ const (
 	kindLogGroup         = "log group"
 	kindLogStream        = "log stream"
 	kindRole             = "role"
+	kindManagedPolicy    = "managed policy"
 	kindFunction         = "function"
 	kindStreamLookup     = "stream lookup"
 	kindMapping          = "mapping"
+	kindCatalog          = "catalog registration"
+	kindStateMachine     = "state machine"
 	kindArchiveWorkGroup = "archive workgroup"
 	kindArchiveSchema    = "archive schema"
 	kindDeliveryStream   = "delivery stream"
@@ -43,9 +46,9 @@ const (
 //  3. Texts hold only the substitutions that [Text] lists.
 //  4. A required field of a resource that isn't archive-only never refers to one that is:
 //     the field would be missing in the regions that don't archive. Nor do a delivery
-//     stream's Schema, which must name an archive schema, and an archive schema's After,
-//     which name resources of its scope to wait for. Archive-only resources and statements
-//     exist only when ArchiveRegions is set.
+//     stream's Schema, which must name an archive schema, and the After of an archive schema
+//     or a catalog registration, which name resources of its scope to wait for.
+//     Archive-only resources and statements exist only when ArchiveRegions is set.
 //  5. Prefix.MaxLen is at least the length of Prefix.Default, so every name fits with the
 //     configured prefix.
 //  6. Every archive table location ends in "/iceberg/", lies under the location of the
@@ -53,6 +56,9 @@ const (
 //     location.
 //  7. A dashboard body holds only ${prefix}, ${region}, ${account} and ${partition}: it
 //     can't wait for a resource.
+//  8. A catalog registration waits for every function of its scope but its handler, and
+//     every managed policy: the catalog becomes current once each function runs it with
+//     all its grants, and a managed policy attaches to its role, not to the function.
 func (m *Manifest) Check() error {
 	es := m.entries()
 	var errs []error
@@ -174,6 +180,13 @@ func (s *Scope) entries(scope string) []entry {
 		add(kindMapping, x.Common, "", []string{AttrUUID},
 			required("function", x.Function), required("source", x.Source), required("on_failure", x.OnFailure))
 	}
+	for _, x := range s.Catalogs {
+		add(kindCatalog, x.Common, "", nil, required("handler", x.Handler), required("meta table", x.MetaTable))
+	}
+	for _, x := range s.StateMachines {
+		add(kindStateMachine, x.Common, x.Name, []string{AttrARN}, required("name", x.Name), required("role", x.Role),
+			required("log_group", x.LogGroup), required("function", x.Function))
+	}
 	for _, x := range s.ArchiveWorkGroups {
 		add(kindArchiveWorkGroup, x.Common, x.Name, []string{AttrName}, required("name", x.Name))
 	}
@@ -194,6 +207,17 @@ func (s *Scope) entries(scope string) []entry {
 	}
 	for _, x := range s.Dashboards {
 		add(kindDashboard, x.Common, x.Name, nil, required("name", x.Name))
+	}
+	return append(es, s.managedEntries(scope)...)
+}
+
+// managedEntries returns the entries of the managed policies of s's roles.
+func (s *Scope) managedEntries(scope string) []entry {
+	var es []entry
+	for _, r := range s.Roles {
+		for _, p := range r.Managed {
+			es = append(es, entry{scope: scope, kind: kindManagedPolicy, id: p.ID, archiveOnly: r.ArchiveOnly, fields: statementFields(p.Statements)})
+		}
 	}
 	return es
 }
@@ -254,8 +278,9 @@ func (s *Scope) checkArchive(byID map[string]entry, scope string, archiveRegions
 	return append(errs, s.checkLocations()...)
 }
 
-// checkOrder checks that each resource that a delivery stream or an archive schema waits for
-// exists in its scope wherever it does, and that a delivery stream waits for an archive schema.
+// checkOrder checks that each resource that a delivery stream, an archive schema or a
+// catalog registration waits for exists in its scope wherever it does, and that a delivery
+// stream waits for an archive schema.
 func (s *Scope) checkOrder(byID map[string]entry, scope string) []error {
 	var errs []error
 	check := func(c Common, field, id string) {
@@ -278,7 +303,41 @@ func (s *Scope) checkOrder(byID map[string]entry, scope string) []error {
 			check(x.Common, "after", id)
 		}
 	}
+	for _, x := range s.Catalogs {
+		for _, id := range x.After {
+			check(x.Common, "after", id)
+		}
+		errs = append(errs, s.checkCatalogWaits(x)...)
+	}
 	return errs
+}
+
+// checkCatalogWaits checks invariant 8 for the catalog registration x of s.
+func (s *Scope) checkCatalogWaits(x CatalogRegistration) []error {
+	var waits []string
+	for _, f := range s.Functions {
+		if x.Handler != ref(f.ID, AttrARN) {
+			waits = append(waits, f.ID)
+		}
+	}
+	var errs []error
+	for _, id := range append(waits, s.managedPolicyIDs()...) {
+		if !slices.Contains(x.After, id) {
+			errs = append(errs, fmt.Errorf("%s is registered before %s", x.ID, id))
+		}
+	}
+	return errs
+}
+
+// managedPolicyIDs returns the IDs of the managed policies of s's roles.
+func (s *Scope) managedPolicyIDs() []string {
+	var ids []string
+	for _, r := range s.Roles {
+		for _, p := range r.Managed {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
 }
 
 // checkLocations checks invariant 6: anything that lists a table's files, such as orphan

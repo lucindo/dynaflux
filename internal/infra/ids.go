@@ -41,6 +41,9 @@ const (
 	idBucket           = "Bucket"
 	idProjector        = "Projector" // the store's projector when runtime.split is store
 	idSetup            = "Setup"
+	idCatalog          = "Catalog"
+	idBackfill         = "Backfill"
+	idBackfillMachine  = "BackfillStateMachine"
 	idArchiveWorkGroup = "ArchiveWorkGroup"
 	idArchiveSchema    = "ArchiveSchema"
 	// idArchive owns the log group and the role of the delivery streams, and

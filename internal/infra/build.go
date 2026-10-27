@@ -38,6 +38,10 @@ func Build(cfg *config.Config, cat *catalog.Catalog, opts Options) (*Manifest, e
 	if err != nil {
 		return nil, err
 	}
+	data, err := catalog.Marshal(cat)
+	if err != nil {
+		return nil, fmt.Errorf("infra: %w", err)
+	}
 	// Both are clean relative paths, which config checks.
 	code, err := filepath.Rel(filepath.FromSlash(cfg.Infra.Out), filepath.FromSlash(cfg.Runtime.Out))
 	if err != nil {
@@ -56,6 +60,7 @@ func Build(cfg *config.Config, cat *catalog.Catalog, opts Options) (*Manifest, e
 		code:        filepath.ToSlash(code),
 		schema:      schema,
 		archiveOnly: len(archiveRegions) > 0 && len(archiveRegions) < len(regions),
+		catalogHash: catalog.Hash(data),
 	}
 	m := &Manifest{Store: cat.Store, Regions: regions, Global: b.global(), Regional: b.regional()}
 	dashboard, err := b.dashboard(&m.Regional)
@@ -66,6 +71,13 @@ func Build(cfg *config.Config, cat *catalog.Catalog, opts Options) (*Manifest, e
 	m.Prefix = Prefix{Default: cfg.Prefix, MaxLen: b.maxLen}
 	if b.archiveOnly {
 		m.ArchiveRegions = archiveRegions
+	}
+	if err = m.resolving(b.worst).packManaged(m.Regional.Roles); err != nil {
+		return nil, err
+	}
+	for i := range m.Regional.Catalogs {
+		c := &m.Regional.Catalogs[i]
+		c.After = append(c.After, m.Regional.managedPolicyIDs()...)
 	}
 	if err = m.Check(); err != nil {
 		return nil, err
@@ -94,6 +106,8 @@ type builder struct {
 	// archiveOnly is set when only some regions archive, so archive resources and statements
 	// are archive-only.
 	archiveOnly bool
+	// catalogHash is the hash of the catalog that generate embeds in the runtime binary.
+	catalogHash string
 }
 
 // archives reports whether the store archives a stream.

@@ -1,9 +1,10 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime_test
+package streamevent_test
 
 import (
+	"encoding/json"
 	"os"
 	"reflect"
 	"strings"
@@ -12,7 +13,7 @@ import (
 
 	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
-	"github.com/lucindo/dynaflux/runtime"
+	"github.com/lucindo/dynaflux/internal/streamevent"
 )
 
 func s(v string) store.Value { return store.Value{Type: store.S, Str: v} }
@@ -27,7 +28,11 @@ func TestRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := runtime.Records(data)
+	var ev streamevent.Event
+	if err = json.Unmarshal(data, &ev); err != nil {
+		t.Fatal(err)
+	}
+	got, err := streamevent.Records(ev.Records)
 	if err != nil {
 		t.Fatal(err)
 	}

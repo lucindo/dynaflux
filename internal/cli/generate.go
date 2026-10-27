@@ -24,6 +24,8 @@ import (
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/codegen"
+	"github.com/lucindo/dynaflux/internal/config"
+	"github.com/lucindo/dynaflux/internal/diag"
 	"github.com/lucindo/dynaflux/internal/infra"
 	"github.com/lucindo/dynaflux/internal/infra/cloudformation"
 )
@@ -47,11 +49,12 @@ in infra.out whose first line isn't "# Code generated ... DO NOT EDIT.". It
 overwrites global.stack-policy.json, which can't carry that line, only when the
 global.yaml beside it carries it.
 
-It compares the new templates with those it wrote last time, and writes nothing
-when a view version's table would disappear or hold another definition (DF6016),
-unless dynaflux.lock retires the version, when the replica regions would change by
-more than one region (DF6017), or when a region would go before a run with
--unprotect-region for it was deployed (DF6018).
+It writes nothing when the catalog is too big for the meta table to store
+(DF6019). It compares the new templates with those it wrote last time, and writes
+nothing when a view version's table would disappear or hold another definition
+(DF6016), unless dynaflux.lock retires the version, when the replica regions
+would change by more than one region (DF6017), or when a region would go before
+a run with -unprotect-region for it was deployed (DF6018).
 
 -unprotect-region applies to one run: the next run without it turns protection
 back on.
@@ -61,9 +64,10 @@ again after a gap or a fix in Dynaflux. It raises the view's rebuild count in
 dynaflux.lock by one.
 
 Exit status: 0 when the files are written (warnings are allowed), 1 when the project
-has an error, has no stream to deploy, fails a comparison with the last templates,
-or go.out, runtime.out or infra.out holds a file that isn't generated, and 2 for
-usage and I/O problems, and for a project outside a Go module.
+has an error, has no stream to deploy, has a catalog too big to store, fails a
+comparison with the last templates, or go.out, runtime.out or infra.out holds a
+file that isn't generated, and 2 for usage and I/O problems, and for a project
+outside a Go module.
 `,
 		setup: func(fs *flag.FlagSet) func(*cli, []string) int {
 			var opts infra.Options
@@ -100,6 +104,9 @@ func (c *cli) generate(opts infra.Options, rebuild string, args []string) int {
 			return c.usageError("generate", fmt.Sprintf("-rebuild %s: the SQL files define no view %s", rebuild, rebuild))
 		}
 	}
+	if status = c.checkCatalogSize(p); status != exitOK {
+		return status
+	}
 	root, err := os.OpenRoot(p.dir)
 	if err != nil {
 		c.errorf("dynaflux generate: %v", err)
@@ -128,6 +135,27 @@ func (c *cli) generate(opts infra.Options, rebuild string, args []string) int {
 		fmt.Fprintln(&c.out, ch)
 	}
 	return exitOK
+}
+
+// checkCatalogSize refuses a catalog too big for the meta table's item (DF6019).
+func (c *cli) checkCatalogSize(p *project) int {
+	data, err := catalog.Marshal(p.cat)
+	if err == nil {
+		data, err = catalog.Compress(data)
+	}
+	if err != nil {
+		c.errorf("dynaflux generate: %v", err)
+		return exitErrors
+	}
+	if len(data) <= catalog.MaxCompressedSize {
+		return exitOK
+	}
+	return c.diagnostics([]diag.Diagnostic{{
+		Pos: diag.Pos{File: config.FileName, Line: 1, Col: 1}, Severity: diag.SeverityError, Code: "DF6019",
+		Message: fmt.Sprintf("the catalog takes %d bytes compressed, more than the %d that the meta table can store in one item",
+			len(data), catalog.MaxCompressedSize),
+		Hint: "retire view versions that are no longer needed, remove views, queries or streams, or split the store",
+	}}, exitErrors)
 }
 
 // output is a file that generate writes, by its slash path from the project root.

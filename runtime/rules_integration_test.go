@@ -704,7 +704,7 @@ func TestS1bLiveAboveFence(t *testing.T) {
 	t.Parallel()
 	const version = "quota_by_account@v1"
 	r := newLocalRig(t, version)
-	if err := r.meta.SetViewState(t.Context(), version, meta.Activating); err != nil {
+	if _, err := r.meta.Activate(t.Context(), version, quotaEvents, meta.SplitFence, meta.DefaultBounds); err != nil {
 		t.Fatal(err)
 	}
 	for i := range 4 {
@@ -798,7 +798,7 @@ func TestS1bFenceDuringBatch(t *testing.T) {
 			return nil
 		}
 		// The backfill activates the version and fences the unit.
-		if err := r.meta.SetViewState(t.Context(), version, meta.Activating); err != nil {
+		if _, err := r.meta.Activate(t.Context(), version, quotaEvents, meta.SplitFence, meta.DefaultBounds); err != nil {
 			return err
 		}
 		u, err := r.meta.Unit(t.Context(), quotaEvents, shard)

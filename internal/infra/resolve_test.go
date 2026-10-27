@@ -36,9 +36,10 @@ func TestResolve(t *testing.T) {
 		{text: "${ref:ArchiveWorkGroup.arn}", want: "arn:aws:athena:eu-west-1:123456789012:workgroup/prod-analytics"},
 		{text: "${ref:RoleSetup.arn}", want: "arn:aws:iam::123456789012:role/RoleSetup"},
 		{text: "${prefix_}x:${partition}:${region}:${account}", want: "prod_x:aws:eu-west-1:123456789012"},
+		{text: "${ref:Bucket.arn}/backfill/*", want: "arn:aws:s3:::prod-analytics-123456789012-eu-west-1-an/backfill/*"},
 		{
-			text:    "${ref:Bucket.arn}",
-			wantErr: "infra: ${ref:Bucket.arn}: Resolve resolves references to tables, delivery streams, archive workgroups and roles only",
+			text:    "${ref:Setup.arn}",
+			wantErr: "infra: ${ref:Setup.arn}: Resolve resolves references to tables, buckets, delivery streams, archive workgroups and roles only",
 		},
 		{
 			text:    "${ref:FirehosePageViews.stream_arn_pattern}",

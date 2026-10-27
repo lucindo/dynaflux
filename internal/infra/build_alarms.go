@@ -30,9 +30,11 @@ const (
 	namespaceLambda     = "AWS/Lambda"
 	namespaceDynamoDB   = "AWS/DynamoDB"
 	namespaceFirehose   = "AWS/Firehose"
+	namespaceStates     = "AWS/States"
 	dimFunctionName     = "FunctionName"
 	dimTableName        = "TableName"
 	dimDeliveryStream   = "DeliveryStreamName"
+	dimStateMachine     = "StateMachineArn"
 	statSum             = "Sum"
 	statMaximum         = "Maximum"
 	metricIteratorAge   = "IteratorAge"
@@ -53,7 +55,7 @@ type rule struct {
 }
 
 // alarms returns the alarms of the regional scope s: four per projector, three per stream,
-// two for the store, and two per archived stream.
+// two for the store, one for the backfill, and two per archived stream.
 func (b *builder) alarms(s *Scope) []Alarm {
 	var alarms []Alarm
 	for _, f := range s.Functions {
@@ -68,6 +70,9 @@ func (b *builder) alarms(s *Scope) []Alarm {
 		}
 	}
 	alarms = append(alarms, b.storeAlarms()...)
+	for _, sm := range s.StateMachines {
+		alarms = append(alarms, b.backfillAlarm(sm))
+	}
 	sortByID(alarms)
 	return alarms
 }

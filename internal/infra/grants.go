@@ -31,13 +31,17 @@ func (m *Manifest) FunctionRole(mode string) (Role, error) {
 	return m.Regional.Roles[j], nil
 }
 
-// Allowing returns the Sids of r's statements that allow action on arn in deployment d, for
-// a request with the condition keys keys. In a resource, * matches any run of characters
-// and ? any one. It evaluates StringEquals conditions only, and fails on any other that it
-// would need.
+// Allowing returns the Sids of the statements of r and its managed policies that allow
+// action on arn in deployment d, for a request with the condition keys keys. In a resource
+// or a StringLike value, * matches any run of characters and ? any one. It evaluates
+// StringEquals and StringLike conditions only, and fails on any other that it would need.
 func (m *Manifest) Allowing(r Role, d Deployment, action, arn string, keys map[string]string) ([]string, error) {
+	statements := slices.Clone(r.Statements)
+	for _, p := range r.Managed {
+		statements = append(statements, p.Statements...)
+	}
 	var sids []string
-	for _, st := range r.Statements {
+	for _, st := range statements {
 		if !slices.Contains(st.Actions, action) {
 			continue
 		}
@@ -66,8 +70,7 @@ func (m *Manifest) matchesAny(resources []Text, d Deployment, arn string) (bool,
 		if err != nil {
 			return false, err
 		}
-		p = strings.NewReplacer(`\*`, ".*", `\?`, ".").Replace(regexp.QuoteMeta(p))
-		if regexp.MustCompile("^" + p + "$").MatchString(arn) {
+		if glob(p).MatchString(arn) {
 			return true, nil
 		}
 	}
@@ -77,24 +80,30 @@ func (m *Manifest) matchesAny(resources []Text, d Deployment, arn string) (bool,
 // holds reports whether every condition of st holds for a request with keys.
 func (m *Manifest) holds(st Statement, d Deployment, keys map[string]string) (bool, error) {
 	for _, c := range st.Conditions {
-		if c.Operator != condStringEquals {
+		if c.Operator != condStringEquals && c.Operator != condStringLike {
 			return false, fmt.Errorf("infra: statement %s: condition operator %s isn't supported", st.Sid, c.Operator)
 		}
 		v, ok := keys[c.Key]
 		if !ok {
 			return false, nil
 		}
-		var equal bool
+		var matched bool
 		for _, want := range c.Values {
 			w, err := m.Resolve(want, d)
 			if err != nil {
 				return false, err
 			}
-			equal = equal || w == v
+			matched = matched || w == v || c.Operator == condStringLike && glob(w).MatchString(v)
 		}
-		if !equal {
+		if !matched {
 			return false, nil
 		}
 	}
 	return true, nil
+}
+
+// glob returns the expression of an IAM pattern, in which * matches any run of characters and
+// ? any one.
+func glob(p string) *regexp.Regexp {
+	return regexp.MustCompile("^" + strings.NewReplacer(`\*`, ".*", `\?`, ".").Replace(regexp.QuoteMeta(p)) + "$")
 }

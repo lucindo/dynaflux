@@ -475,8 +475,8 @@ dynaflux.yaml:15:14: error DF6010: runtime.memory_mb is 64; it must be between 1
   name in its SQL file otherwise.
 - `DF6104` points at the region in `regions`. `DF6505` points at the region in
   `archive.regions`, or in `regions` when `archive.regions` is `all`.
-- `DF6016` points at line 1, column 1 of `dynaflux.lock`, and `DF6017` and `DF6018` at
-  `regions`.
+- `DF6016` points at line 1, column 1 of `dynaflux.lock`, `DF6017` and `DF6018` at
+  `regions`, and `DF6019` at line 1, column 1 of `dynaflux.yaml`.
 - Output is sorted by path, line, column, code and message.
 - Codes are stable: a code keeps its meaning and is never reused.
 
@@ -495,8 +495,9 @@ dynaflux.yaml:15:14: error DF6010: runtime.memory_mb is 64; it must be between 1
    `DF6504`, `DF6505`, and `DF6015`, which also needs the lock. These use every name the
    SQL defines, even in a statement with errors.
 
-`dynaflux generate` runs the same steps, then compares its output with the templates it
-wrote last time: `DF6016` to `DF6018` ([infra.md](infra.md#13-checks-in-generate)).
+`dynaflux generate` runs the same steps, checks the size of the catalog (`DF6019`), then
+compares its output with the templates it wrote last time: `DF6016` to `DF6018`
+([infra.md](infra.md#13-checks-in-generate)).
 
 | Exit status | Meaning |
 |-------------|---------|
@@ -529,6 +530,7 @@ Severity column.
 | DF6016 | error | Reported by `generate` only. A view version's table in the `regional.yaml` that `generate` wrote last time is missing from the new one, and `dynaflux.lock` doesn't mark the version retired; or a version keeps its number but its fingerprint changed. Deploying would delete a table the application reads, or write rows of a new definition into an old version's table. This happens when the lock was lost, reverted or merged badly. Until `dynaflux retire` (M5), no version may disappear. | Restore `dynaflux.lock` from version control and run `dynaflux generate` again. To start over on purpose, delete the old templates first. |
 | DF6017 | error | Reported by `generate` only. `regions` differs by more than one region from the replica regions of the `global.yaml` that `generate` wrote last time. CloudFormation adds or removes one Global Table replica per stack update. | Add or remove one region, generate and deploy `global.yaml`; then the next region. |
 | DF6018 | error | Reported by `generate` only. `regions` drops a region whose stream table replicas have deletion protection in the `global.yaml` that `generate` wrote last time. Turning protection off is the first step of removing a region. | Put the region back, run `dynaflux generate -unprotect-region <region>` and deploy `global.yaml`; then remove the region. |
+| DF6019 | error | Reported by `generate` only. The catalog takes more than 350,000 bytes compressed with gzip; the message gives its size. Each region's meta table stores the deployed catalog in one item, which DynamoDB limits to 400 KB ([encoding.md §8.4](encoding.md#84-deployed-catalog)). A store within CloudFormation's limit of 500 resources per stack stays below it. | Retire view versions that are no longer needed, remove views, queries or streams, or split the store. |
 | DF6101 | error | `store` isn't a valid store name. | Use lowercase letters, digits and `-`; start with a letter; don't end with `-`. For example `analytics`. |
 | DF6102 | error | `prefix` isn't a valid prefix. | Use lowercase letters, digits and `-`; start with a letter; end with `-`. For example `prod-`. |
 | DF6103 | error | A region isn't an AWS region code. | Use a code such as `us-east-1`. |

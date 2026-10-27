@@ -187,10 +187,11 @@ func newLocalRig(t *testing.T, pending ...string) *localRig {
 			if slices.Contains(pending, id) {
 				continue
 			}
-			for _, s := range []meta.State{meta.Activating, meta.Live} {
-				if err := r.meta.SetViewState(t.Context(), id, s); err != nil {
-					t.Fatal(err)
-				}
+			if _, err := r.meta.Activate(t.Context(), id, vv.Stream, meta.SplitFence, meta.DefaultBounds); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.meta.MakeLive(t.Context(), id, time.Time{}); err != nil {
+				t.Fatal(err)
 			}
 		}
 	}

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/lucindo/dynaflux/internal/archive"
 	"github.com/lucindo/dynaflux/internal/archive/firehose"
@@ -19,53 +18,8 @@ import (
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
+	"github.com/lucindo/dynaflux/internal/streamevent"
 )
-
-// windowEvent is the part of a DynamoDB stream event with a tumbling window (ADR 0003) that
-// the projector reads. Fields it doesn't declare can't fail decoding, which would block
-// the shard for good.
-type windowEvent struct {
-	Records        []streamRecord `json:"Records"`
-	ShardID        string         `json:"shardId"`
-	EventSourceARN string         `json:"eventSourceARN"`
-}
-
-type streamRecord struct {
-	EventName string       `json:"eventName"`
-	Change    streamChange `json:"dynamodb"`
-}
-
-type streamChange struct {
-	ApproximateCreationDateTime json.Number     `json:"ApproximateCreationDateTime"`
-	SequenceNumber              string          `json:"SequenceNumber"`
-	StreamViewType              string          `json:"StreamViewType"`
-	NewImage                    map[string]attr `json:"NewImage"`
-	OldImage                    map[string]attr `json:"OldImage"`
-}
-
-// streamView is the only view type whose records carry the images the core reads.
-const streamView = "NEW_AND_OLD_IMAGES"
-
-// attr is an attribute value in the stream's JSON. N keeps the text DynamoDB sent.
-type attr struct {
-	S    *string         `json:"S"`
-	N    *string         `json:"N"`
-	B    []byte          `json:"B"`
-	BOOL *bool           `json:"BOOL"`
-	L    []attr          `json:"L"`
-	M    map[string]attr `json:"M"`
-}
-
-// windowResponse always has a state object: Lambda counts a reply without one, or with
-// null, as a failed invocation.
-type windowResponse struct {
-	State             struct{}      `json:"state"`
-	BatchItemFailures []itemFailure `json:"batchItemFailures"`
-}
-
-type itemFailure struct {
-	ItemIdentifier string `json:"itemIdentifier"`
-}
 
 // Reasons that a failed invocation's log line gives.
 const (
@@ -111,8 +65,8 @@ func newProjector(c *engine.Catalog, e env, b store.Backend, s firehose.Sender, 
 // Lambda's context, whose deadline the core stops sending before, so no request is in
 // flight when it returns. An error fails the invocation, and Lambda retries the batch.
 func (p *projectorFn) Invoke(ctx context.Context, payload []byte) ([]byte, error) {
-	resp := windowResponse{BatchItemFailures: []itemFailure{}}
-	var ev windowEvent
+	resp := streamevent.Reply{BatchItemFailures: []streamevent.ItemFailure{}}
+	var ev streamevent.Event
 	if err := json.Unmarshal(payload, &ev); err != nil {
 		return nil, p.fail(ctx, projector.Batch{}, reasonEvent, fmt.Errorf("runtime: decode the event: %w", err))
 	}
@@ -134,8 +88,8 @@ func (p *projectorFn) Invoke(ctx context.Context, payload []byte) ([]byte, error
 		return nil, p.fail(ctx, b, reasonArchiveSchema, p.guard)
 	}
 	var err error
-	if b.Records, err = records(ev.Records); err != nil {
-		return nil, p.fail(ctx, b, reasonEvent, err)
+	if b.Records, err = streamevent.Records(ev.Records); err != nil {
+		return nil, p.fail(ctx, b, reasonEvent, fmt.Errorf("runtime: %w", err))
 	}
 	res, err := p.core.Handle(ctx, b)
 	logCounts(ctx, p.log, p.store, b, res.Stats)
@@ -145,7 +99,7 @@ func (p *projectorFn) Invoke(ctx context.Context, payload []byte) ([]byte, error
 	if res.FailedSeq != "" {
 		attrs := append(batchAttrs(ctx, b), slog.String("failedSeq", res.FailedSeq), slog.String("error", cut(res.RowErr.Error(), errorBytes)))
 		p.log.LogAttrs(ctx, slog.LevelWarn, "rows failed", attrs...)
-		resp.BatchItemFailures = append(resp.BatchItemFailures, itemFailure{ItemIdentifier: res.FailedSeq})
+		resp.BatchItemFailures = append(resp.BatchItemFailures, streamevent.ItemFailure{ItemIdentifier: res.FailedSeq})
 	}
 	return json.Marshal(resp)
 }
@@ -185,87 +139,4 @@ func tableName(arn string) string {
 		return ""
 	}
 	return table
-}
-
-// records converts the event's records, REMOVEs included: record kinds are the core's
-// business.
-func records(in []streamRecord) ([]projector.Record, error) {
-	out := make([]projector.Record, len(in))
-	for i, r := range in {
-		if r.Change.StreamViewType != streamView {
-			return nil, fmt.Errorf("runtime: record %s has StreamViewType %q: the stream table's stream needs %s",
-				r.Change.SequenceNumber, r.Change.StreamViewType, streamView)
-		}
-		var op projector.Op
-		switch r.EventName {
-		case "INSERT":
-			op = projector.Insert
-		case "MODIFY":
-			op = projector.Modify
-		case "REMOVE":
-			op = projector.Remove
-		default:
-			return nil, fmt.Errorf("runtime: record %s has eventName %q", r.Change.SequenceNumber, r.EventName)
-		}
-		arrival, err := arrival(r.Change.ApproximateCreationDateTime)
-		if err != nil {
-			return nil, fmt.Errorf("runtime: record %s: ApproximateCreationDateTime: %w", r.Change.SequenceNumber, err)
-		}
-		out[i] = projector.Record{
-			Op:      op,
-			Seq:     r.Change.SequenceNumber,
-			Arrival: arrival,
-			New:     item(r.Change.NewImage),
-			Old:     item(r.Change.OldImage),
-		}
-	}
-	return out, nil
-}
-
-// arrival returns the epoch seconds n in whole seconds; the zero time without n.
-func arrival(n json.Number) (time.Time, error) {
-	if n == "" {
-		return time.Time{}, nil
-	}
-	f, err := n.Float64()
-	if err != nil {
-		return time.Time{}, err
-	}
-	return time.Unix(int64(f), 0).UTC(), nil
-}
-
-func item(m map[string]attr) store.Item {
-	if m == nil {
-		return nil
-	}
-	it := make(store.Item, len(m))
-	for k, a := range m {
-		it[k] = a.value()
-	}
-	return it
-}
-
-// value converts a. NULL and sets, which Dynaflux never writes, become the zero Value, which
-// the core treats as a foreign value (encoding.md §1). Empty B, L and M stay non-nil, so
-// their type survives.
-func (a attr) value() store.Value {
-	switch {
-	case a.S != nil:
-		return store.Value{Type: store.S, Str: *a.S}
-	case a.N != nil:
-		return store.Value{Type: store.N, Str: *a.N}
-	case a.B != nil:
-		return store.Value{Type: store.B, Bin: a.B}
-	case a.BOOL != nil:
-		return store.Value{Type: store.BOOL, Bool: *a.BOOL}
-	case a.L != nil:
-		l := make([]store.Value, len(a.L))
-		for i, e := range a.L {
-			l[i] = e.value()
-		}
-		return store.Value{Type: store.L, List: l}
-	case a.M != nil:
-		return store.Value{Type: store.M, Map: item(a.M)}
-	}
-	return store.Value{}
 }

@@ -54,7 +54,8 @@ type expression struct {
 }
 
 // dashboard returns the store's dashboard in a region: the states of the alarms of s, then
-// graphs of the projectors, the archive, the tables and the runtime's metrics. In the
+// graphs of the projectors, the archive, the tables, the backfill executions and the
+// runtime's metrics. In the
 // regions that don't archive, the archive graphs stay empty.
 func (b *builder) dashboard(s *Scope) (Dashboard, error) {
 	var widgets []widget
@@ -135,6 +136,7 @@ func (b *builder) graphs(s *Scope) []graph {
 		}})
 	}
 	return append(gs,
+		b.backfillGraph(),
 		graph{Title: "DynamoDB system errors", Metrics: [][]any{search("Operation,"+dimTableName, "SystemErrors", statSum, tables)}},
 		graph{Title: "Opened breakers, too-large rows and divergent duplicates", Stat: statSum, Metrics: lines(
 			catalog.MetricNamespace, catalog.MetricDimensionStore, []string{b.naming.Base()},

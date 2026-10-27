@@ -8,9 +8,12 @@
 //   - [TypeArchiveSchema] creates the archive's Glue database, creates its Iceberg tables
 //     and adds their new columns with Athena DDL, creates or updates their Glue table
 //     optimizers, and re-creates their dedup views.
+//   - [TypeCatalog] registers the catalog that the binary runs in the meta table, and sets
+//     retired the versions it lists retired (ADR 0013).
 //
-// The handlers work from the request's properties alone, and reach AWS through small
-// interfaces that the runtime implements with the AWS SDK.
+// The handlers work from the request's properties alone, except that the catalog handler
+// also reads the binary's catalog. They reach AWS through small interfaces that the runtime
+// implements with the AWS SDK, and the meta table through its storage backend.
 package setup
 
 import (
@@ -19,12 +22,15 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/lucindo/dynaflux/internal/store"
 )
 
 // The custom resource types.
 const (
 	TypeStreamARN     = "Custom::DynafluxStreamArn"
 	TypeArchiveSchema = "Custom::DynafluxArchiveSchema"
+	TypeCatalog       = "Custom::DynafluxCatalog"
 )
 
 // The request types.
@@ -117,7 +123,7 @@ type Optimizer struct {
 
 // Request is a CloudFormation custom resource request.
 type Request struct {
-	// Type is the resource type: TypeStreamARN or TypeArchiveSchema.
+	// Type is the resource type: TypeStreamARN, TypeArchiveSchema or TypeCatalog.
 	Type string
 	// Action is the request type: ActionCreate, ActionUpdate or ActionDelete.
 	Action string
@@ -139,22 +145,27 @@ type Handler struct {
 	DynamoDB DynamoDB
 	Athena   Athena
 	Glue     Glue
+	// Meta is the backend of the meta table, and Catalog the bytes of the catalog that the
+	// binary runs, as catalog.Marshal returns them.
+	Meta    store.Backend
+	Catalog []byte
 }
 
-// Handle answers r. Delete does nothing: the archive schema is retained, and a stream
-// lookup owns nothing. On an error, the response keeps r's physical ID, so a failed update
-// isn't taken for a replacement.
+// Handle answers r. Delete does nothing but for the catalog: the archive schema is
+// retained, and a stream lookup owns nothing. On an error, the response keeps r's physical
+// ID, so a failed update isn't taken for a replacement.
 func (h *Handler) Handle(ctx context.Context, r Request) (Response, error) {
-	if r.Action == ActionDelete {
-		// Whatever the type: a create that failed is rolled back with a delete.
-		return Response{PhysicalID: r.PhysicalID}, nil
-	}
 	var resp Response
 	var err error
-	switch r.Type {
-	case TypeStreamARN:
+	switch {
+	case r.Type == TypeCatalog:
+		resp, err = h.registerCatalog(ctx, r)
+	case r.Action == ActionDelete:
+		// Whatever the type: a create that failed is rolled back with a delete.
+		return Response{PhysicalID: r.PhysicalID}, nil
+	case r.Type == TypeStreamARN:
 		resp, err = h.lookupStream(ctx, r.Props)
-	case TypeArchiveSchema:
+	case r.Type == TypeArchiveSchema:
 		resp, err = h.applySchema(ctx, r.Props)
 	default:
 		err = fmt.Errorf("unknown resource type %q", r.Type)

@@ -183,6 +183,14 @@ type child struct {
 
 func startChild(t *testing.T, mode string, api *runtimeAPI, set map[string]string) *child {
 	t.Helper()
+	vars := map[string]string{"AWS_ENDPOINT_URL_DYNAMODB": api.ddb.srv.URL}
+	maps.Copy(vars, set)
+	return startChildAt(t, mode, api.srv.URL, vars)
+}
+
+// startChildAt starts a child whose Lambda Runtime API is at runtimeURL.
+func startChildAt(t *testing.T, mode, runtimeURL string, set map[string]string) *child {
+	t.Helper()
 	dir := t.TempDir()
 	empty := filepath.Join(dir, "empty")
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
@@ -191,14 +199,13 @@ func startChild(t *testing.T, mode string, api *runtimeAPI, set map[string]strin
 	vars := map[string]string{
 		childVar:                      mode,
 		catalogVar:                    string(childCatalog(t)),
-		"AWS_LAMBDA_RUNTIME_API":      strings.TrimPrefix(api.srv.URL, "http://"),
+		"AWS_LAMBDA_RUNTIME_API":      strings.TrimPrefix(runtimeURL, "http://"),
 		"AWS_REGION":                  emulatortest.Region,
 		"AWS_ACCESS_KEY_ID":           emulatortest.AccessKeyID,
 		"AWS_SECRET_ACCESS_KEY":       "fake",
 		"AWS_CONFIG_FILE":             empty,
 		"AWS_SHARED_CREDENTIALS_FILE": empty,
 		"AWS_EC2_METADATA_DISABLED":   "true",
-		"AWS_ENDPOINT_URL_DYNAMODB":   api.ddb.srv.URL,
 		"AWS_ENDPOINT_URL_FIREHOSE":   "http://127.0.0.1:1",
 		// Every other service, should a client of one be built.
 		"AWS_ENDPOINT_URL": "http://127.0.0.1:1",

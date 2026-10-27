@@ -4,6 +4,7 @@
 package awssetup_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"iter"
@@ -12,10 +13,16 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/catalog/catalogtest"
 	"github.com/lucindo/dynaflux/internal/infra"
+	"github.com/lucindo/dynaflux/internal/meta"
+	"github.com/lucindo/dynaflux/internal/setup"
 	"github.com/lucindo/dynaflux/internal/setup/awssetup"
+	"github.com/lucindo/dynaflux/internal/store"
+	"github.com/lucindo/dynaflux/internal/store/mem"
 	"github.com/lucindo/dynaflux/internal/validate"
 )
 
@@ -51,12 +58,88 @@ func resolve(t *testing.T, m *infra.Manifest, x infra.Text, d infra.Deployment) 
 	return s
 }
 
-// setupCalls is every call the adapters can send for m's stream lookups and archive schema
-// in deployment d, by IAM action, with the ARNs that IAM authorizes it on. "Actions on a
-// table, partition, or table version require permission on the table, database, and
-// catalog" (Glue's ARN documentation); creating a database needs the catalog and the
-// database. Every optimizer call goes both ways: an existing one is updated, and a canceled
-// query is stopped. The optimizer calls pass the optimizer role to Glue.
+// recorder is a meta table backend that notes the DynamoDB action of each call.
+type recorder struct {
+	*mem.Mem
+
+	actions map[string]bool
+}
+
+func (r *recorder) Get(ctx context.Context, table string, k store.Key, consistent bool) (store.Item, error) {
+	r.actions["dynamodb:GetItem"] = true
+	return r.Mem.Get(ctx, table, k, consistent)
+}
+
+func (r *recorder) BatchGet(ctx context.Context, table string, ks []store.Key, consistent bool) ([]store.Item, error) {
+	r.actions["dynamodb:BatchGetItem"] = true
+	return r.Mem.BatchGet(ctx, table, ks, consistent)
+}
+
+func (r *recorder) Query(ctx context.Context, table string, q store.Query) iter.Seq2[store.Item, error] {
+	r.actions["dynamodb:Query"] = true
+	return r.Mem.Query(ctx, table, q)
+}
+
+func (r *recorder) ScanPage(ctx context.Context, table string, sc store.Scan, start *store.Key) ([]store.Item, *store.Key, error) {
+	r.actions["dynamodb:Scan"] = true
+	return r.Mem.ScanPage(ctx, table, sc, start)
+}
+
+func (r *recorder) Put(ctx context.Context, table string, it store.Item, c store.Cond) error {
+	r.actions["dynamodb:PutItem"] = true
+	return r.Mem.Put(ctx, table, it, c)
+}
+
+// catalogActions returns the DynamoDB actions that the catalog handler sends to the meta
+// table, recorded over a Create that retires a live version, the Delete of the replaced
+// registration, and a rollback's Update.
+func catalogActions(t *testing.T) []string {
+	t.Helper()
+	before := catalogtest.Marshal(t, "analytics", "CREATE STREAM clicks (k String) PRIMARY KEY (k);\n"+
+		"CREATE MATERIALIZED VIEW old ORDER BY (k) AS SELECT k, count() AS n FROM clicks GROUP BY k;\n")
+	cat, err := catalog.Unmarshal(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat.Views, cat.Retired = nil, []string{"old@v1"}
+	after, err := catalog.Marshal(cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{Mem: mem.New(), actions: map[string]bool{}}
+	m := meta.New(rec, "meta")
+	if _, err = m.RegisterCatalog(t.Context(), before, "v0.4.0"); err == nil {
+		_, err = m.Activate(t.Context(), "old@v1", "clicks", meta.SplitFence, meta.DefaultBounds)
+	}
+	if err == nil {
+		err = m.MakeLive(t.Context(), "old@v1", time.Time{})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear(rec.actions)
+	h := setup.Handler{Meta: rec, Catalog: after}
+	for _, r := range []struct{ action, hash string }{
+		{setup.ActionCreate, catalog.Hash(after)}, {setup.ActionDelete, catalog.Hash(before)}, {setup.ActionUpdate, catalog.Hash(before)},
+	} {
+		props := map[string]any{"MetaTable": "meta", "CatalogHash": r.hash, "Generator": "v0.5.0"}
+		if _, err = h.Handle(t.Context(), setup.Request{Type: setup.TypeCatalog, Action: r.action, Props: props}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vs, err := m.ViewStates(t.Context())
+	if err != nil || vs["old@v1"].State != meta.Retired {
+		t.Fatalf("old@v1 is %+v, %v; the requests didn't retire it", vs["old@v1"], err)
+	}
+	return slices.Sorted(maps.Keys(rec.actions))
+}
+
+// setupCalls is every call the adapters and the catalog handler can send for m's custom
+// resources in deployment d, by IAM action, with the ARNs that IAM authorizes it on.
+// "Actions on a table, partition, or table version require permission on the table,
+// database, and catalog" (Glue's ARN documentation); creating a database needs the catalog
+// and the database. Every optimizer call goes both ways: an existing one is updated, and a
+// canceled query is stopped. The optimizer calls pass the optimizer role to Glue.
 func setupCalls(t *testing.T, m *infra.Manifest, d infra.Deployment) map[string][]string {
 	t.Helper()
 	arn := func(service, resource string) string {
@@ -74,7 +157,7 @@ func setupCalls(t *testing.T, m *infra.Manifest, d infra.Deployment) map[string]
 		glueTables = append(glueTables, arn("glue", "table/"+db+"/"+tb.Name))
 	}
 	workgroup := []string{arn("athena", "workgroup/"+resolve(t, m, schema.WorkGroup, d))}
-	return map[string][]string{
+	calls := map[string][]string{
 		"dynamodb:DescribeTable":     streamTables,
 		"glue:CreateDatabase":        {glueCatalog, glueDatabase},
 		"glue:GetTable":              glueTables,
@@ -85,6 +168,11 @@ func setupCalls(t *testing.T, m *infra.Manifest, d infra.Deployment) map[string]
 		"athena:StopQueryExecution":  workgroup,
 		"iam:PassRole":               {resolve(t, m, schema.Optimizers.Role, d)},
 	}
+	metaTable := arn("dynamodb", "table/"+resolve(t, m, m.Regional.Catalogs[0].MetaTable, d))
+	for _, action := range catalogActions(t) {
+		calls[action] = append(calls[action], metaTable)
+	}
+	return calls
 }
 
 // requestKeys returns the condition keys of a call of action.
@@ -205,7 +293,7 @@ func TestSetupGrants(t *testing.T) {
 	t.Parallel()
 	m := grantsManifest(t, "analytics")
 	calls := setupCalls(t, m, grantsDeployment())
-	ops := []string{"iam:PassRole"}
+	ops := append([]string{"iam:PassRole"}, catalogActions(t)...)
 	for service, names := range awssetup.Operations() {
 		for _, name := range names {
 			ops = append(ops, service+":"+name)
@@ -244,6 +332,12 @@ func TestSetupGrantsControls(t *testing.T) {
 				return strings.Contains(string(r), ":database/")
 			})
 		}, "no statement allows glue:GetTable on arn:aws:glue:us-east-1:123456789012:database/prod_analytics"},
+		{"no read of view states", "Meta", func(st *infra.Statement) {
+			st.Actions = slices.DeleteFunc(slices.Clone(st.Actions), func(a string) bool { return a == "dynamodb:Query" })
+		}, "no statement allows dynamodb:Query on arn:aws:dynamodb:us-east-1:123456789012:table/prod-analytics-meta"},
+		{"another prefix's meta table", "Meta", func(st *infra.Statement) {
+			st.Resources = []infra.Text{"arn:${partition}:dynamodb:${region}:${account}:table/*analytics-meta"}
+		}, "statement Meta allows dynamodb:GetItem on arn:aws:dynamodb:us-east-1:123456789012:table/dev-analytics-meta"},
 		{"another stream table", "StreamTables", func(st *infra.Statement) { st.Resources = st.Resources[:1] },
 			"no statement allows dynamodb:DescribeTable on arn:aws:dynamodb:us-east-1:123456789012:table/prod-analytics-stream-page_views"},
 		{"every table", "StreamTables", func(st *infra.Statement) { st.Resources = []infra.Text{"*"} },

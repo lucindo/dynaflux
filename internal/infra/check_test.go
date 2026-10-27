@@ -30,11 +30,21 @@ func validManifest() *infra.Manifest {
 			// An archive-only statement is left out where its resource isn't.
 			Roles: []infra.Role{{Common: infra.Common{ID: "RoleSetup"}, Statements: []infra.Statement{
 				{Sid: "Archive", ArchiveOnly: true, Resources: []infra.Text{"${ref:Archived.arn}"}},
-			}}},
+			}, Managed: []infra.ManagedPolicy{{ID: "RoleSetupPolicy1", Statements: []infra.Statement{
+				{Sid: "Tables", Resources: []infra.Text{"${ref:StreamPageViews.arn}"}},
+			}}}}},
+			StateMachines: []infra.StateMachine{{
+				Common: infra.Common{ID: "BackfillStateMachine"}, Name: "${prefix}analytics-backfill", Role: "${ref:RoleSetup.arn}",
+				LogGroup: "logs", Function: "${ref:Setup.arn}",
+			}},
 			Functions: []infra.Function{{Common: infra.Common{ID: "Setup"}, Name: "setup", Role: "${ref:RoleSetup.arn}", LogGroup: "logs"}},
 			StreamLookups: []infra.StreamLookup{
 				{Common: infra.Common{ID: "LookupPageViews"}, Handler: "${ref:Setup.arn}", Table: "${ref:StreamPageViews.name}"},
 			},
+			Catalogs: []infra.CatalogRegistration{{
+				Common: infra.Common{ID: "Catalog"}, Handler: "${ref:Setup.arn}", MetaTable: "${prefix}analytics-meta",
+				After: []string{"LookupPageViews", "RoleSetupPolicy1"},
+			}},
 			LogStreams: []infra.LogStream{{Common: infra.Common{ID: "LogStreamPage", ArchiveOnly: true}, Group: "logs", Name: "page"}},
 			ArchiveSchemas: []infra.ArchiveSchema{{
 				Common: infra.Common{ID: "ArchiveSchema", ArchiveOnly: true}, Handler: "${ref:Setup.arn}",
@@ -81,6 +91,19 @@ func TestCheck(t *testing.T) {
 		{
 			"ID in both scopes", func(m *infra.Manifest) { m.Regional.Tables[0].ID = "StreamPageViews" },
 			"ID StreamPageViews is used twice",
+		},
+		{
+			"managed policy with a resource's ID", func(m *infra.Manifest) { m.Regional.Roles[0].Managed[0].ID = "Meta" },
+			"ID Meta is used twice",
+		},
+		{
+			"managed policy refers to a missing resource",
+			func(m *infra.Manifest) { m.Regional.Roles[0].Managed[0].Statements[0].Resources[0] = "${ref:View.arn}" },
+			"RoleSetupPolicy1 statement Tables refers to View, which doesn't exist",
+		},
+		{
+			"state machine runs a missing function", func(m *infra.Manifest) { m.Regional.StateMachines[0].Function = "${ref:Backfill.arn}" },
+			"BackfillStateMachine function refers to Backfill, which doesn't exist",
 		},
 		{
 			"reference to a missing resource", func(m *infra.Manifest) { m.Regional.Tables[0].Name = "${ref:Bucket.arn}/x" },
@@ -180,6 +203,25 @@ func TestCheck(t *testing.T) {
 				m.Regional.ArchiveSchemas[0].After = []string{"Archived"}
 			},
 			"ArchiveSchema after Archived exists only in archive regions",
+		},
+		{
+			"catalog waits for a resource that doesn't exist", func(m *infra.Manifest) { m.Regional.Catalogs[0].After = []string{"Projector"} },
+			"Catalog after Projector isn't a resource of its scope",
+		},
+		{
+			"catalog waits for an archive-only resource", func(m *infra.Manifest) { m.Regional.Catalogs[0].After = []string{"Archived"} },
+			"Catalog after Archived exists only in archive regions",
+		},
+		{
+			"catalog registered before a managed policy", func(m *infra.Manifest) { m.Regional.Catalogs[0].After = []string{"LookupPageViews"} },
+			"Catalog is registered before RoleSetupPolicy1",
+		},
+		{
+			"catalog registered before a function", func(m *infra.Manifest) {
+				m.Regional.Functions = append(m.Regional.Functions, infra.Function{Common: infra.Common{ID: "Projector"}, Name: "p",
+					Role: "${ref:RoleSetup.arn}", LogGroup: "logs"})
+			},
+			"Catalog is registered before Projector",
 		},
 		{
 			"alarm everywhere watches an archive-only resource",

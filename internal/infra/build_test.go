@@ -142,3 +142,53 @@ func TestBuildFunctionCode(t *testing.T) {
 		}
 	}
 }
+
+// The backfill role names every stream and view table, so its statements that grow go in
+// managed policies, as many as fit IAM's 6,144 characters each with the longest prefix, in
+// order. Past IAM's 10 managed policies per role, Build fails.
+func TestBuildBackfillPolicies(t *testing.T) {
+	t.Parallel()
+	views := func(streams, perStream int) string {
+		var sql strings.Builder
+		for s := range streams {
+			fmt.Fprintf(&sql, "CREATE STREAM s%d (k String) PRIMARY KEY (k);\n", s)
+			for v := range perStream {
+				fmt.Fprintf(&sql, "CREATE MATERIALIZED VIEW v_%d_%02d ORDER BY (k) PRIMARY KEY (k) AS SELECT k, count() AS n FROM s%d GROUP BY k;\n", s, v, s)
+			}
+		}
+		return sql.String()
+	}
+	const config = "store: analytics\nregions: [us-east-1, us-west-2]\nruntime: {split: stream}\n"
+	m, err := buildWith(t, config, views(4, 25), infra.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	role, err := m.FunctionRole("backfill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	resources := map[string][]infra.Text{}
+	for _, p := range role.Managed {
+		ids = append(ids, p.ID)
+		for _, st := range p.Statements {
+			resources[st.Sid] = append(resources[st.Sid], st.Resources...)
+		}
+	}
+	if want := []string{"RoleBackfillPolicy1", "RoleBackfillPolicy2", "RoleBackfillPolicy3"}; !slices.Equal(ids, want) {
+		t.Errorf("managed policies %q, want %q", ids, want)
+	}
+	if got := resources["Views"]; len(got) != 100 || got[0] != "${ref:ViewV000Xb7ded8d1V1.arn}" || got[99] != "${ref:ViewV324Xe1311f8bV1.arn}" {
+		t.Errorf("Views names %d tables, from %s to %s; want the 100 view tables in order", len(got), got[0], got[len(got)-1])
+	}
+	if got := resources["StreamTables"]; len(got) != 8 ||
+		got[0] != "arn:${partition}:dynamodb:us-east-1:${account}:table/${ref:StreamS0.name}" ||
+		got[4] != "arn:${partition}:dynamodb:us-west-2:${account}:table/${ref:StreamS0.name}" {
+		t.Errorf("StreamTables names %q; want each stream table in us-east-1 and us-west-2", got)
+	}
+	_, err = buildWith(t, config, views(8, 75), infra.Options{})
+	if want := "infra: role RoleBackfill needs 12 managed policies, and IAM attaches at most 10 to a role by default; " +
+		"retire old view versions, or split the streams across stores"; err == nil || err.Error() != want {
+		t.Errorf("600 view versions: got error %v, want %q", err, want)
+	}
+}

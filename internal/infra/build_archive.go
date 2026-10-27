@@ -118,7 +118,7 @@ func deliveryRole(c Common, db Text) Role {
 			{Sid: "Catalog", Actions: []string{glueGetDatabase, glueGetTable, glueUpdateTable}, Resources: archiveCatalog(db)},
 			{
 				Sid:       "Files",
-				Actions:   []string{"s3:AbortMultipartUpload", "s3:DeleteObject", s3GetObject, s3PutObject},
+				Actions:   []string{"s3:AbortMultipartUpload", s3DeleteObject, s3GetObject, s3PutObject},
 				Resources: []Text{warehouseObjects(db), ref(idBucket, AttrARN) + "/errors/firehose/*"},
 			},
 			{
@@ -141,7 +141,7 @@ func optimizerRole(c Common, db Text) Role {
 		Common:  c,
 		Service: ServiceGlue,
 		Statements: []Statement{
-			{Sid: "Files", Actions: []string{"s3:DeleteObject", s3GetObject, s3PutObject}, Resources: []Text{warehouseObjects(db)}},
+			{Sid: "Files", Actions: []string{s3DeleteObject, s3GetObject, s3PutObject}, Resources: []Text{warehouseObjects(db)}},
 			{Sid: "List", Actions: []string{s3ListBucket}, Resources: []Text{ref(idBucket, AttrARN)}, Conditions: warehouseListing(db)},
 			{Sid: "Catalog", Actions: []string{glueGetTable, glueUpdateTable}, Resources: archiveCatalog(db)},
 			{

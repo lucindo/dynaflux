@@ -10,12 +10,17 @@ import (
 	"os"
 
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
 	fh "github.com/aws/aws-sdk-go-v2/service/firehose"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/lucindo/dynaflux"
 	"github.com/lucindo/dynaflux/internal/access"
 	"github.com/lucindo/dynaflux/internal/archive/firehose"
+	"github.com/lucindo/dynaflux/internal/backfill"
+	"github.com/lucindo/dynaflux/internal/backfill/awsbackfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/setup/awssetup"
 	"github.com/lucindo/dynaflux/internal/store/dynamo"
@@ -40,10 +45,32 @@ func Run(cat *dynaflux.Catalog) error {
 		return err
 	}
 	log := newLogger(os.Stdout, e.logLevel)
-	if e.mode == catalog.EnvModeSetup {
-		lambda.Start(newSetup(awssetup.New(cfg), log))
-	} else {
-		lambda.Start(newProjector(c, e, dynamo.New(dynamodb.NewFromConfig(cfg)), firehose.SDK{Client: fh.NewFromConfig(cfg)}, log))
+	ddb := dynamodb.NewFromConfig(cfg)
+	switch e.mode {
+	case catalog.EnvModeSetup:
+		h := awssetup.New(cfg)
+		h.Meta = dynamo.New(ddb)
+		// The same bytes that generate embedded: Unmarshal takes only Marshal's canonical form.
+		if h.Catalog, err = catalog.Marshal(c.Catalog()); err != nil {
+			return err
+		}
+		lambda.Start(newSetup(h, log))
+	case catalog.EnvModeBackfill:
+		// A custom endpoint, a test's, serves no bucket names as hosts.
+		bucket := s3.NewFromConfig(cfg, func(o *s3.Options) { o.UsePathStyle = o.BaseEndpoint != nil })
+		f, berr := newBackfill(c, e, backfillParts{
+			store:  dynamo.New(ddb),
+			units:  awsbackfill.NewUnits(ddb, dynamodbstreams.NewFromConfig(cfg)),
+			tables: awsbackfill.NewReplicas(cfg),
+			lag:    awsbackfill.NewLag(cloudwatch.NewFromConfig(cfg), catalog.Naming{Prefix: e.prefix, Store: c.Catalog().Store}, c.Catalog()),
+			runs:   func(name string) backfill.Runs { return awsbackfill.NewRuns(bucket, name) },
+		}, log)
+		if berr != nil {
+			return berr
+		}
+		lambda.Start(f)
+	default:
+		lambda.Start(newProjector(c, e, dynamo.New(ddb), firehose.SDK{Client: fh.NewFromConfig(cfg)}, log))
 	}
 	return nil // not reached: lambda.Start exits the process when its loop ends
 }

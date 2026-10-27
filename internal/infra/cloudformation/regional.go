@@ -22,6 +22,7 @@ import (
 // FAILED reply arrives in time even when Lambda's queue held the request.
 const (
 	lookupTimeoutSeconds        = 300
+	catalogTimeoutSeconds       = 300
 	archiveSchemaTimeoutSeconds = 960
 )
 
@@ -32,11 +33,11 @@ const (
 	lookupGeneration = "LookupGeneration"
 )
 
-// regionalTemplate returns regional.yaml: the regional scope. When only some regions
-// archive, the archive-only resources have the condition InArchive, and texts that refer to
-// them are left out elsewhere. The alarms notify the SNS topic of the AlarmTopicArn
-// parameter, if it is set.
-func regionalTemplate(m *infra.Manifest) (*resources, *yaml.Node, error) {
+// regionalTemplate returns regional.yaml: the regional scope, with version as the catalog's
+// generator. When only some regions archive, the archive-only resources have the condition
+// InArchive, and texts that refer to them are left out elsewhere. The alarms notify the SNS
+// topic of the AlarmTopicArn parameter, if it is set.
+func regionalTemplate(m *infra.Manifest, version string) (*resources, *yaml.Node, error) {
 	s := m.Regional
 	r := &resolver{local: map[string]bool{}, global: map[string]infra.Table{}, archiveOnly: map[string]bool{}}
 	for _, t := range m.Global.Tables {
@@ -64,7 +65,7 @@ func regionalTemplate(m *infra.Manifest) (*resources, *yaml.Node, error) {
 		rs.add(l.ID, func() *yaml.Node { return logStream(r, l) })
 	}
 	for _, x := range s.Roles {
-		rs.add(x.ID, func() *yaml.Node { return role(r, x) })
+		addRole(rs, r, x)
 	}
 	for _, f := range s.Functions {
 		rs.add(f.ID, func() *yaml.Node { return function(r, f) })
@@ -75,7 +76,13 @@ func regionalTemplate(m *infra.Manifest) (*resources, *yaml.Node, error) {
 	for _, x := range s.Mappings {
 		rs.add(x.ID, func() *yaml.Node { return eventSourceMapping(r, x) })
 	}
+	for _, x := range s.StateMachines {
+		rs.add(x.ID, func() *yaml.Node { return stateMachine(r, x) })
+	}
 	addArchive(rs, r, s)
+	for _, x := range s.Catalogs {
+		rs.add(x.ID, func() *yaml.Node { return catalogRegistration(r, x, version) })
+	}
 	for _, x := range s.Alarms {
 		rs.add(x.ID, func() *yaml.Node { return alarm(r, x) })
 	}
@@ -187,6 +194,29 @@ func autoScaling(rs *resources, t infra.Table) {
 
 func bucket(r *resolver, b infra.Bucket) *yaml.Node {
 	enabled := str("Enabled")
+	rules := seq(
+		mapping(
+			kv("Id", str("abort-incomplete-uploads")),
+			kv("Status", enabled),
+			kv("AbortIncompleteMultipartUpload", mapping(kv("DaysAfterInitiation", num(b.AbortMultipartDays)))),
+		),
+		// Leftover delete markers would slow every listing.
+		mapping(
+			kv("Id", str("expire-noncurrent-versions")),
+			kv("Status", enabled),
+			kv("NoncurrentVersionExpiration", mapping(kv("NoncurrentDays", num(b.NoncurrentExpiryDays)))),
+			kv("ExpiredObjectDeleteMarker", boolean(true)),
+		),
+	)
+	for _, e := range b.Expiries {
+		rules.Content = append(rules.Content, mapping(
+			kv("Id", str(e.ID)),
+			kv("Status", enabled),
+			kv("Prefix", str(e.Prefix)),
+			kv("ExpirationInDays", num(e.Days)),
+			kv("NoncurrentVersionExpiration", mapping(kv("NoncurrentDays", num(e.NoncurrentDays)))),
+		))
+	}
 	return resource("AWS::S3::Bucket", mapping(
 		kv("BucketName", r.value(b.Name)),
 		kv("BucketNamespace", str("account-regional")),
@@ -201,20 +231,7 @@ func bucket(r *resolver, b infra.Bucket) *yaml.Node {
 			kv("RestrictPublicBuckets", boolean(true)),
 		)),
 		kv("VersioningConfiguration", mapping(kv("Status", enabled))),
-		kv("LifecycleConfiguration", mapping(kv("Rules", seq(
-			mapping(
-				kv("Id", str("abort-incomplete-uploads")),
-				kv("Status", enabled),
-				kv("AbortIncompleteMultipartUpload", mapping(kv("DaysAfterInitiation", num(b.AbortMultipartDays)))),
-			),
-			// Leftover delete markers would slow every listing.
-			mapping(
-				kv("Id", str("expire-noncurrent-versions")),
-				kv("Status", enabled),
-				kv("NoncurrentVersionExpiration", mapping(kv("NoncurrentDays", num(b.NoncurrentExpiryDays)))),
-				kv("ExpiredObjectDeleteMarker", boolean(true)),
-			),
-		)))),
+		kv("LifecycleConfiguration", mapping(kv("Rules", rules))),
 		kv("Tags", tags(b.Tags)),
 	), deletion(b.Deletion)...)
 }
@@ -260,6 +277,14 @@ func archiveCondition(c infra.Common) []pair {
 // ifArchive returns n in the regions that archive, and nothing elsewhere.
 func ifArchive(n *yaml.Node) *yaml.Node {
 	return intrinsic("If", seq(str(inArchive), n, intrinsic("Ref", str("AWS::NoValue"))))
+}
+
+// addRole adds a role and its managed policies.
+func addRole(rs *resources, r *resolver, x infra.Role) {
+	rs.add(x.ID, func() *yaml.Node { return role(r, x) })
+	for _, p := range x.Managed {
+		rs.add(p.ID, func() *yaml.Node { return managedPolicy(r, x, p) })
+	}
 }
 
 func role(r *resolver, x infra.Role) *yaml.Node {
@@ -382,6 +407,18 @@ func lookup(r *resolver, x infra.StreamLookup) *yaml.Node {
 		kv("TableName", r.value(x.Table)),
 		kv(lookupGeneration, intrinsic("Ref", str(lookupGeneration))),
 	))
+}
+
+// catalogRegistration returns the custom resource that the setup function answers by
+// registering the binary's catalog (ADR 0013). A new CatalogHash or Generator sends Update.
+func catalogRegistration(r *resolver, x infra.CatalogRegistration, generator string) *yaml.Node {
+	return resource(setup.TypeCatalog, mapping(
+		kv("ServiceToken", r.value(x.Handler)),
+		kv("ServiceTimeout", num(catalogTimeoutSeconds)),
+		kv("MetaTable", r.value(x.MetaTable)),
+		kv("CatalogHash", str(x.Hash)),
+		kv("Generator", str(generator)),
+	), dependsOn(x.After...))
 }
 
 func eventSourceMapping(r *resolver, x infra.Mapping) *yaml.Node {

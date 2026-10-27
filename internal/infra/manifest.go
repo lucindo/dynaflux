@@ -42,6 +42,8 @@ type Scope struct {
 	Functions         []Function
 	StreamLookups     []StreamLookup
 	Mappings          []Mapping
+	Catalogs          []CatalogRegistration
+	StateMachines     []StateMachine
 	ArchiveWorkGroups []ArchiveWorkGroup
 	ArchiveSchemas    []ArchiveSchema
 	DeliveryStreams   []DeliveryStream
@@ -85,6 +87,7 @@ const (
 	TagKindProjector = "projector"
 	TagKindSetup     = "setup"
 	TagKindArchive   = "archive"
+	TagKindBackfill  = "backfill"
 )
 
 // Table is a DynamoDB table. A stream table is a Global Table with a replica in every
@@ -201,7 +204,18 @@ type Bucket struct {
 	// bucket never expires current objects.
 	NoncurrentExpiryDays int
 	AbortMultipartDays   int
-	Deletion             Deletion
+	// Expiries delete what lies under their prefixes sooner.
+	Expiries []Expiry
+	Deletion Deletion
+}
+
+// Expiry deletes the objects under Prefix Days after they were written, and their older
+// versions NoncurrentDays after they were replaced or deleted.
+type Expiry struct {
+	ID             string
+	Prefix         string
+	Days           int
+	NoncurrentDays int
 }
 
 // LogGroup is a CloudWatch Logs log group, deleted with its stack. Its ID is "Logs" and the
@@ -233,6 +247,17 @@ type Role struct {
 	Service    string
 	Trust      []Condition
 	Statements []Statement
+	// Managed are managed policies attached to the role, for statements that grow with the
+	// store past what its inline policies may hold. Each fits IAM's limit on one managed
+	// policy.
+	Managed []ManagedPolicy
+}
+
+// ManagedPolicy is an unnamed IAM managed policy attached to the role that holds it: the
+// role's ID, "Policy" and its number from 1.
+type ManagedPolicy struct {
+	ID         string
+	Statements []Statement
 }
 
 // Service principals.
@@ -240,6 +265,7 @@ const (
 	ServiceLambda   = "lambda.amazonaws.com"
 	ServiceFirehose = "firehose.amazonaws.com"
 	ServiceGlue     = "glue.amazonaws.com"
+	ServiceStates   = "states.amazonaws.com"
 )
 
 // Statement allows Actions, sorted, on Resources, when every condition holds. A resource is
@@ -331,6 +357,39 @@ const (
 	// MetricEventCount turns on the mapping's event counts, which the alarms watch.
 	MetricEventCount = "event_count"
 )
+
+// StateMachine is the Standard Step Functions state machine that drives each backfill job in
+// the region, "BackfillStateMachine" (ADR 0011). An execution invokes Function one step at a
+// time and waits as a step asks; after MaxSteps steps it starts its continuation and ends,
+// well before an execution's history fills. It logs errors, without execution data, to
+// LogGroup.
+type StateMachine struct {
+	Common
+
+	Name     Text
+	Role     Text
+	LogGroup Text // the log group's ARN
+	Function Text // the function's ARN
+	MaxSteps int
+}
+
+// CatalogRegistration is "Catalog", which the setup function answers by registering the
+// catalog of the runtime binary in the meta table, and by setting retired the versions that
+// the catalog lists retired (ADR 0013). Its physical ID changes with Hash, so a new catalog
+// replaces it, and CloudFormation deletes the old one only after the whole update
+// succeeded. CloudFormation can't tag it.
+type CatalogRegistration struct {
+	Common
+
+	Handler   Text
+	MetaTable Text
+	// Hash is the lowercase hex SHA-256 of the catalog's bytes, which the runtime binary
+	// embeds.
+	Hash string
+	// After lists the IDs of the functions it is registered after, besides Handler: the
+	// catalog becomes current once every function runs it.
+	After []string
+}
 
 // ArchiveWorkGroup is the Athena workgroup that runs the archive schema's statements and the
 // users' queries on the archive, "ArchiveWorkGroup". It uses engine version 3 and managed

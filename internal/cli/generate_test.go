@@ -7,6 +7,7 @@ import (
 	"flag"
 	"io/fs"
 	"maps"
+	"math/rand/v2"
 	"os"
 	"path"
 	"path/filepath"
@@ -202,6 +203,35 @@ func TestGenerateRebuildNeedsAView(t *testing.T) {
 		if after := snapshot(t, dir); !maps.EqualFunc(before, after, slices.Equal) {
 			t.Errorf("-rebuild %s changed files", name)
 		}
+	}
+}
+
+// A catalog that the meta table can't store is refused before anything is written.
+func TestGenerateRefusesOversizedCatalog(t *testing.T) {
+	t.Parallel()
+	dir := writeProject(t, "generate/new")
+	// Random letters compress to about 3/4 of their size, so 500,000 pass the limit.
+	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	rnd := rand.New(rand.NewPCG(1, 2))
+	noise := make([]byte, 500_000)
+	for i := range noise {
+		noise[i] = letters[rnd.IntN(len(letters))]
+	}
+	view := "CREATE MATERIALIZED VIEW page_daily\nORDER BY (page, day)\nPRIMARY KEY (page)\n" +
+		"AS SELECT page, toStartOfDay(event_time) AS day, count() AS views\nFROM page_views\n" +
+		"WHERE page != '" + string(noise) + "'\nGROUP BY page, day;\n"
+	if err := os.WriteFile(filepath.Join(dir, "dynaflux", "views.sql"), []byte(view), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshot(t, dir)
+	got := run(dir, "generate")
+	const want = "dynaflux.yaml:1:1: error DF6019: the catalog takes "
+	if got.status != 1 || got.stdout != "" || !strings.HasPrefix(got.stderr, want) ||
+		!strings.Contains(got.stderr, " bytes compressed, more than the 350000 that the meta table can store in one item\n") {
+		t.Errorf("got %+v\nwant status 1 and stderr starting with %q", got, want)
+	}
+	if after := snapshot(t, dir); !maps.EqualFunc(before, after, slices.Equal) {
+		t.Error("a refused generate changed files")
 	}
 }
 

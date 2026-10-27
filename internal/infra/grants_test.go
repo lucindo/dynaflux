@@ -28,7 +28,8 @@ func TestFunctionRole(t *testing.T) {
 }
 
 // IAM's * matches any run of characters, / included, and ? any one; every other character
-// matches itself. A condition holds when the request has its key with one of its values.
+// matches itself. A condition holds when the request has its key with one of its values, or
+// one that a StringLike value matches. The statements of the role's managed policies count.
 func TestAllowing(t *testing.T) {
 	t.Parallel()
 	m, err := buildWith(t, "store: analytics\nregions: [us-east-1]\n", "CREATE STREAM page_views (k String) PRIMARY KEY (k);", infra.Options{})
@@ -70,11 +71,11 @@ func TestAllowing(t *testing.T) {
 		{action: "iam:PassRole", arn: setupRole, keys: map[string]string{"iam:PassedToService": "lambda.amazonaws.com"}, want: []string{"Pass"}},
 		{action: "iam:PassRole", arn: setupRole, keys: map[string]string{"iam:PassedToService": "ec2.amazonaws.com"}},
 		{action: "iam:PassRole", arn: setupRole},
-		{action: "s3:ListBucket", arn: "arn:aws:s3:::b", wantErr: "infra: statement Listed: condition operator StringLike isn't supported"},
-		{
-			action: "s3:GetObject", arn: "arn:aws:s3:::b/k",
-			wantErr: "infra: ${ref:Bucket.arn}: Resolve resolves references to tables, delivery streams, archive workgroups and roles only",
-		},
+		{action: "s3:ListBucket", arn: "arn:aws:s3:::b", keys: map[string]string{"s3:prefix": "w/a/b"}, want: []string{"Listed"}},
+		{action: "s3:ListBucket", arn: "arn:aws:s3:::b", keys: map[string]string{"s3:prefix": "x/a"}},
+		{action: "s3:ListBucket", arn: "arn:aws:s3:::b"},
+		{action: "s3:GetObject", arn: "arn:aws:s3:::prod-analytics-123456789012-us-east-1-an/k", want: []string{"Objects"}},
+		{action: "s3:GetObject", arn: "arn:aws:s3:::dev-analytics-123456789012-us-east-1-an/k"},
 	}
 	for _, tt := range tests {
 		got, aerr := m.Allowing(role, d, tt.action, tt.arn, tt.keys)
@@ -85,5 +86,16 @@ func TestAllowing(t *testing.T) {
 		if !slices.Equal(got, tt.want) || gotErr != tt.wantErr {
 			t.Errorf("Allowing(%s, %s, %v) = %q, %q; want %q, %q", tt.action, tt.arn, tt.keys, got, gotErr, tt.want, tt.wantErr)
 		}
+	}
+	role.Managed = []infra.ManagedPolicy{{ID: "RolePolicy1", Statements: []infra.Statement{
+		{Sid: "Views", Actions: []string{"dynamodb:GetItem"}, Resources: []infra.Text{table + "v"}},
+	}}}
+	if got, aerr := m.Allowing(role, d, "dynamodb:GetItem", arn+"v", nil); aerr != nil || !slices.Equal(got, []string{"Views"}) {
+		t.Errorf("Allowing(dynamodb:GetItem, %sv) = %q, %v; want the managed policy's Views", arn, got, aerr)
+	}
+	role.Statements[4].Conditions[0].Operator = "ForAnyValue:StringLike"
+	_, err = m.Allowing(role, d, "s3:ListBucket", "arn:aws:s3:::b", map[string]string{"s3:prefix": "w/a"})
+	if want := "infra: statement Listed: condition operator ForAnyValue:StringLike isn't supported"; err == nil || err.Error() != want {
+		t.Errorf("Allowing with an unsupported operator fails with %v, want %q", err, want)
 	}
 }

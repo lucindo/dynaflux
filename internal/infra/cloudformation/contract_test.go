@@ -5,19 +5,26 @@ package cloudformation_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"go.yaml.in/yaml/v4"
 
+	"github.com/lucindo/dynaflux/internal/catalog/catalogtest"
 	"github.com/lucindo/dynaflux/internal/setup"
+	"github.com/lucindo/dynaflux/internal/store/mem"
+	"github.com/lucindo/dynaflux/internal/txtar"
 )
 
 // The custom resources of every golden regional.yaml, sent as CloudFormation sends them,
 // are requests that the setup function answers, with every attribute the template reads.
-// Neither package can rename a type, a property or an attribute alone.
+// Neither package can rename a type, a property or an attribute alone, and the catalog's
+// registration names the catalog that generate embeds in the runtime binary.
 func TestCustomResourceContract(t *testing.T) {
 	t.Parallel()
 	for name, regional := range goldenTemplates(t, "regional.yaml") {
@@ -49,7 +56,7 @@ func customResources(t *testing.T, name string, template []byte) map[string]setu
 		if !ok {
 			t.Fatalf("%s: %s has no properties", name, id)
 		}
-		h := setup.Handler{DynamoDB: acceptAll{}, Athena: acceptAll{}, Glue: acceptAll{}}
+		h := setup.Handler{DynamoDB: acceptAll{}, Athena: acceptAll{}, Glue: acceptAll{}, Meta: mem.New(), Catalog: caseCatalog(t, name)}
 		resp, err := h.Handle(t.Context(), setup.Request{Type: typ, Action: setup.ActionCreate, Props: props})
 		if err != nil {
 			t.Errorf("%s: %s: %v", name, id, err)
@@ -57,6 +64,22 @@ func customResources(t *testing.T, name string, template []byte) map[string]setu
 		replies[id] = resp
 	}
 	return replies
+}
+
+// caseCatalog returns the catalog of the golden case in file name, as generate embeds it.
+func caseCatalog(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("../testdata/cases", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsys := fstest.MapFS{}
+	for _, f := range txtar.Parse(data).Files {
+		if !strings.HasPrefix(f.Name, "want/") {
+			fsys[f.Name] = &fstest.MapFile{Data: f.Data}
+		}
+	}
+	return catalogtest.MarshalFS(t, fsys)
 }
 
 // sent returns a template value as CloudFormation sends it to a custom resource: scalars as
