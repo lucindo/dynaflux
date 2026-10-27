@@ -225,17 +225,19 @@ dynaflux/top_pages.sql:4:1: error DF4101: TopPages: view page_daily is partition
   run its full tier and its negative controls, as
   [docs/runbooks/simulation.md](docs/runbooks/simulation.md) describes.
 - `make integration` runs the packages that have `*_integration_test.go` files against
-  DynamoDB Local in Docker. It starts the container if it isn't running and leaves it
-  running for the next run; `make emulators-down` stops it and drops its tables. These
-  tests never call AWS: they reach DynamoDB Local at the loopback address in
+  DynamoDB Local in Docker. Each run recreates the container, which takes 1–2 s, so it
+  starts from an empty emulator: DynamoDB Local keeps about 200 MB from every run even after
+  the tests delete their tables, and its requests time out once it holds a few GB. Run one
+  at a time on a machine, because a second run would recreate the emulator under the first.
+  The container keeps running afterwards; `make emulators-down` stops it, and
+  `make emulators-up` starts it without recreating a running one, for tests you run by hand.
+  These tests never call AWS: they reach DynamoDB Local at the loopback address in
   `DYNAFLUX_DYNAMODB_ENDPOINT`, which the target sets, and fail without it. CI runs
-  `make verify` and `make integration` on every push and pull request. With DynamoDB Local
-  already running, the lane takes about 10 s on an Apple M2 Max, or 25 s with an empty
-  build cache; it must stay under 3 minutes. DynamoDB Local's memory grows with every run,
-  and after many runs its requests time out: `make emulators-down` resets it. `runtime`'s
-  tests also check every DynamoDB and Firehose call the projector made against the
-  projector's role in the templates: a call the role doesn't allow fails the run and, after
-  a run of all the tests, so does an action the role allows that no call used.
+  `make verify` and `make integration` on every push and pull request. The lane takes about
+  25 s on an Apple M2 Max, or 40 s with an empty build cache; it must stay under 3 minutes.
+  `runtime`'s tests also check every DynamoDB and Firehose call the projector made against
+  the projector's role in the templates: a call the role doesn't allow fails the run and,
+  after a run of all the tests, so does an action the role allows that no call used.
 
 ## License
 

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DynamoDB Local for the integration tests (docs/decisions/0009-emulator-choice.md).
-# `make emulators-up` starts it; tests reach it at http://127.0.0.1:8000.
+# `make emulators-up` starts it, `make integration` recreates it, and tests reach it at
+# http://127.0.0.1:8000.
 name: dynaflux-emulators
 
 services:

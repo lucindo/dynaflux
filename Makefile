@@ -182,8 +182,10 @@ sim-seed: ## Rerun one simulation seed verbosely: make sim-seed SCENARIO=faults 
 
 # === Integration
 
-# DynamoDB Local in Docker (docs/decisions/0009-emulator-choice.md). The container is shared
-# by every run on the machine, so no target here stops it except emulators-down.
+# DynamoDB Local in Docker (docs/decisions/0009-emulator-choice.md). emulators-up leaves a
+# running container alone, so tests run by hand can share it. integration recreates it: DynamoDB
+# Local keeps about 200 MB from each run, even after the tests delete their tables, and its
+# requests time out once it holds a few GB. No target stops it but emulators-down.
 EMULATORS_COMPOSE := scripts/emulators/compose.yaml
 DYNAMODB_ENDPOINT := http://127.0.0.1:8000
 
@@ -196,7 +198,9 @@ emulators-down: ## Stop DynamoDB Local and drop its tables.
 	docker compose --file $(EMULATORS_COMPOSE) down
 
 # Packages are found by their *_integration_test.go files, so a new one needs no edit here.
-integration: emulators-up ## Run the tests of every package with a *_integration_test.go file against DynamoDB Local.
+integration: ## Run the tests of every package with a *_integration_test.go file against a fresh DynamoDB Local.
+	$(call require_cmd,docker,brew install --cask docker)
+	scripts/emulators/up.sh --fresh
 	@set -euo pipefail; \
 	pkgs="$$(go list -tags integration -f '{{.ImportPath}} {{.TestGoFiles}} {{.XTestGoFiles}}' ./... | \
 		awk '/_integration_test\.go/ { print $$1 }')"; \
