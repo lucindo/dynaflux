@@ -13,7 +13,6 @@ import (
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/keys"
-	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
 )
@@ -34,8 +33,8 @@ const (
 func liveHandoff(t *testing.T) *handoff {
 	t.Helper()
 	h := newHandoff(t)
-	h.setState(t, siteTotals, meta.Activating)
-	h.setState(t, siteTotals, meta.Live)
+	h.activate(t, siteTotals, "page_views")
+	h.makeLive(t, siteTotals)
 	return h
 }
 

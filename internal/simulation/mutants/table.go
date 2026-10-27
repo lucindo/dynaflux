@@ -32,18 +32,23 @@ const (
 	eval          = "internal/projector/eval.go"
 	handle        = "internal/projector/handle.go"
 	unit          = "internal/meta/unit.go"
+	cache         = "internal/meta/cache.go"
+	metaPackage   = "./internal/meta"
 	appendGo      = "internal/engine/append.go"
-	driver        = "internal/simulation/backfill.go"
+	step          = "internal/backfill/step.go"
+	backfillPkg   = "./internal/backfill"
 	core          = "./internal/projector"
 	region        = "internal/simulation/region.go"
 	killBoundary  = "TestKillBoundary"
 	kill          = "!now.Before(inv.deadline)"
-	breaks        = "opened, err := c.meta.MarkBroken(ctx, v.id, f)"
+	breaks        = "vs, opened, err := c.meta.MarkBroken(ctx, v.id, v.def.Stream, f)"
 	faults        = "faults"
 	poison        = "poison"
 	handoff       = "handoff"
 	d23a          = "d23a"
 	regions       = "regions"
+	guards        = "guards"
+	retire        = "retire"
 	pruneBoundary = "TestPruneBoundary"
 	lateProgress  = "TestLateProgress"
 	always        = "if true {"
@@ -53,7 +58,10 @@ const (
 	archive       = "\tif err = c.archive(ctx, b, recs); err != nil {\n\t\treturn err\n\t}"
 	applies       = "if r := &recs[i]; r.Op == Insert {"
 	noInsert      = "if inserts == 0 {" // a batch without an INSERT returns early
-	statesAt      = "statesAt time.Time                 // when the read that returned states was sent"
+	stateCache    = "states *meta.StateCache"
+	stampedAhead  = "TestStateCacheRereadsStatesStampedAhead"
+	g3            = `if unknown != "" {`
+	never         = "if false {"
 	fence         = "\t\tif _, ok := u.Fences[version]; ok {\n\t\t\treturn u, nil\n\t\t}"
 	// fenceBody follows fence in EnsureFence, up to the fence's value.
 	fenceBody = `
@@ -61,35 +69,44 @@ const (
 		next.Fences = make(map[string]string, len(u.Fences)+1)
 		maps.Copy(next.Fences, u.Fences)
 		next.Fences[version] = cmp.Or(`
-	watermark  = "for !c.rg.archive.completeThrough(cut, time.Now()) {"
-	ownerKind  = "keys.Owner(g.owner, m.ct.unitKey, m.ct.seq)"
-	selectHead = `	recs := c.read()
-	var sel []projector.BackfillRecord
-	if !c.do("select", func() error {
-		fences, err := c.fences(unitsOf(recs))`
-	skipPoison = `			if _, err = c.breakVersion(ctx, v, r, vals, err); err != nil {
+	skipPoison = `			if _, err = c.breakVersion(ctx, v, r, meta.CauseRecord, err); err != nil {
 				return err
 			}
-			return fmt.Errorf("projector: backfill of %s: unit %s record %s: %w", version, r.unit, r.Seq, ErrBroken)`
-	applyChunks = `	for chunk := range slices.Chunk(sel, r.sc.Backfill.Chunk) {
-		if !c.do("apply", func() error { return c.apply(chunk) }) {
-			return
+			return fmt.Errorf("projector: backfill of %s: %s: %w", version, r.name(), ErrBroken)`
+	// applyLoop is apply's loop over chunks.
+	applyLoop = `	for s.left() {
+		wait, end, cerr := s.applyChunk(ctx, m, j.Stream)
+		if cerr != nil || wait > 0 || end {
+			return wait, false, cerr
 		}
 	}`
+	fenceUnits  = "cut, fences, err := s.env.Meta.FenceUnits(ctx, j.Stream, s.version, s.env.Bounds, s.lister(j.Stream))"
+	freshCheck  = "if fresh, _, err = CheckStream(ctx, s.env.Tables, s.env.Store, s.env.Naming.StreamTable(j.Stream)); err != nil {"
+	readFence   = "u, err := s.env.Meta.Unit(ctx, stream, rec.unit)"
+	earlyKey    = `fmt.Sprintf("%p %s", s.env.Meta, s.version)`
+	syncImport  = "\t\"log/slog\"\n\t\"time\""
+	earlyStore  = "var early sync.Map\n\nvar (\n\terrNotOwner"
+	errNotOwner = "var (\n\terrNotOwner"
+	fresh       = "fresh"
+	resume      = "resume"
+	timesplit   = "timesplit"
+	splitLate   = "timesplit-late"
 )
 
 // The properties that controls break.
 const (
-	p1 = "P1:"
-	p3 = "P3:"
-	p4 = "P4:"
-	p6 = "P6:"
-	p7 = "P7:"
+	p1  = "P1:"
+	p3  = "P3:"
+	p4  = "P4:"
+	p6  = "P6:"
+	p7  = "P7:"
+	p10 = "P10:"
 )
 
 func table() []control {
 	cs := slices.Concat(liveControls(), regionControls(), fenceControls(), handoffControls(), backfillControls(),
-		orderControls(), applyControls(), pruneControls(), progressControls(), replayControls())
+		orderControls(), applyControls(), pruneControls(), progressControls(), guardControls(), jobControls(),
+		tableControls(), replayControls())
 	return append(cs, rerunOnD23a(cs)...)
 }
 
@@ -171,11 +188,11 @@ func liveControls() []control {
 		{
 			ID:   "C24a", // an evaluation error fails the batch
 			File: handle,
-			Old:  "err := rs.add(v, r, vals, bad)",
-			New: `if err := rs.add(v, r, vals, bad); err != nil {
+			Old:  "if err = rs.add(v, r, vals, bad); err != nil {",
+			New: `if err = rs.add(v, r, vals, bad); err != nil {
 			return err
 		}
-		var err error`,
+		if false {`,
 			Scenario: poison,
 			Seeds:    20,
 			Want:     p6,
@@ -183,25 +200,14 @@ func liveControls() []control {
 		{
 			ID:   "C24b", // an evaluation error opens every view's breaker
 			File: handle,
-			Old: `opened, err := c.breakVersion(ctx, v, r, vals, err)
-		if err != nil {
-			return err
-		}
-		if opened {
-			st.Broken = append(st.Broken, v.id)
-		}
-		broken[v] = true`,
+			Old:  "if err = c.open(ctx, v, r, meta.CauseRecord, err, broken, st); err != nil {",
 			New: `cause := err
-		for _, v := range rc.views {
-			opened, err := c.breakVersion(ctx, v, r, vals, cause)
-			if err != nil {
-				return err
+			for _, v := range rc.views {
+				if err = c.open(ctx, v, r, meta.CauseRecord, cause, broken, st); err != nil {
+					return err
+				}
 			}
-			if opened {
-				st.Broken = append(st.Broken, v.id)
-			}
-			broken[v] = true
-		}`,
+			if false {`,
 			Scenario: poison,
 			Seeds:    20,
 			Want:     p3,
@@ -269,8 +275,8 @@ func regionControls() []control {
 		{
 			ID:       "C26", // Handle returns with row writes in flight
 			File:     apply,
-			Old:      "\trows := logicalRows(groups)\n\tfanOut(len(rows), func(r int) {",
-			New:      "\trows := logicalRows(groups)\n\tgo fanOut(len(rows), func(r int) {",
+			Old:      "\trows := logicalRows(groups)\n\tfanOut(len(rows), parallel, func(r int) {",
+			New:      "\trows := logicalRows(groups)\n\tgo fanOut(len(rows), parallel, func(r int) {",
 			Scenario: faults,
 			Seeds:    20,
 			Want:     p7,
@@ -303,7 +309,7 @@ func fenceControls() []control {
 			ID:       "C5", // progress advances past a fence for a version the batch didn't apply
 			File:     unit,
 			Old:      "if !covered(v) {",
-			New:      "if false {",
+			New:      never,
 			Scenario: handoff,
 			Seeds:    100,
 			Want:     p1,
@@ -311,26 +317,25 @@ func fenceControls() []control {
 		{
 			ID:   "C6", // a fence from the progress read before a write that lost the race
 			File: unit,
-			Old:  "\tfor range maxAttempts {\n" + fence + fenceBody + "u.Progress, zeroFence())",
-			New:  "\tread := u.Progress\n\tfor range maxAttempts {\n" + fence + fenceBody + "read, zeroFence())",
+			Old:  "\tfor range maxAttempts {\n" + fence + fenceBody + "u.Progress, ZeroFence())",
+			New:  "\tread := u.Progress\n\tfor range maxAttempts {\n" + fence + fenceBody + "read, ZeroFence())",
 			Test: "TestRecordArchivedWhileFencingReachesTheBackfill",
 		},
 		{
 			ID:   "C17", // units listed as soon as the version is activating
 			File: unit,
-			Old:  "waitUntil(ctx, vs.ActivatedAt.Add(ListingDelay))",
+			Old:  "waitUntil(ctx, vs.ActivatedAt.Add(b.Listing))",
 			New:  "waitUntil(ctx, vs.ActivatedAt)",
 			Test: "TestUnitsAreListedOnceEveryCoreSawTheActivation",
 		},
 		{
-			ID:   "C29", // a finished backfill makes a broken version live
-			File: "internal/meta/view.go",
-			Old:  "case s == Live && vs.State == Activating:",
-			New: `case s == Live && (vs.State == Activating || vs.State == Broken):
-			vs.Failure = nil`,
-			Scenario: handoff,
-			Seeds:    100,
-			Want:     p3,
+			ID:      "C29", // a finished backfill makes a broken version live
+			File:    "internal/meta/view.go",
+			Old:     "if vs.State != Activating {",
+			New:     "if vs.State != Activating && vs.State != Broken {",
+			More:    [][2]string{{"vs.State = Live\n", "vs.State, vs.Failure = Live, nil\n"}},
+			Test:    "TestStepEndsBrokenOnAVersionBrokenWhileItApplies",
+			Package: backfillPkg,
 		},
 		{
 			ID:   "C30", // a retried write's own fence is taken for a lost race
@@ -348,27 +353,35 @@ func fenceControls() []control {
 		},
 		{
 			ID:      "C37", // cached view states never expire
-			File:    handle,
-			Old:     "age < meta.MaxViewStateAge",
+			File:    cache,
+			Old:     "age < MaxViewStateAge",
 			New:     "age < 1<<62",
 			Test:    "TestHandleAppliesFencedVersionAboveItsFence",
 			Package: core,
 		},
 		{
 			ID:      "C50", // the view states' age is on the monotonic clock, which a freeze stops
-			File:    handle,
+			File:    cache,
 			Old:     "sent := time.Now().Round(0)",
 			New:     "sent := time.Now()",
-			Test:    "TestHandleRereadsStatesStampedAhead",
-			Package: core,
+			Test:    stampedAhead,
+			Package: metaPackage,
 		},
 		{
 			ID:      "C51", // cached view states stamped ahead, by a clock that stepped back, are fresh
-			File:    handle,
+			File:    cache,
 			Old:     "age >= 0 && ",
 			New:     "",
-			Test:    "TestHandleRereadsStatesStampedAhead",
-			Package: core,
+			Test:    stampedAhead,
+			Package: metaPackage,
+		},
+		{
+			ID:      "C24d", // a state read that lands after a breaker opened closes it again
+			File:    cache,
+			Old:     "for version, vs := range c.states {",
+			New:     "for version, vs := range map[string]ViewState(nil) {",
+			Test:    "TestStateCacheKeepsAStateSetDuringARead",
+			Package: metaPackage,
 		},
 	}
 }
@@ -409,28 +422,43 @@ func backfillControls() []control {
 		{ID: "H2", Scenario: handoff, Seeds: 100, Want: p1}, // the archive's watermark lies
 		{
 			ID:   "C14", // each unit's records in turn, as parallel workers per unit interleave
-			File: driver,
-			Old:  applyChunks,
-			New: `	var units [][]projector.BackfillRecord
-	for i, rec := range sel {
-		if i == 0 || rec.Unit != sel[i-1].Unit {
-			units = append(units, nil)
+			File: step,
+			Old:  applyLoop,
+			New: `	byUnit, order := map[string][]projector.BackfillRecord{}, []string(nil)
+	for {
+		rec, ok, err := m.next(ctx)
+		if err != nil {
+			return 0, false, err
 		}
-		units[len(units)-1] = append(units[len(units)-1], rec)
+		if !ok {
+			break
+		}
+		keep, err := s.keeps(ctx, j.Stream, &rec)
+		if err != nil {
+			return 0, false, err
+		}
+		if !keep {
+			continue
+		}
+		if _, seen := byUnit[rec.unit]; !seen {
+			order = append(order, rec.unit)
+		}
+		byUnit[rec.unit] = append(byUnit[rec.unit], projector.BackfillRecord{Unit: rec.unit, Seq: rec.seq, Item: rec.item})
 	}
-	for len(units) > 0 {
-		var left [][]projector.BackfillRecord
-		for _, recs := range units {
-			n := min(len(recs), r.sc.Backfill.Chunk)
-			if !c.do("apply", func() error { return c.apply(recs[:n]) }) {
-				return
+	for len(order) > 0 {
+		var left []string
+		for _, u := range order {
+			n := min(len(byUnit[u]), s.env.Chunk)
+			if err := s.applyRecords(ctx, byUnit[u][:n]); err != nil {
+				return 0, false, err
 			}
-			if n < len(recs) {
-				left = append(left, recs[n:])
+			if byUnit[u] = byUnit[u][n:]; len(byUnit[u]) > 0 {
+				left = append(left, u)
 			}
 		}
-		units = left
-	}`,
+		order = left
+	}
+	return 0, false, s.moveCursor(ctx, chunk{end: true})`,
 			Scenario: handoff,
 			Seeds:    100,
 			Want:     p1,
@@ -444,9 +472,17 @@ func backfillControls() []control {
 			New: `	case AggCount, AggMin, AggMax, AggArgMax, AggArgMin, AggAny, AggUniq, AggUniqExact:
 		return true
 	case AggSum,`,
-			Scenario: handoff,
-			Seeds:    50,
-			Want:     p1,
+			// The harness backfills no view whose only additive aggregate is count.
+			Test:    "TestFencedHandoff",
+			Package: "./internal/catalog",
+		},
+		{
+			ID:      "C70", // uniqExact versions skip the fenced handoff, as other idempotent ones do
+			File:    "internal/catalog/view.go",
+			Old:     "return !a.Fn.Idempotent() || a.Fn == AggUniqExact",
+			New:     "return !a.Fn.Idempotent()",
+			Test:    "TestStepUniqExactTakesASplit",
+			Package: backfillPkg,
 		},
 		{
 			ID:       "C27", // a MODIFY's new image is archived too
@@ -468,10 +504,24 @@ func backfillControls() []control {
 			Want:     p3,
 		},
 		{
-			ID:       "C28", // fences only for the units the backfill listed
-			File:     driver,
-			Old:      "c.fences(unitsOf(recs))",
-			New:      "c.fences(c.listed)",
+			ID:   "C28", // fences only for the units a listing returns
+			File: step,
+			Old:  readFence,
+			New: `listed, err := s.env.Units.Units(ctx, s.env.Naming.StreamTable(stream))
+		u := meta.Unit{}
+		if err == nil && slices.Contains(listed, rec.unit) {
+			u, err = s.env.Meta.Unit(ctx, stream, rec.unit)
+		}`,
+			More:     [][2]string{{syncImport, "\t\"log/slog\"\n\t\"slices\"\n\t\"time\""}},
+			Scenario: handoff,
+			Seeds:    100,
+			Want:     p1,
+		},
+		{
+			ID:       "C68", // the archive read skips the error prefix
+			File:     "internal/simulation/archive.go",
+			Old:      "for _, prefix := range []string{prefixDelivered, prefixErrors} {",
+			New:      "for _, prefix := range []string{prefixDelivered} {",
 			Scenario: handoff,
 			Seeds:    100,
 			Want:     p1,
@@ -486,9 +536,9 @@ func orderControls() []control {
 	return []control{
 		{
 			ID:       "C7", // the backfill reads the archive without waiting for its watermark
-			File:     driver,
-			Old:      watermark,
-			New:      "_ = cut\n\tfor false {",
+			File:     step,
+			Old:      "ok, err := s.env.Archive.Complete(ctx, j.Stream, j.Cut)",
+			New:      "ok, err := true, error(nil)",
 			Scenario: handoff,
 			Seeds:    100,
 			Want:     p1,
@@ -496,54 +546,36 @@ func orderControls() []control {
 		{
 			ID:   "C34", // the cut is taken before the fences are written
 			File: unit,
-			Old: `	for _, id := range unitIDs {
-		u, uerr := m.Unit(ctx, stream, id)
-		if uerr == nil {
-			_, uerr = m.EnsureFence(ctx, u, version)
-		}
-		if uerr != nil {
-			return time.Time{}, uerr
-		}
-	}
-	return time.Now(), nil`,
-			New: `	cut := time.Now()
-	for _, id := range unitIDs {
-		u, uerr := m.Unit(ctx, stream, id)
-		if uerr == nil {
-			_, uerr = m.EnsureFence(ctx, u, version)
-		}
-		if uerr != nil {
-			return time.Time{}, uerr
-		}
-	}
-	return cut, nil`,
+			Old:  "\tfences := make(map[string]string, len(unitIDs))\n",
+			New:  "\tcut := time.Now()\n\tfences := make(map[string]string, len(unitIDs))\n",
+			More: [][2]string{{"return time.Now(), fences, nil", "return cut, fences, nil"}},
 			Test: "TestRecordArchivedWhileFencingReachesTheBackfill",
 		},
 		{
 			ID:   "C35", // the fences are read at the cut, before the archive
-			File: driver,
-			Old:  watermark + "\n\t\ttime.Sleep(watermarkPoll)\n\t\tr.sched.gate(c.id, \"watermark\")\n\t}\n" + selectHead,
-			New: `var early map[string]string
-	c.do("fences", func() error {
-		var units []string
-		for _, u := range c.stream.units {
-			units = append(units, u.id)
-		}
+			File: step,
+			Old:  "s.fences = fences\n",
+			New:  "s.fences = fences\n\tearly.Store(" + earlyKey + ", fences)\n",
+			More: [][2]string{
+				{readFence, `var u meta.Unit
 		var err error
-		early, err = c.fences(units)
-		return err
-	})
-	` + watermark + "\n\t\ttime.Sleep(watermarkPoll)\n\t\tr.sched.gate(c.id, \"watermark\")\n\t}\n" +
-				strings.Replace(selectHead, "c.fences(unitsOf(recs))", "early, error(nil)", 1),
+		if f, ok := early.Load(` + earlyKey + `); ok {
+			if fence, fenced := f.(map[string]string)[rec.unit]; fenced {
+				u.Fences = map[string]string{s.version: fence}
+			}
+		}`},
+				{errNotOwner, earlyStore},
+				{syncImport, "\t\"log/slog\"\n\t\"sync\"\n\t\"time\""},
+			},
 			Scenario: handoff,
 			Seeds:    50,
 			Want:     p1,
 		},
 		{
 			ID:       "C36", // a finished backfill leaves the version activating
-			File:     driver,
-			Old:      `if c.do("live", func() error { return c.meta.SetViewState(c.ctx, c.version, meta.Live) }) {`,
-			New:      always,
+			File:     step,
+			Old:      "if err = s.env.Meta.MakeLive(ctx, s.version, since); err != nil {\n\t\treturn err\n\t}\n\tif err = s.env.Runs.DeletePrefix",
+			New:      "_ = since\n\tif err = s.env.Runs.DeletePrefix",
 			Scenario: handoff,
 			Seeds:    20,
 			Want:     p6,
@@ -558,7 +590,7 @@ func applyControls() []control {
 			ID:      "C31a", // the backfill skips a record whose evaluation fails
 			File:    backfill,
 			Old:     skipPoison,
-			New:     "\t\t\tcontinue",
+			New:     "\t\t\t_ = meta.CauseRecord\n\t\t\tcontinue",
 			Test:    "TestApplyBackfillOpensTheBreaker",
 			Package: core,
 		},
@@ -566,27 +598,10 @@ func applyControls() []control {
 			ID:       "C31b", // the same, where a poison record only the backfill sees
 			File:     backfill,
 			Old:      skipPoison,
-			New:      "\t\t\tcontinue",
+			New:      "\t\t\t_ = meta.CauseRecord\n\t\t\tcontinue",
 			Scenario: handoff,
 			Seeds:    100,
 			Want:     p3,
-		},
-		{
-			ID:      "C32a", // the backfill's uniqExact markers have live owners
-			File:    apply,
-			Old:     ownerKind,
-			New:     "keys.Owner(keys.OwnerLive, m.ct.unitKey, m.ct.seq)",
-			Test:    "TestLiveAndBackfillCountAValueOnce",
-			Package: core,
-		},
-		{
-			ID:       "C32b", // the same, in user_latest's pages, unless poison broke the view
-			File:     apply,
-			Old:      ownerKind,
-			New:      "keys.Owner(keys.OwnerLive, m.ct.unitKey, m.ct.seq)",
-			Scenario: handoff,
-			Seeds:    50,
-			Want:     p1,
 		},
 		{
 			ID:       "C39", // the backfill applies a record its row's mark B already holds
@@ -689,9 +704,9 @@ func progressControls() []control {
 		{
 			ID:   "C11", // skip by progress a container read up to one lifetime ago
 			File: handle,
-			Old:  statesAt,
-			New:  statesAt + "\n\tprogress     map[string]string\n\tprogressRead map[string]time.Time",
-			More: [][2]string{{skip, `	c.mu.Lock()
+			Old:  stateCache,
+			New:  stateCache + "\n\tmu           sync.Mutex\n\tprogress     map[string]string\n\tprogressRead map[string]time.Time",
+			More: [][2]string{{"\t\"strings\"\n", "\t\"strings\"\n\t\"sync\"\n"}, {skip, `	c.mu.Lock()
 	if read, ok := c.progressRead[b.Unit]; !ok || time.Since(read) > c.lifetime {
 		if c.progress == nil {
 			c.progress, c.progressRead = map[string]string{}, map[string]time.Time{}
@@ -715,8 +730,8 @@ func progressControls() []control {
 		{
 			ID:       "C13", // progress_at is when the advancing invocation started
 			File:     handle,
-			Old:      "c.apply(rowCtx, ctx, b, s, recs, deadline, &res)",
-			New:      "c.apply(rowCtx, ctx, b, s, recs, time.Now(), &res)",
+			Old:      "c.apply(rowCtx, ctx, b, s, recs, start, deadline, &res)",
+			New:      "c.apply(rowCtx, ctx, b, s, recs, start, time.Now(), &res)",
 			Scenario: d23a,
 			Seeds:    100,
 			Want:     p1,
@@ -731,8 +746,8 @@ func progressControls() []control {
 		{
 			ID:   "C18", // W = L + m − 1: a progress write that lands m late reaches a pruned row
 			File: handle,
-			Old:  "lifetime: w - catalog.LifetimeMarginSeconds*time.Second,",
-			New:  "lifetime: w - (catalog.LifetimeMarginSeconds-1)*time.Second,",
+			Old:  "lifetime:     w - catalog.LifetimeMarginSeconds*time.Second,",
+			New:  "lifetime:     w - (catalog.LifetimeMarginSeconds-1)*time.Second,",
 			Test: lateProgress,
 		},
 		{
@@ -772,6 +787,263 @@ func progressControls() []control {
 			New:     "c.advance(ctx, rc, recs, failed, deadline)",
 			Test:    "TestHandleStopsSendingAtTheCutoff",
 			Package: core,
+		},
+	}
+}
+
+// guardControls returns the controls of activation's guards and of retired versions (ADR 0012).
+func guardControls() []control {
+	return []control{
+		{
+			ID:       "C52", // no G3: a build without an activating version applies its stream's records
+			File:     handle,
+			Old:      g3,
+			New:      never,
+			Scenario: guards,
+			Seeds:    100,
+			Want:     p1,
+		},
+		{
+			// FenceUnits only for additive versions, cut right after activation for the others.
+			// Seeds of guards catch it seldom: a batch of an older build must read its unit
+			// before the activation and move its progress after the cut.
+			ID:   "C53",
+			File: step,
+			Old:  fenceUnits,
+			New: `cut, fences, err := time.Now(), map[string]string{}, error(nil)
+	if vv, ok := s.env.Catalog.Version(s.version); ok && vv.FencedHandoff() {
+		cut, fences, err = s.env.Meta.FenceUnits(ctx, j.Stream, s.version, s.env.Bounds, s.lister(j.Stream))
+	}`,
+			Test:    "TestStepFencesEveryVersion",
+			Package: backfillPkg,
+		},
+		{
+			ID:       "C54", // no G3: a rollback to a build without a live version
+			File:     handle,
+			Old:      g3,
+			New:      never,
+			Scenario: "rollback",
+			Seeds:    100,
+			Want:     p1,
+		},
+		{
+			ID:       "C55", // a build that lists a live version as retired skips it without its tombstone
+			File:     handle,
+			Old:      "vs, err := c.meta.Retire(ctx, id, states[id].Stream)",
+			New:      "vs, err := meta.ViewState{Version: id, State: meta.Retired}, error(nil)",
+			Scenario: retire,
+			Seeds:    100,
+			Want:     p1,
+		},
+		{
+			ID:       "C55b", // covered ignores a retired state
+			File:     handle,
+			Old:      "state == meta.Broken || state == meta.Retired ||",
+			New:      "state == meta.Broken ||",
+			Scenario: retire,
+			Seeds:    100,
+			Want:     p6,
+		},
+		{
+			ID:      "C55d", // a build applies an additive version split neither at fences nor by time
+			File:    handle,
+			Old:     `if split != "" {`,
+			New:     never,
+			Test:    "TestHandleFailsOnASplitItDoesNotApply",
+			Package: core,
+		},
+		{
+			ID:       "C55c", // a build that defines a retired version applies it
+			File:     handle,
+			Old:      "case meta.Broken, meta.Retired:\n\t\tcase meta.Activating, meta.Live:",
+			New:      "case meta.Broken:\n\t\tcase meta.Activating, meta.Live, meta.Retired:",
+			Scenario: retire,
+			Seeds:    100,
+			Want:     p1,
+		},
+	}
+}
+
+// jobControls returns the controls of a backfill job's fresh rule (lifecycle.md §4.3) and of
+// its cursor and order across attempts (ADR 0011 §3).
+func jobControls() []control {
+	return []control{
+		{
+			ID:       "C56", // the fresh rule without F3: listed units without progress are enough
+			File:     step,
+			Old:      freshCheck,
+			New:      "if err != nil {",
+			Scenario: fresh,
+			Seeds:    100,
+			Want:     p1,
+		},
+		{
+			ID:   "C57", // F3's scan is sent right after the activation, before the fences
+			File: step,
+			Old:  fenceUnits,
+			New: "early, _, _ := CheckStream(ctx, s.env.Tables, s.env.Store, s.env.Naming.StreamTable(j.Stream))\n\tbeforeFences.Store(" +
+				earlyKey + ", early)\n\t" + fenceUnits,
+			More: [][2]string{
+				{freshCheck, "if v, ok := beforeFences.Load(" + earlyKey + "); ok {\n\t\t\tfresh = v.(bool)\n\t\t}\n\t\tif err != nil {"},
+				{errNotOwner, "var beforeFences sync.Map\n\nvar (\n\terrNotOwner"},
+				{syncImport, "\t\"log/slog\"\n\t\"sync\"\n\t\"time\""},
+			},
+			Test:    "TestStepFreshScansAfterTheFences",
+			Package: backfillPkg,
+		},
+		{
+			ID:      "C58", // F1 dropped: a fence above zero doesn't stop the fresh rule
+			File:    step,
+			Old:     "fresh := zeroFences(fences)",
+			New:     "fresh := len(fences) >= 0",
+			Test:    "TestStepFreshStream",
+			Package: backfillPkg,
+		},
+		{
+			ID:      "C69", // a staged run claims export files whose runs a restage dropped
+			File:    "internal/backfill/archive.go",
+			Old:     "if slices.ContainsFunc(*held, func(name string) bool { return !listed(name) }) {",
+			New:     never,
+			Test:    "TestStepStagesAgainAfterARestageItDidNotSee",
+			Package: backfillPkg,
+		},
+		{
+			ID:       "C66", // the cursor is stored before the chunk's rows succeeded
+			File:     step,
+			Old:      "\tif err = s.applyRecords(ctx, c.recs); err != nil {\n\t\treturn 0, false, err\n\t}\n\treturn 0, c.end, s.moveCursor(ctx, c)",
+			New:      "\tif err = s.moveCursor(ctx, c); err != nil {\n\t\treturn 0, false, err\n\t}\n\treturn 0, c.end, s.applyRecords(ctx, c.recs)",
+			Scenario: resume,
+			Seeds:    50,
+			Want:     p1,
+		},
+		{
+			ID:   "C67", // a worker of a resumed attempt walks its chunks backwards
+			File: step,
+			Old:  applyLoop,
+			New: `	if s.attempt > 1 {
+		var chunks []chunk
+		for {
+			c, err := s.nextChunk(ctx, m, j.Stream)
+			if err != nil {
+				return 0, false, err
+			}
+			chunks = append(chunks, c)
+			if c.end {
+				break
+			}
+		}
+		for i := len(chunks) - 1; i >= 0; i-- {
+			if err := s.applyRecords(ctx, chunks[i].recs); err != nil {
+				return 0, false, err
+			}
+			if err := s.moveCursor(ctx, chunks[i]); err != nil {
+				return 0, false, err
+			}
+		}
+		return 0, false, nil
+	}
+` + applyLoop,
+			Scenario: resume,
+			Seeds:    50,
+			Want:     p1,
+		},
+	}
+}
+
+// tableControls returns the controls of the table source and its time split (lifecycle.md
+// §5.1, ADR 0011 §6).
+func tableControls() []control {
+	return []control{
+		{
+			ID:       "C59", // live projection applies an INSERT at or before the split time too
+			File:     handle,
+			Old:      "case at > vs.SplitAt.UnixMicro():",
+			New:      "case true:",
+			Scenario: timesplit,
+			Seeds:    20,
+			Want:     p1,
+		},
+		{
+			ID:       "C60", // ε = 0 while writer clocks are off
+			File:     "internal/meta/meta.go",
+			Old:      "Skew: 5 * time.Minute,",
+			New:      "Skew: 0,",
+			Scenario: timesplit,
+			Seeds:    100,
+			Want:     p1,
+		},
+		{
+			ID:       "C61", // the table is read at the split time, before its late bound and the clock margin
+			File:     step,
+			Old:      "readAfter = vs.SplitLate.Add(s.env.Bounds.Clock)",
+			New:      "readAfter = vs.SplitAt",
+			Scenario: timesplit,
+			Seeds:    50,
+			Want:     p1,
+		},
+		{
+			ID:       "C62", // no late check
+			File:     handle,
+			Old:      "case !start.Before(vs.SplitLate):",
+			New:      "case false:",
+			Scenario: splitLate,
+			Seeds:    100,
+			Want:     p10,
+		},
+		{
+			ID:       "C63", // no check of a MODIFY that straddles the split time
+			File:     handle,
+			Old:      "if err == nil && (from <= b) == (to <= b) {",
+			New:      always,
+			Scenario: splitLate,
+			Seeds:    100,
+			Want:     p10,
+		},
+		{
+			ID:       "C64", // G3 only for batches with an INSERT
+			File:     handle,
+			Old:      "states, err := c.viewStates(ctx, s.Def.Name, false)",
+			New:      "states, err := c.states.States(ctx, false)",
+			Scenario: splitLate,
+			Seeds:    100,
+			Want:     p10,
+		},
+		{
+			ID:      "C72", // no clock margin: the table is read at the late bound by the worker's clock
+			File:    step,
+			Old:     "readAfter = vs.SplitLate.Add(s.env.Bounds.Clock)",
+			New:     "readAfter = vs.SplitLate",
+			Test:    "TestStepTimeSplitAcrossClocks",
+			Package: backfillPkg,
+		},
+		{
+			ID:       "C71", // the late bound without L: split_late is the split time plus ε
+			File:     "internal/meta/view.go",
+			Old:      "vs.SplitLate = stamp(vs.SplitAt.Add(b.Skew + b.Landing))",
+			New:      "vs.SplitLate = stamp(vs.SplitAt.Add(b.Skew))",
+			Scenario: timesplit,
+			Seeds:    20,
+			Want:     p10,
+		},
+		{
+			// A table source not split is read at the activation, before every projector knows
+			// the version. Seeds of guards-table catch it seldom: the batch of an older build
+			// must take the only record of a row.
+			ID:      "C73",
+			File:    step,
+			Old:     "readAfter := vs.ActivatedAt.Add(s.env.Bounds.Listing)",
+			New:     "readAfter := vs.ActivatedAt",
+			Test:    "TestStepNoSplit",
+			Package: backfillPkg,
+		},
+		{
+			ID:       "C65", // runs named by their input and rewritten, not committed
+			File:     "internal/backfill/merge.go",
+			Old:      `return fmt.Sprintf("runs/%d-%s%s", j.Attempt, hex.EncodeToString(b[:]), suffix), nil`,
+			New:      `return fmt.Sprintf("runs/%d-%d%s%.0s", j.Attempt, len(j.Runs), suffix, hex.EncodeToString(b[:])), nil`,
+			Scenario: "table",
+			Seeds:    100,
+			Want:     p1,
 		},
 	}
 }

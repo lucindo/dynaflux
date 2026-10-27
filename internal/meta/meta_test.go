@@ -144,11 +144,18 @@ func TestItemLayout(t *testing.T) {
 		if _, err := m.EnsureFence(ctx, readUnit(t, m, "shardId-1"), version); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.SetViewState(ctx, version, meta.Activating); err != nil {
+		if _, err := m.Activate(ctx, version, stream, meta.SplitTime, meta.DefaultBounds); err != nil {
 			t.Fatal(err)
 		}
-		f := meta.Failure{Unit: "shardId-1", Seq: seq(7), EventID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Error: "division by zero", At: bubbleStart.Add(time.Second)}
-		if _, err := m.MarkBroken(ctx, version, f); err != nil {
+		if err := m.MakeLive(ctx, version, bubbleStart.Add(-24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		f := meta.Failure{Cause: meta.CauseRecord, Unit: "shardId-1", Seq: seq(7), EventID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Error: "division by zero", At: bubbleStart.Add(time.Second)}
+		if _, _, err := m.MarkBroken(ctx, version, stream, f); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Minute)
+		if _, err := m.Retire(ctx, version, stream); err != nil {
 			t.Fatal(err)
 		}
 
@@ -163,18 +170,25 @@ func TestItemLayout(t *testing.T) {
 			"_ttl":        n("981248400"), // 2000-01-01 + 400 days + 3600 s
 		})
 		wantItem(t, b, store.Item{
-			"pk":           s("view"),
-			"sk":           s(version),
-			"state":        s("broken"),
-			"activated_at": n("946684800000000"),
+			"pk":            s("view"),
+			"sk":            s(version),
+			"state":         s("retired"),
+			"stream":        s(stream),
+			"activated_at":  n("946684800000000"),
+			"split":         s("time"),
+			"split_at":      n("946685190000000"), // + 90 s + 5 min
+			"split_late":    n("946686390000000"), // + 5 min + 15 min more
+			"partial_since": n("946598400000000"),
+			"retired_at":    n("946684860000000"),
 			"broken": {Type: store.M, Map: map[string]store.Value{
+				"cause":    s("record"),
 				"unit":     s("shardId-1"),
 				"seq":      s(seq(7)),
 				"event_id": s("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
 				"error":    s("division by zero"),
 				"at":       n("946684801000000"),
 			}},
-			"_v": n("2"),
+			"_v": n("4"),
 		})
 	})
 }
@@ -188,12 +202,17 @@ func TestDecodeRejectsForeignItems(t *testing.T) {
 		return it
 	}
 	view := func(attrs store.Item) store.Item {
-		it := store.Item{"pk": s("view"), "sk": s(version), "_v": n("1")}
+		it := store.Item{"pk": s("view"), "sk": s(version), "stream": s(stream), "_v": n("1")}
 		maps.Copy(it, attrs)
 		return it
 	}
+	activating := func(attrs store.Item) store.Item {
+		it := store.Item{"state": s("activating"), "activated_at": n("1"), "split": s("fence")}
+		maps.Copy(it, attrs)
+		return view(it)
+	}
 	broken := func(attrs store.Item) store.Item {
-		f := store.Item{"unit": s("u1"), "seq": s(seq(1)), "event_id": s("e"), "error": s("boom"), "at": n("1")}
+		f := store.Item{"cause": s("record"), "unit": s("u1"), "seq": s(seq(1)), "event_id": s("e"), "error": s("boom"), "at": n("1")}
 		maps.Copy(f, attrs)
 		return view(store.Item{"state": s("broken"), "broken": {Type: store.M, Map: f}})
 	}
@@ -210,12 +229,25 @@ func TestDecodeRejectsForeignItems(t *testing.T) {
 		{"unit version 0", unit(store.Item{"_v": n("0")})},
 		{"unit without _ttl", func() store.Item { it := unit(nil); delete(it, "_ttl"); return it }()},
 		{"view in an unknown state", view(store.Item{"state": s("paused")})},
-		{"view activating without activated_at", view(store.Item{"state": s("activating")})},
+		{"view without a stream", func() store.Item { it := activating(nil); delete(it, "stream"); return it }()},
+		{"view with an empty stream", activating(store.Item{"stream": s("")})},
+		{"view activating without activated_at", view(store.Item{"state": s("activating"), "split": s("fence")})},
+		{"view activating without a split", view(store.Item{"state": s("activating"), "activated_at": n("1")})},
+		{"view split by archive", activating(store.Item{"split": s("archive")})},
+		{"view split by time without split_at", activating(store.Item{"split": s("time"), "split_late": n("2")})},
+		{"view split by fences with split_at", activating(store.Item{"split_at": n("1"), "split_late": n("2")})},
+		{"view activating with partial_since", activating(store.Item{"partial_since": n("1")})},
+		{"view live with retired_at", activating(store.Item{"state": s("live"), "retired_at": n("1")})},
+		{"view retired without retired_at", view(store.Item{"state": s("retired")})},
+		{"view pending with a split", view(store.Item{"state": s("pending_backfill"), "split": s("fence")})},
+		{"view failure without a cause", broken(store.Item{"cause": s("")})},
+		{"view failure with a sequence number and no unit", broken(store.Item{"unit": s("")})},
+		{"view failure without unit, sequence number or event_id", broken(store.Item{"unit": s(""), "seq": s(""), "event_id": s("")})},
 		{"view broken without its failure", view(store.Item{"state": s("broken")})},
 		{"view failure with an unknown attribute", broken(store.Item{"note": s("x")})},
 		{"view failure at sequence number 7", broken(store.Item{"seq": s("7")})},
 		{"view failure at sequence number 0", broken(store.Item{"seq": s(seq(0))})},
-		{"view live with a failure", view(store.Item{"state": s("live"), "activated_at": n("1"), "broken": {Type: store.M, Map: map[string]store.Value{}}})},
+		{"view live with a failure", activating(store.Item{"state": s("live"), "broken": {Type: store.M, Map: map[string]store.Value{}}})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -250,7 +282,7 @@ func TestWriteAfterItemDeleted(t *testing.T) {
 	if _, err := before.EnsureFence(ctx, readUnit(t, before, "u1"), version); err != nil {
 		t.Fatal(err)
 	}
-	setStates(t, before, meta.Activating)
+	activate(t, before)
 
 	stored := mem.New()
 	m := meta.New(deletedAfterRead{Backend: stored, snapshot: snapshot}, table)
@@ -291,9 +323,25 @@ func TestWritesGiveUpWhenTheConditionNeverHolds(t *testing.T) {
 			}
 			return err
 		},
-		"SetViewState": func(ctx context.Context, m *meta.Meta) error { return m.SetViewState(ctx, version, meta.Live) },
+		"Activate": func(ctx context.Context, m *meta.Meta) error {
+			_, err := m.Activate(ctx, "other@v1", stream, meta.SplitFence, meta.DefaultBounds)
+			return err
+		},
+		"MakeLive": func(ctx context.Context, m *meta.Meta) error { return m.MakeLive(ctx, version, time.Time{}) },
 		"MarkBroken": func(ctx context.Context, m *meta.Meta) error {
-			_, err := m.MarkBroken(ctx, version, meta.Failure{Unit: "u1", Seq: seq(1)})
+			_, _, err := m.MarkBroken(ctx, version, stream, failure())
+			return err
+		},
+		"Retire": func(ctx context.Context, m *meta.Meta) error {
+			_, err := m.Retire(ctx, version, stream)
+			return err
+		},
+		"UpdateJob": func(ctx context.Context, m *meta.Meta) error {
+			_, err := m.UpdateJob(ctx, version, func(j *meta.Job) (bool, error) { j.Rate = 10; return true, nil })
+			return err
+		},
+		"RegisterCatalog": func(ctx context.Context, m *meta.Meta) error {
+			_, err := m.RegisterCatalog(ctx, catalogA, "v2")
 			return err
 		},
 	}
@@ -303,7 +351,11 @@ func TestWritesGiveUpWhenTheConditionNeverHolds(t *testing.T) {
 			b := mem.New()
 			m := meta.New(b, table)
 			advance(t, m, "u1", seq(10))
-			setStates(t, m, meta.Activating)
+			activate(t, m)
+			createJob(t, m, tableJob())
+			if _, err := m.RegisterCatalog(t.Context(), catalogA, "v1"); err != nil {
+				t.Fatal(err)
+			}
 			err := write(t.Context(), meta.New(&stuck{Backend: b}, table))
 			if err == nil || errors.Is(err, errSpun) || !strings.Contains(err.Error(), table) {
 				t.Errorf("got %v, want an error naming table %s", err, table)

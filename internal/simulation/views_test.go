@@ -171,13 +171,14 @@ func aggregateFunc(t *testing.T, cat *catalog.Catalog, view, col string) *agg.Fu
 // Config backfills idempotent-only versions and fenced ones: page_hourly's version 2 while
 // version 1 runs, page_rates and user_latest, which break on poison events, site_daily,
 // which has SPLIT, and the views of cross-region duplicates. The others are live from the
-// start.
+// start. The retire scenario retires page_hourly's version 1.
 func (s *pageViews) Config() simulation.Config {
 	return simulation.Config{
 		Catalog: s.cat,
 		Naming:  catalog.Naming{Store: storeName},
 		Backfill: []string{pageHourly, pageUsers, siteDaily, userLatest, pageTags, pageRates, quotaByAccount,
 			chargeTotals},
+		Retire: pageHourlyV1,
 	}
 }
 
@@ -245,8 +246,11 @@ func (*pageViews) Event(r *rand.Rand, n int, poison bool) simulation.Event {
 	}}
 }
 
-func (s *pageViews) NewCore(b store.Backend, a simulation.Archiver) simulation.Core {
-	return projector.New(s.core.Projector(), b, a, projector.Config{Naming: s.Config().Naming})
+func (s *pageViews) NewCore(b store.Backend, a simulation.Archiver, cat *projector.Compiled) simulation.Core {
+	if cat == nil {
+		cat = s.core.Projector()
+	}
+	return projector.New(cat, b, a, projector.Config{Naming: s.Config().Naming})
 }
 
 // pageView is a decoded event of page_views.
@@ -292,7 +296,7 @@ func (s *pageViews) Expect(o *simulation.Oracle, stream, unit string, rec projec
 	if err != nil {
 		return err
 	}
-	id := simulation.RecordID{Unit: unit, Seq: rec.Seq}
+	id := simulation.RecordID{Unit: unit, Seq: rec.Seq, EventID: ev.tie.ID}
 	at := time.UnixMicro(ev.tie.Time).UTC()
 	for _, version := range []string{pageHourlyV1, pageHourly} {
 		if err = s.expectHour(o, version, ev, at); err != nil {
@@ -414,7 +418,7 @@ func (s *pageViews) expectTags(o *simulation.Oracle, ev pageView) error {
 
 // Read reads every view through its named query, and the breakers from the meta table.
 func (s *pageViews) Read(ctx context.Context, b store.Backend) (simulation.State, error) {
-	st := simulation.State{Rows: simulation.Rows{}, Broken: map[string]simulation.RecordID{}}
+	st := simulation.State{Rows: simulation.Rows{}, Broken: map[string]simulation.Breaker{}}
 	states, err := meta.New(b, metaTable()).ViewStates(ctx)
 	if err != nil {
 		return st, err
@@ -422,7 +426,11 @@ func (s *pageViews) Read(ctx context.Context, b store.Backend) (simulation.State
 	for version, vs := range states {
 		if vs.State == meta.Broken {
 			// The meta table pads sequence numbers; the oracle has them as delivered.
-			st.Broken[version] = simulation.RecordID{Unit: vs.Failure.Unit, Seq: strings.TrimLeft(vs.Failure.Seq, "0")}
+			f := vs.Failure
+			st.Broken[version] = simulation.Breaker{
+				Record: simulation.RecordID{Unit: f.Unit, Seq: strings.TrimLeft(f.Seq, "0"), EventID: f.EventID},
+				Split:  f.Cause == meta.CauseSplit,
+			}
 		}
 	}
 	e := engine.New(b, engine.Options{})

@@ -25,13 +25,30 @@ type Row map[string]string
 // Rows are the rows of a region's views.
 type Rows map[RowID]Row
 
-// RecordID names one change-stream record of a region.
-type RecordID struct{ Unit, Seq string }
+// RecordID names one change-stream record of a region, and the event it holds. A backfill
+// that reads the stream table names a record by its event alone.
+type RecordID struct{ Unit, Seq, EventID string }
+
+// names reports whether b, a breaker's record, names r: by unit and sequence number, or,
+// without a unit, by event_id.
+func (b RecordID) names(r RecordID) bool {
+	if b.Unit == "" {
+		return b.EventID == r.EventID
+	}
+	return b.Unit == r.Unit && b.Seq == r.Seq
+}
+
+// Breaker is why a view's breaker opened: the record, and whether it failed its evaluation
+// or the time split couldn't place it.
+type Breaker struct {
+	Record RecordID
+	Split  bool
+}
 
 // State is what a region's views hold, as the read path returns it.
 type State struct {
 	Rows   Rows
-	Broken map[string]RecordID // view → the record whose evaluation opened its breaker
+	Broken map[string]Breaker // view → why its breaker opened
 }
 
 // Oracle computes views naively, from each INSERT record of a region once and without

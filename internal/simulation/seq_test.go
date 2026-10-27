@@ -65,7 +65,7 @@ func (*widths) Event(_ *rand.Rand, n int, _ bool) simulation.Event {
 	return simulation.Event{Stream: stream, Vals: []expr.Value{expr.Uint(0), expr.Null()}}
 }
 
-func (w *widths) NewCore(b store.Backend, _ simulation.Archiver) simulation.Core {
+func (w *widths) NewCore(b store.Backend, _ simulation.Archiver, _ *projector.Compiled) simulation.Core {
 	return widthsCore{w, b}
 }
 

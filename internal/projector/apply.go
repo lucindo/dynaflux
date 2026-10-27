@@ -24,15 +24,15 @@ import (
 // condition that keeps failing means the backend disagrees with the _v it returns.
 const maxAttempts = 100
 
-// applyRows writes the rows of unit own's records, "" for the backfill's, with bounded
-// parallelism, and returns each one's error. Every write has finished when it returns. It
+// applyRows writes the rows of unit own's records, "" for the backfill's, parallel at a
+// time, and returns each one's error. Every write has finished when it returns. It
 // reads every row before it writes any: pruning reads the items of the other units whose
 // high-water marks the rows hold, once for all of them. A row that has expired is skipped.
-func (c *Core) applyRows(ctx context.Context, stream, own string, groups []*rowGroup) []error {
+func (c *Core) applyRows(ctx context.Context, stream, own string, groups []*rowGroup, parallel int) []error {
 	errs := make([]error, len(groups))
 	items := make([]*item, len(groups))
 	now := time.Now().UnixMicro()
-	fanOut(len(groups), func(i int) {
+	fanOut(len(groups), parallel, func(i int) {
 		if g := groups[i]; !g.hasExp || now < g.exp {
 			items[i], errs[i] = c.readRow(ctx, g)
 		}
@@ -41,7 +41,7 @@ func (c *Core) applyRows(ctx context.Context, stream, own string, groups []*rowG
 	// The items of a SPLIT row share its uniqExact markers, so they are written in turn: two
 	// identical marker requests in flight would race.
 	rows := logicalRows(groups)
-	fanOut(len(rows), func(r int) {
+	fanOut(len(rows), parallel, func(r int) {
 		for _, i := range rows[r] {
 			switch {
 			case items[i] == nil: // expired, or not read
@@ -55,10 +55,10 @@ func (c *Core) applyRows(ctx context.Context, stream, own string, groups []*rowG
 	return errs
 }
 
-// fanOut calls f for each index below n, rowParallelism at a time, and returns once every
-// call has.
-func fanOut(n int, f func(int)) {
-	sem := make(chan struct{}, rowParallelism)
+// fanOut calls f for each index below n, parallel at a time, and returns once every call
+// has.
+func fanOut(n, parallel int, f func(int)) {
+	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 	for i := range n {
 		sem <- struct{}{}

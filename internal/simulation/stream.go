@@ -135,10 +135,15 @@ func later(a, b store.Item) bool {
 func (s *stream) emit(rec projector.Record) {
 	h := keyHash(recordKey(rec))
 	u := s.unitFor(h)
+	closeOnNext := s.rg.run.sc.Topology.CloseOnNext
+	if closeOnNext && u.left == 0 {
+		s.rollover(u)
+		u = s.unitFor(h)
+	}
 	s.seq.Add(s.seq, big.NewInt(1+s.rg.run.topo.Int64N(maxSeqGap)))
 	rec.Seq = s.seq.String()
 	u.add(rec, h)
-	if u.left--; u.left == 0 {
+	if u.left--; u.left == 0 && !closeOnNext {
 		s.rollover(u)
 	}
 }
@@ -245,6 +250,7 @@ func (u *unit) add(rec projector.Record, h uint64) {
 	for _, l := range u.lanes {
 		if l.part == part {
 			l.recs = append(l.recs, rec)
+			l.at = append(l.at, time.Now())
 			l.signal()
 			u.s.rg.run.pending++
 		}
@@ -268,6 +274,7 @@ type lane struct {
 	part        int
 	parents     []*lane // the parent unit's lanes of the same mapping
 	recs        []projector.Record
+	at          []time.Time // when each record entered the stream
 	acked       int
 	invocations int           // only the poller touches it
 	changed     chan struct{} // closed and replaced when a record arrives or the unit closes
@@ -339,9 +346,28 @@ func newLink(from, to *region) *link {
 
 // ship queues a write or a delete; only gated code calls it.
 func (l *link) ship(sh shipment) {
-	sh.due = time.Now().Add(between(l.from.run.topo, shortestLink, longestLink))
+	sh.due = time.Now().Add(l.delay(sh))
 	l.queue.add(sh)
 	l.from.run.pending++
+}
+
+// delay draws how long sh takes to land: as TimeSplit says, up to its landing bound after
+// the write's ingest_time, or past it.
+func (l *link) delay(sh shipment) time.Duration {
+	r := l.from.run
+	ts := r.sc.TimeSplit
+	if ts.Landing == 0 || sh.remove {
+		return between(r.topo, shortestLink, longestLink)
+	}
+	by := time.Until(time.UnixMicro(integer(sh.item[catalog.AttrIngestTime])).Add(ts.Landing))
+	switch {
+	case chance(r.topo, ts.Late):
+		r.count(&r.stats.LateLandings)
+		return max(shortestLink, by) + between(r.topo, 1, ts.LateMax)
+	case ts.Spread:
+		return between(r.topo, shortestLink, max(shortestLink, by))
+	}
+	return between(r.topo, shortestLink, longestLink)
 }
 
 func (l *link) run() {

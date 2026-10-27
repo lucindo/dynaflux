@@ -71,9 +71,11 @@ type ViewVersion struct {
 }
 
 // FencedHandoff reports whether a backfill of v needs the fenced handoff: it does when an
-// aggregate is additive, because an additive state counts an event applied twice.
+// aggregate is additive, because an additive state counts an event applied twice, or is
+// uniqExact, whose value counts only for the record that wrote its marker: a live attempt
+// that wrote one and was never retried would leave a value nobody counts.
 func (v *ViewVersion) FencedHandoff() bool {
-	return slices.ContainsFunc(v.Aggregates, func(a ViewAggregate) bool { return !a.Fn.Idempotent() })
+	return slices.ContainsFunc(v.Aggregates, func(a ViewAggregate) bool { return !a.Fn.Idempotent() || a.Fn == AggUniqExact })
 }
 
 // ArrayJoin is a view's ARRAY JOIN: one source row per element of Array.

@@ -125,7 +125,8 @@ func TestFencedHandoff(t *testing.T) {
 	}{
 		{"keys only", latest(), false},
 		{"idempotent only", latest(catalog.AggMin, catalog.AggMax, catalog.AggArgMax, catalog.AggArgMin,
-			catalog.AggAny, catalog.AggUniq, catalog.AggUniqExact), false},
+			catalog.AggAny, catalog.AggUniq), false},
+		{"uniqExact", latest(catalog.AggMax, catalog.AggUniqExact), true},
 		{"count", latest(catalog.AggMax, catalog.AggCount), true},
 		{"sum", latest(catalog.AggSum), true},
 		{"avg", latest(catalog.AggAvg), true},

@@ -11,11 +11,9 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
-	"github.com/lucindo/dynaflux/internal/expr"
 	"github.com/lucindo/dynaflux/internal/keys"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/store"
@@ -84,7 +82,25 @@ var ErrArchive = errors.New("projector: archive")
 type Config struct {
 	// Naming names the store's tables.
 	Naming catalog.Naming
+	// States is the meta table's state cache, which queries in the same process may share;
+	// nil gives the core one of its own.
+	States *meta.StateCache
+	// Now is the host's clock, which the time split's late check reads when a batch starts;
+	// nil means time.Now.
+	Now func() time.Time
+	// BackfillRows is how many rows ApplyBackfill writes at once; 0 means as many as a live
+	// batch does, 16.
+	BackfillRows int
 }
+
+// ErrUnknownVersion fails a batch whose stream has an activating or live version that the
+// catalog neither defines nor lists as retired (G3): this build would consume records the
+// version needs.
+var ErrUnknownVersion = errors.New("projector: an active view version isn't in this catalog")
+
+// ErrSplit fails a batch whose stream has an activating or live additive version split
+// neither at fences nor by time: this build would count the backfill's events again.
+var ErrSplit = errors.New("projector: an active view version has a split this build doesn't apply")
 
 // ErrLifetime fails a batch whose deadline is further away than the prune window allows: a
 // row could drop the unit's high-water mark while the invocation still writes rows.
@@ -97,14 +113,13 @@ type Core struct {
 	b      store.Backend
 	a      Archiver
 	meta   *meta.Meta
+	states *meta.StateCache
 	naming catalog.Naming
 	// window is W, the prune window. lifetime is the longest invocation it allows: W less the
 	// time a write sent before the deadline may take to land.
 	window, lifetime time.Duration
-
-	mu       sync.Mutex
-	states   map[string]meta.ViewState // nil until read
-	statesAt time.Time                 // when the read that returned states was sent
+	now              func() time.Time
+	backfillRows     int
 }
 
 // rowParallelism bounds the rows a batch writes at once.
@@ -122,35 +137,68 @@ const (
 // when this region doesn't archive.
 func New(c *Compiled, b store.Backend, a Archiver, cfg Config) *Core {
 	w := time.Duration(c.def.PruneWindowSeconds) * time.Second
+	m := meta.New(b, cfg.Naming.MetaTable())
+	now := cfg.Now
+	if now == nil {
+		now = time.Now
+	}
 	return &Core{
-		c:        c,
-		b:        b,
-		a:        a,
-		meta:     meta.New(b, cfg.Naming.MetaTable()),
-		naming:   cfg.Naming,
-		window:   w,
-		lifetime: w - catalog.LifetimeMarginSeconds*time.Second,
+		c:            c,
+		b:            b,
+		a:            a,
+		meta:         m,
+		states:       cmp.Or(cfg.States, meta.NewStateCache(m)),
+		naming:       cfg.Naming,
+		window:       w,
+		lifetime:     w - catalog.LifetimeMarginSeconds*time.Second,
+		now:          now,
+		backfillRows: cmp.Or(cfg.BackfillRows, rowParallelism),
 	}
 }
 
-// record is a Record with its delivery unit and its sequence number in PadSeq's form.
+// record is a Record with its delivery unit and its sequence number in PadSeq's form. An item
+// a backfill read from the stream table has no unit: its time mark stands in for the unit
+// key and the sequence number.
 type record struct {
 	Record
 
 	seq     string
-	unit    string // the delivery unit's ID
+	unit    string // the delivery unit's ID; "" for a table item
 	unitKey string
+}
+
+// eventID returns the event_id in the sort key of r's new image; "" when it doesn't parse.
+func (r *record) eventID() string {
+	_, id, err := keys.ParseStreamSK(r.New[catalog.AttrSK].Str)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
+// name names r in an error: by its unit and sequence number, or a table item by its event_id.
+func (r *record) name() string {
+	if r.unit == "" {
+		return "event " + r.eventID()
+	}
+	return "unit " + r.unit + " record " + r.Seq
 }
 
 // Handle applies a batch to every view version of its stream that the batch reaches,
 // archives its INSERT records and advances the unit's progress past what it applied; a batch
-// without an INSERT sends nothing. ctx's deadline is the invocation's: at most the
-// prune window less its margin away, or Handle fails with [ErrLifetime]. Handle sends
+// without an INSERT only reads the view states for its MODIFY records, if any. A version
+// split by time takes an INSERT whose ingest_time is after the split time. Its breaker opens
+// on an INSERT at or before it when the batch started at or after the split's late bound,
+// and on a MODIFY whose images straddle it. Handle fails with [ErrUnknownVersion] while the
+// stream has an active version this catalog lacks (G3), and with [ErrSplit] while it has an
+// additive one split neither at fences nor by time. ctx's deadline is the invocation's: at
+// most the prune window less its margin away, or Handle fails with [ErrLifetime]. Handle sends
 // nothing after the deadline less a reserve of min(2 s, a tenth of the time left), and
 // stamps progress with the deadline itself. Handle returns an error only to fail the whole
 // batch, with the batch's Stats either way. A row that fails sets FailedSeq, and every row
 // is finished before Handle returns.
 func (c *Core) Handle(ctx context.Context, b Batch) (Result, error) {
+	start := c.now()
 	if len(b.Records) == 0 {
 		return Result{}, nil
 	}
@@ -171,21 +219,18 @@ func (c *Core) Handle(ctx context.Context, b Batch) (Result, error) {
 		return Result{}, err
 	}
 	var res Result
-	inserts := 0
+	inserts, modifies := 0, 0
 	for _, r := range recs {
 		switch r.Op {
 		case Insert:
 			inserts++
 		case Modify:
+			modifies++
 			if !s.SamePayload(r.Old, r.New) {
 				res.Stats.Divergent++
 			}
 		case Remove:
 		}
-	}
-	// Only an INSERT changes a view or the archive, and progress may stay below the rest.
-	if inserts == 0 {
-		return res, nil
 	}
 	reserve := min(maxReserve, left/reserveShare)
 	ctx, cancel := context.WithDeadline(ctx, deadline.Add(-reserve))
@@ -194,19 +239,28 @@ func (c *Core) Handle(ctx context.Context, b Batch) (Result, error) {
 	// still leaves time to checkpoint the rows written below it.
 	rowCtx, cancelRows := context.WithDeadline(ctx, deadline.Add(-reserve-reserve/2))
 	defer cancelRows()
-	if err = c.apply(rowCtx, ctx, b, s, recs, deadline, &res); err != nil {
+	// Only an INSERT changes a view or the archive, and progress may stay below the rest. A
+	// MODIFY still meets G3, and the time split: older code must not consume one.
+	if inserts == 0 {
+		if modifies > 0 {
+			err = c.modifies(rowCtx, s, recs, &res.Stats)
+		}
+		return res, err
+	}
+	if err = c.apply(rowCtx, ctx, b, s, recs, start, deadline, &res); err != nil {
 		return Result{Stats: res.Stats}, err
 	}
 	return res, nil
 }
 
-// apply is Handle's work on a batch with an INSERT, in recs. It sends with ctx, but writes
-// progress with progressCtx and stamps it with deadline.
-func (c *Core) apply(ctx, progressCtx context.Context, b Batch, s *Stream, recs []record, deadline time.Time, res *Result) error {
+// apply is Handle's work on a batch with an INSERT, in recs, which started at start. It sends
+// with ctx, but writes progress with progressCtx and stamps it with deadline.
+func (c *Core) apply(ctx, progressCtx context.Context, b Batch, s *Stream, recs []record, start, deadline time.Time, res *Result) error {
 	rc, err := c.reach(ctx, b.Stream, b.Unit)
 	if err != nil {
-		return fmt.Errorf("projector: %w", err)
+		return err
 	}
+	rc.start = start
 	// Records at or below progress, read after the invocation started, were applied, and a row
 	// may have dropped their marks since (S9 rule 1).
 	recs = slices.DeleteFunc(recs, func(r record) bool { return r.seq <= rc.unit.Progress })
@@ -218,6 +272,10 @@ func (c *Core) apply(ctx, progressCtx context.Context, b Batch, s *Stream, recs 
 	for i := range recs {
 		if r := &recs[i]; r.Op == Insert {
 			if err = c.evaluate(ctx, rs, s, r, rc, broken, &res.Stats); err != nil {
+				return err
+			}
+		} else if r.Op == Modify {
+			if err = c.straddle(ctx, r, rc.views, rc.states, broken, &res.Stats); err != nil {
 				return err
 			}
 		}
@@ -257,42 +315,40 @@ func newRecord(r Record, unit string) (record, error) {
 
 // reach is what a batch applies: the view versions its records reach, and each fenced
 // version's fence on the unit, at or below which the version's records belong to its
-// backfill.
+// backfill. start is when the batch started, which the time split's late check reads.
 type reach struct {
 	states map[string]meta.ViewState
 	views  []*view
 	fences map[*view]string
 	unit   meta.Unit
+	start  time.Time
 }
 
-// reach reads the view states, cached, unless the stream has no views, and the unit's item,
-// consistently, and fences the unit for each version that needs the fenced handoff and
-// records reach. A fence for a version the cached states call pending_backfill means they
-// were read before its activation, so they are read again.
+// reach reads the view states, cached, and the unit's item, consistently, and fences the
+// unit for each version that needs the fenced handoff, is split at fences and records reach.
+// A fence for a version the cached states call pending_backfill means they were read before
+// its activation, so they are read again.
 func (c *Core) reach(ctx context.Context, stream, unitID string) (*reach, error) {
-	var states map[string]meta.ViewState
-	var err error
-	if len(c.c.byStream[stream]) > 0 {
-		if states, err = c.viewStates(ctx, false); err != nil {
-			return nil, err
-		}
-	}
-	u, err := c.meta.Unit(ctx, stream, unitID)
+	states, err := c.viewStates(ctx, stream, false)
 	if err != nil {
 		return nil, err
 	}
-	if c.stale(stream, states, u) {
-		if states, err = c.viewStates(ctx, true); err != nil {
+	u, err := c.meta.Unit(ctx, stream, unitID)
+	if err != nil {
+		return nil, fmt.Errorf("projector: %w", err)
+	}
+	if stale(states, u) {
+		if states, err = c.viewStates(ctx, stream, true); err != nil {
 			return nil, err
 		}
 	}
 	rc := &reach{states: states, views: c.active(stream, states), fences: map[*view]string{}}
 	for _, v := range rc.views {
-		if !v.def.FencedHandoff() {
+		if !v.def.FencedHandoff() || states[v.id].Split != meta.SplitFence {
 			continue
 		}
 		if u, err = c.meta.EnsureFence(ctx, u, v.id); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("projector: %w", err)
 		}
 		rc.fences[v] = u.Fences[v.id]
 	}
@@ -301,42 +357,80 @@ func (c *Core) reach(ctx context.Context, stream, unitID string) (*reach, error)
 }
 
 // viewStates returns the view states, read at most meta.MaxViewStateAge ago unless fresh is
-// set. The age is on the wall clock, since the monotonic one may stop while Lambda freezes
-// the environment; a negative age, from a clock that stepped back, counts as expired.
-func (c *Core) viewStates(ctx context.Context, fresh bool) (map[string]meta.ViewState, error) {
-	c.mu.Lock()
-	states, at := c.states, c.statesAt
-	c.mu.Unlock()
-	if age := time.Since(at); !fresh && states != nil && age >= 0 && age < meta.MaxViewStateAge {
+// set, for a batch of stream. It fails with ErrUnknownVersion when they hold an activating or
+// live version of stream that the catalog neither defines nor lists as retired (G3), and with
+// ErrSplit for an additive one split neither at fences nor by time. It retires those the
+// catalog lists as retired, so that no build skips a version that isn't retired in the region.
+func (c *Core) viewStates(ctx context.Context, stream string, fresh bool) (map[string]meta.ViewState, error) {
+	states, err := c.states.States(ctx, fresh)
+	if err != nil {
+		return nil, fmt.Errorf("projector: %w", err)
+	}
+	unknown, split := "", ""
+	var retired []string
+	for id, vs := range states {
+		if vs.Stream != stream || vs.State != meta.Activating && vs.State != meta.Live {
+			continue
+		}
+		v := c.c.views[id]
+		switch {
+		case v != nil:
+			if v.def.FencedHandoff() && vs.Split != meta.SplitFence && vs.Split != meta.SplitTime && (split == "" || id < split) {
+				split = id
+			}
+		case slices.Contains(c.c.def.Retired, id):
+			retired = append(retired, id)
+		case unknown == "" || id < unknown:
+			unknown = id
+		}
+	}
+	if unknown != "" {
+		return nil, fmt.Errorf("%w: %s of stream %s is %s; deploy a build whose catalog defines it",
+			ErrUnknownVersion, unknown, stream, states[unknown].State)
+	}
+	if split != "" {
+		return nil, fmt.Errorf("%w: %s of stream %s is %s with the %s split; deploy a build that applies it",
+			ErrSplit, split, stream, states[split].State, states[split].Split)
+	}
+	if len(retired) == 0 {
 		return states, nil
 	}
-	sent := time.Now().Round(0)
-	states, err := c.meta.ViewStates(ctx)
-	if err != nil {
-		return nil, err
+	slices.Sort(retired) // in a fixed order, which the harness replays
+	return c.retire(ctx, states, retired)
+}
+
+// retire writes the tombstone of each version in ids before a batch skips them, and returns
+// states with the stored ones.
+func (c *Core) retire(ctx context.Context, states map[string]meta.ViewState, ids []string) (map[string]meta.ViewState, error) {
+	states = maps.Clone(states) // the cache shares its map
+	for _, id := range ids {
+		vs, err := c.meta.Retire(ctx, id, states[id].Stream)
+		if err != nil {
+			return nil, fmt.Errorf("projector: %w", err)
+		}
+		c.states.Set(vs)
+		states[id] = vs
 	}
-	c.mu.Lock()
-	c.states, c.statesAt = states, sent
-	c.mu.Unlock()
 	return states, nil
 }
 
-// stale reports whether u holds a fence for a version of the stream that states call
-// pending_backfill.
-func (c *Core) stale(stream string, states map[string]meta.ViewState, u meta.Unit) bool {
-	return slices.ContainsFunc(c.c.byStream[stream], func(v *view) bool {
-		_, fenced := u.Fences[v.id]
-		return fenced && cmp.Or(states[v.id].State, meta.PendingBackfill) == meta.PendingBackfill
-	})
+// stale reports whether u holds a fence for a version that states call pending_backfill.
+func stale(states map[string]meta.ViewState, u meta.Unit) bool {
+	for v := range u.Fences {
+		if cmp.Or(states[v].State, meta.PendingBackfill) == meta.PendingBackfill {
+			return true
+		}
+	}
+	return false
 }
 
-// active returns the view versions of stream that records reach: none that is broken, and
-// a version that needs the fenced handoff only once it is activating or live.
+// active returns the view versions of stream that records reach: none that is broken or
+// retired, and a version that needs the fenced handoff only once it is activating or live.
 func (c *Core) active(stream string, states map[string]meta.ViewState) []*view {
 	var out []*view
 	for _, v := range c.c.byStream[stream] {
 		switch cmp.Or(states[v.id].State, meta.PendingBackfill) {
-		case meta.Broken:
+		case meta.Broken, meta.Retired:
 		case meta.Activating, meta.Live:
 			out = append(out, v)
 		case meta.PendingBackfill:
@@ -370,70 +464,145 @@ func (c *Core) archive(ctx context.Context, b Batch, recs []record) error {
 	return nil
 }
 
-// evaluate adds an INSERT record's contributions to rs: to each version it reaches, and to
-// a fenced version only above the fence. A version whose evaluation fails is marked broken,
-// and gets nothing more from the batch.
+// evaluate adds an INSERT record's contributions to rs: to each version it reaches, to a
+// fenced version only above the fence, and to a version split by time only after the split
+// time. A version whose evaluation fails, or whose time split can't place the record, is
+// marked broken, and gets nothing more from the batch.
 func (c *Core) evaluate(ctx context.Context, rs *rows, s *Stream, r *record, rc *reach, broken map[*view]bool, st *Stats) error {
 	vals, bad := s.Decode(r.New)
 	for _, v := range rc.views {
 		if f, fenced := rc.fences[v]; broken[v] || fenced && r.seq <= f {
 			continue
 		}
-		err := rs.add(v, r, vals, bad)
-		if err == nil {
+		live, err := byTime(rc.states[v.id], rc.start, r)
+		if err != nil {
+			if err = c.open(ctx, v, r, meta.CauseSplit, err, broken, st); err != nil {
+				return err
+			}
 			continue
 		}
-		opened, err := c.breakVersion(ctx, v, r, vals, err)
-		if err != nil {
-			return err
+		if !live {
+			continue
 		}
-		if opened {
-			st.Broken = append(st.Broken, v.id)
+		if err = rs.add(v, r, vals, bad); err != nil {
+			if err = c.open(ctx, v, r, meta.CauseRecord, err, broken, st); err != nil {
+				return err
+			}
 		}
-		broken[v] = true
 	}
 	return nil
 }
 
-// breakVersion opens v's breaker with the record whose evaluation failed with cause, marks v
-// broken in the cached view states, and reports whether this call opened the breaker.
-func (c *Core) breakVersion(ctx context.Context, v *view, r *record, vals []expr.Value, cause error) (bool, error) {
-	f := meta.Failure{
-		Unit:    r.unit,
-		Seq:     r.seq,
-		EventID: vals[len(v.stream.Columns)+implicitEventID].AsString(),
-		Error:   cause.Error(),
-		At:      time.Now(),
+// byTime reports whether live projection applies r, an INSERT, to a version in state vs.
+// Split by time, it does exactly when r's ingest_time is after the split time; an INSERT at
+// or before it is the backfill's, unless the batch started at or after the late bound.
+func byTime(vs meta.ViewState, start time.Time, r *record) (bool, error) {
+	if vs.Split != meta.SplitTime {
+		return true, nil
 	}
-	opened, err := c.meta.MarkBroken(ctx, v.id, f)
+	at, err := ingestTime(r.New)
+	switch {
+	case err != nil:
+		return false, err
+	case at > vs.SplitAt.UnixMicro():
+		return true, nil
+	case !start.Before(vs.SplitLate):
+		// The backfill's read began after the late bound, so it may have missed the event.
+		return false, fmt.Errorf("ingest_time %s is at or before the split time %s, but the batch started at %s, at or after the late bound %s",
+			rfc3339(at), rfc3339(vs.SplitAt.UnixMicro()), rfc3339(start.UnixMicro()), rfc3339(vs.SplitLate.UnixMicro()))
+	}
+	return false, nil
+}
+
+// modifies checks a batch's MODIFY records, which change no view: G3, then the time split of
+// each version they reach.
+func (c *Core) modifies(ctx context.Context, s *Stream, recs []record, st *Stats) error {
+	states, err := c.viewStates(ctx, s.Def.Name, false)
+	if err != nil {
+		return err
+	}
+	views, broken := c.active(s.Def.Name, states), map[*view]bool{}
+	for i := range recs {
+		if r := &recs[i]; r.Op == Modify {
+			if err = c.straddle(ctx, r, views, states, broken, st); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// straddle opens the breaker of each version of views split by time whose split time r, a
+// MODIFY, straddles: one DEDUP BY event appended in two regions, whose INSERT live projection
+// judged by one ingest_time while the backfill judges the table's copy by the other.
+func (c *Core) straddle(ctx context.Context, r *record, views []*view, states map[string]meta.ViewState, broken map[*view]bool, st *Stats) error {
+	from, ferr := ingestTime(r.Old)
+	to, terr := ingestTime(r.New)
+	for _, v := range views {
+		vs := states[v.id]
+		if broken[v] || vs.Split != meta.SplitTime {
+			continue
+		}
+		b, err := vs.SplitAt.UnixMicro(), errors.Join(ferr, terr)
+		if err == nil && (from <= b) == (to <= b) {
+			continue
+		}
+		if err == nil {
+			err = fmt.Errorf("a MODIFY moves ingest_time from %s to %s, across the split time %s", rfc3339(from), rfc3339(to), rfc3339(b))
+		}
+		if err = c.open(ctx, v, r, meta.CauseSplit, err, broken, st); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ingestTime returns the ingest_time an item holds, in microseconds.
+func ingestTime(it store.Item) (int64, error) {
+	v, err := decodeAttr(it, catalog.AttrIngestTime, catalog.EventTimeType())
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", catalog.ColumnIngestTime, err)
+	}
+	return v.AsMicros(), nil
+}
+
+func rfc3339(us int64) string { return time.UnixMicro(us).UTC().Format(time.RFC3339Nano) }
+
+// open opens v's breaker with r, which failed with err for cause, and keeps v from the rest of
+// the batch.
+func (c *Core) open(ctx context.Context, v *view, r *record, cause meta.Cause, err error, broken map[*view]bool, st *Stats) error {
+	opened, err := c.breakVersion(ctx, v, r, cause, err)
+	if err != nil {
+		return err
+	}
+	if opened {
+		st.Broken = append(st.Broken, v.id)
+	}
+	broken[v] = true
+	return nil
+}
+
+// breakVersion opens v's breaker with r, which failed with failure for cause, puts the stored
+// state in the cached view states, and reports whether this call opened the breaker. A table
+// item, without a unit, is named by its event_id alone.
+func (c *Core) breakVersion(ctx context.Context, v *view, r *record, cause meta.Cause, failure error) (bool, error) {
+	f := meta.Failure{Cause: cause, Unit: r.unit, EventID: r.eventID(), Error: failure.Error(), At: time.Now()}
+	if r.unit != "" {
+		f.Seq = r.seq
+	}
+	vs, opened, err := c.meta.MarkBroken(ctx, v.id, v.def.Stream, f)
 	if err != nil {
 		return false, fmt.Errorf("projector: %w", err)
 	}
-	c.cacheBroken(v.id)
+	c.states.Set(vs)
 	return opened, nil
-}
-
-// cacheBroken marks version broken in the cached view states, so the core's next batches
-// skip it before the states expire. Broken is final, so the mark can't go stale.
-func (c *Core) cacheBroken(version string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.states == nil { // a backfill reads no states, and the first read finds the version broken
-		return
-	}
-	// Batches in flight hold the old map.
-	states := maps.Clone(c.states)
-	vs := states[version]
-	vs.Version, vs.State = version, meta.Broken
-	states[version] = vs
-	c.states = states
 }
 
 // finish writes the rows of unit own's records, sets FailedSeq to the lowest sequence number
 // that a failed row holds and returns it in PadSeq's form. A request DynamoDB would reject on
 // every attempt fails the batch.
 func (c *Core) finish(ctx context.Context, stream, own string, groups []*rowGroup, res *Result) (string, error) {
-	errs := c.applyRows(ctx, stream, own, groups)
+	errs := c.applyRows(ctx, stream, own, groups, rowParallelism)
 	lowest := ""
 	var failed []error
 	var invalid error
@@ -464,8 +633,8 @@ func (c *Core) finish(ctx context.Context, stream, own string, groups []*rowGrou
 // advance raises the unit's progress to the last record below failed, every record when
 // failed is "", stamped with the deadline. A fence for a version the batch didn't apply
 // fails the batch; the next batch of the unit finds the fence and reads the view states
-// again. A broken version is covered, and so is every version records could reach, whether
-// or not one did.
+// again. A broken or retired version is covered, and so is every version records could reach,
+// whether or not one did. A version the catalog lists as retired is retired by then.
 func (c *Core) advance(ctx context.Context, rc *reach, recs []record, failed string, deadline time.Time) error {
 	upTo := ""
 	for i := range recs {
@@ -478,7 +647,8 @@ func (c *Core) advance(ctx context.Context, rc *reach, recs []record, failed str
 		return nil
 	}
 	covered := func(version string) bool {
-		return rc.states[version].State == meta.Broken ||
+		state := rc.states[version].State
+		return state == meta.Broken || state == meta.Retired ||
 			slices.ContainsFunc(rc.views, func(v *view) bool { return v.id == version })
 	}
 	if err := c.meta.Advance(ctx, rc.unit, upTo, deadline, covered); err != nil {

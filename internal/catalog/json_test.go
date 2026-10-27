@@ -5,9 +5,11 @@ package catalog_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"slices"
@@ -83,6 +85,42 @@ func TestMarshalGolden(t *testing.T) {
 	}
 	if !bytes.Equal(got.Bytes(), want) {
 		t.Errorf("Marshal output differs from %s (go test -update rewrites it):\n%s", goldenPath, got.Bytes())
+	}
+}
+
+func TestHash(t *testing.T) {
+	t.Parallel()
+	// The SHA-256 test vector of FIPS 180-2 for "abc".
+	const want = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+	if got := catalog.Hash([]byte("abc")); got != want {
+		t.Errorf("Hash(abc) = %s, want %s", got, want)
+	}
+}
+
+func TestCompress(t *testing.T) {
+	t.Parallel()
+	data := marshalFixture(t)
+	z, err := catalog.Compress(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := catalog.Compress(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(z, again) {
+		t.Error("two compressions of one catalog differ")
+	}
+	r, err := gzip.NewReader(bytes.NewReader(z))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("decompressed %d bytes, want the catalog's %d", len(got), len(data))
 	}
 }
 

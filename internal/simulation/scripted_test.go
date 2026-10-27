@@ -465,7 +465,7 @@ func (*scripted) Event(*rand.Rand, int, bool) simulation.Event {
 	return simulation.Event{Stream: streamName, Vals: []expr.Value{expr.Uint(0), expr.Null()}}
 }
 
-func (s *scripted) NewCore(b store.Backend, _ simulation.Archiver) simulation.Core {
+func (s *scripted) NewCore(b store.Backend, _ simulation.Archiver, _ *projector.Compiled) simulation.Core {
 	return scriptedCore{s, b}
 }
 

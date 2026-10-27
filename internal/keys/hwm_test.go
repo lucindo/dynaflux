@@ -129,3 +129,75 @@ func TestMarkCompare(t *testing.T) {
 		t.Errorf("Mark order is not (unit key, sequence number): %d %d %d", a.Compare(b), b.Compare(c), c.Compare(a))
 	}
 }
+
+// A time mark stands in for a unit and a sequence number (encoding.md §7.6): sign-flipped
+// event_time in the unit hash's place, event_id's number as the sequence number.
+func TestTimeMark(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		time int64
+		id   string
+		want keys.Mark
+	}{
+		{0, "00000000000000000000000001", keys.Mark{UnitKey: "8000000000000", Seq: strings.Repeat("0", 39) + "1"}},
+		{-1, "7ZZZZZZZZZZZZZZZZZZZZZZZZZ", keys.Mark{UnitKey: "7ZZZZZZZZZZZZ", Seq: "0340282366920938463463374607431768211455"}},
+		{1_700_000_000_000_000, "01JB8Z9X4Q7M3N2P5R6S8T9V0W", keys.Mark{UnitKey: "801GA4GC1WG00", Seq: "0002091561768106995780800544121601453084"}},
+	} {
+		got, err := keys.TimeMark(tt.time, tt.id)
+		if err != nil || got != tt.want {
+			t.Errorf("TimeMark(%d, %s) = %+v, %v; want %+v", tt.time, tt.id, got, err, tt.want)
+		}
+		h := keys.HWM{Units: map[string]string{}, Backfill: &got}
+		enc, err := h.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if back, derr := keys.DecodeHWM(enc, true); derr != nil || !reflect.DeepEqual(back, h) {
+			t.Errorf("DecodeHWM(Encode(%+v)) = %+v, %v", h, back, derr)
+		}
+	}
+}
+
+// Time marks compare by event_time, negative times first, then by event_id.
+func TestTimeMarkOrder(t *testing.T) {
+	t.Parallel()
+	ordered := []struct {
+		time int64
+		id   string
+	}{
+		{-1 << 62, "7ZZZZZZZZZZZZZZZZZZZZZZZZZ"},
+		{-1, "00000000000000000000000001"},
+		{0, "00000000000000000000000001"},
+		{0, "0000000000000000000000000Z"},
+		{0, "01000000000000000000000000"},
+		{1, "00000000000000000000000001"},
+		{1 << 40, "00000000000000000000000001"},
+	}
+	var prev keys.Mark
+	for i, o := range ordered {
+		m, err := keys.TimeMark(o.time, o.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i > 0 && prev.Compare(m) >= 0 {
+			t.Errorf("TimeMark(%d, %s) = %+v doesn't sort after %+v", o.time, o.id, m, prev)
+		}
+		prev = m
+	}
+}
+
+func TestTimeMarkRejectsWhatIsNotAnEventID(t *testing.T) {
+	t.Parallel()
+	for _, id := range []string{
+		"00000000000000000000000000",  // zero, which no sequence number is
+		"0000000000000000000000000",   // 25 characters
+		"01jb8z9x4q7m3n2p5r6s8t9v0w",  // lowercase
+		"81JB8Z9X4Q7M3N2P5R6S8T9V0W",  // past 128 bits
+		"01JB8Z9X4Q7M3N2P5R6S8T9V0U",  // U isn't in the alphabet
+		"01JB8Z9X4Q7M3N2P5R6S8T9V0W0", // 27 characters
+	} {
+		if m, err := keys.TimeMark(0, id); err == nil {
+			t.Errorf("TimeMark(0, %q) = %+v, want an error", id, m)
+		}
+	}
+}

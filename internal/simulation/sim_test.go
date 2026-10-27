@@ -154,10 +154,61 @@ func checkTier(t *testing.T, sc simulation.Scenario, prunes bool, total simulati
 	if sc.Poison > 0 && total.Poison == 0 {
 		t.Errorf("no event was poison: %+v", total)
 	}
-	if sc.Backfill.Within > 0 && min(total.Backfills, total.Chunks, total.Unlisted) == 0 {
+	// Only the archive source lists units.
+	if sc.Backfill.Within > 0 && (min(total.Backfills, total.Chunks) == 0 || !sc.Backfill.Table && total.Unlisted == 0) {
 		t.Errorf("no backfill went live, or no unit was created after a listing: %+v", total)
 	}
+	checkJobsTier(t, sc, total)
+	checkSplitTier(t, sc, total)
 	checkRegionsTier(t, sc, total)
+	checkBuildsTier(t, sc, total)
+}
+
+// checkJobsTier fails t when a tier of sc didn't take both paths of a fresh stream, or didn't
+// make the job faults it sets happen.
+func checkJobsTier(t *testing.T, sc simulation.Scenario, total simulation.Stats) {
+	t.Helper()
+	b := sc.Backfill
+	if sc.WriteStart > 0 && (total.Fresh == 0 || total.Fresh == total.Backfills) {
+		t.Errorf("no job found its stream fresh, or every one did: %+v", total)
+	}
+	// One seed seldom makes these happen at the rates most scenarios set.
+	if *full && b.Crash > 0 && b.Twin > 0 && b.Lose > 0 && min(total.Resumed, total.Twins, total.Lost) == 0 {
+		t.Errorf("no job was resumed, had a duplicate worker, or lost its runs: %+v", total)
+	}
+}
+
+// checkSplitTier fails t when a tier of sc didn't fill a version split by time from the
+// table, shift writer clocks, or, where it breaks the split's bounds, land writes late and
+// break versions by their split.
+func checkSplitTier(t *testing.T, sc simulation.Scenario, total simulation.Stats) {
+	t.Helper()
+	ts := sc.TimeSplit
+	if sc.Backfill.Table && total.TimeSplits == 0 {
+		t.Errorf("no version split by time went live: %+v", total)
+	}
+	if ts.Skew > 0 && total.Skewed == 0 {
+		t.Errorf("no writer clock shifted an append: %+v", total)
+	}
+	if ts.Late > 0 && min(total.LateLandings, total.SplitBreaks) == 0 {
+		t.Errorf("no write landed late, or no time split broke: %+v", total)
+	}
+}
+
+// checkBuildsTier fails t when a tier of sc didn't change builds, fail a batch under G3 where
+// a build lacks active versions, or write a tombstone.
+func checkBuildsTier(t *testing.T, sc simulation.Scenario, total simulation.Stats) {
+	t.Helper()
+	b := sc.Builds
+	if b != (simulation.Builds{}) && total.Deploys == 0 {
+		t.Errorf("no region changed builds: %+v", total)
+	}
+	if (b.Switch > 0 || b.Flap > 0) && total.Guarded == 0 {
+		t.Errorf("no batch failed under G3: %+v", total)
+	}
+	if b.Retire > 0 && total.Tombstones == 0 {
+		t.Errorf("no region wrote a tombstone: %+v", total)
+	}
 }
 
 // checkRegionsTier fails t when a tier of sc didn't exercise its cross-region duplicates,
@@ -316,10 +367,6 @@ func TestPropertiesCatchBugs(t *testing.T) {
 	small.Regions, small.Events, small.Budget = 1, 60, 10*time.Minute
 	empty := small
 	empty.ESM.Empty = 0.5
-	// Events appended in both regions reach each stream as an INSERT and a MODIFY, some in
-	// batches of their own.
-	modified := small
-	modified.Regions, modified.Duplicate = 2, 1
 	pruned := small
 	pruned.Topology.UnitRecords, pruned.WriteGap = 2, 5*time.Second
 	sys := newPageViews(t)
@@ -337,7 +384,6 @@ func TestPropertiesCatchBugs(t *testing.T) {
 		{"a unit never drains", small, sys, alwaysFail, "P6:"},
 		{"a panic", small, sys, panics, "P8:"},
 		{"a request for an empty batch", empty, sys, idleCall, "P9:"},
-		{"a request for a batch of MODIFY records", modified, sys, idleCall, "P9:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -359,7 +405,7 @@ const (
 	noBug      bug = iota
 	alwaysFail     // fails every batch
 	panics         // panics once
-	idleCall       // reads the store for a batch without an INSERT
+	idleCall       // reads the store for a batch with neither INSERT nor MODIFY
 )
 
 // buggy is pageViews with a defect in its cores.
@@ -370,8 +416,8 @@ type buggy struct {
 	once atomic.Bool // for bugs that strike once per run
 }
 
-func (s *buggy) NewCore(b store.Backend, a simulation.Archiver) simulation.Core {
-	return buggyCore{Core: s.pageViews.NewCore(b, a), sys: s, b: b}
+func (s *buggy) NewCore(b store.Backend, a simulation.Archiver, cat *projector.Compiled) simulation.Core {
+	return buggyCore{Core: s.pageViews.NewCore(b, a, cat), sys: s, b: b}
 }
 
 type buggyCore struct {
@@ -387,7 +433,7 @@ func (c buggyCore) Handle(ctx context.Context, b projector.Batch) (projector.Res
 		return projector.Result{}, errors.New("stuck")
 	case c.sys.bug == panics && c.sys.once.CompareAndSwap(false, true):
 		panic("boom")
-	case c.sys.bug == idleCall && !slices.ContainsFunc(b.Records, func(r projector.Record) bool { return r.Op == projector.Insert }):
+	case c.sys.bug == idleCall && !slices.ContainsFunc(b.Records, func(r projector.Record) bool { return r.Op != projector.Remove }):
 		_, err := c.b.Get(ctx, metaTable(), store.Key{PK: "view", SK: pageRates}, true)
 		return projector.Result{}, err
 	}
@@ -444,44 +490,56 @@ func event(pk string) store.Item {
 }
 
 // TestViewChecks: P1 compares a region's views with its oracle, P2 the regions with each
-// other, and P3 the breakers with the records that fail; a broken view is left out of P1
-// and P2, and a row that a divergent duplicate reached out of P2.
+// other, P3 the breakers with the records that fail, a table item's by its event_id, and P10
+// the views split by time; a broken view is left out of P1 and P2, a row that a divergent
+// duplicate reached out of P2, and out of P1 for a view split by time.
 func TestViewChecks(t *testing.T) {
 	t.Parallel()
 	row := simulation.RowID{View: pageHourly, Key: "p1"}
 	broken := simulation.RowID{View: pageRates, Key: "p1"}
-	poison := simulation.RecordID{Unit: "U1", Seq: "100000000000000000001"}
+	poison := simulation.RecordID{Unit: "U1", Seq: "100000000000000000001", EventID: "E1"}
 	oracle := simulation.NewOracle()
 	oracle.Count(row, "views", 2)
 	oracle.Poison(pageRates, poison)
-	state := func(views, rate string, breaker *simulation.RecordID) simulation.State {
-		st := simulation.State{Rows: simulation.Rows{row: {"views": views}, broken: {"rate": rate}}, Broken: map[string]simulation.RecordID{}}
+	state := func(views, rate string, breaker *simulation.Breaker) simulation.State {
+		st := simulation.State{Rows: simulation.Rows{row: {"views": views}, broken: {"rate": rate}}, Broken: map[string]simulation.Breaker{}}
 		if breaker != nil {
 			st.Broken[pageRates] = *breaker
 		}
 		return st
 	}
-	other := simulation.RecordID{Unit: "U1", Seq: "100000000000000000002"}
+	by := func(rec simulation.RecordID, split bool) *simulation.Breaker {
+		return &simulation.Breaker{Record: rec, Split: split}
+	}
+	other := simulation.RecordID{Unit: "U1", Seq: "100000000000000000002", EventID: "E2"}
 	divergent := map[simulation.RowID]bool{row: true}
+	timeSplit := map[string]bool{pageHourly: true}
 	for _, tc := range []struct {
-		name   string
-		r0, r1 simulation.State
-		skip   map[simulation.RowID]bool
-		want   []string
+		name      string
+		r0, r1    simulation.State
+		skip      map[simulation.RowID]bool
+		timeSplit map[string]bool
+		want      []string
 	}{
-		{"exact, a broken view differs", state("2", "1", &poison), state("2", "2", &poison), nil, nil},
-		{"a count off in r0", state("3", "1", &poison), state("3", "1", &poison), nil, []string{"P1:"}},
-		{"regions differ", state("2", "1", &poison), state("1", "1", &poison), nil, []string{"P2:"}},
-		{"regions differ in a divergent row", state("2", "1", &poison), state("1", "1", &poison), divergent, nil},
-		{"broken by a record that doesn't fail it", state("2", "1", &other), state("2", "1", &other), nil, []string{"P3:"}},
-		{"not broken", state("2", "1", nil), state("2", "1", nil), nil, []string{"P1:", "P3:"}},
+		{"exact, a broken view differs", state("2", "1", by(poison, false)), state("2", "2", by(poison, false)), nil, nil, nil},
+		{"a count off in r0", state("3", "1", by(poison, false)), state("3", "1", by(poison, false)), nil, nil, []string{"P1"}},
+		{"regions differ", state("2", "1", by(poison, false)), state("1", "1", by(poison, false)), nil, nil, []string{"P2"}},
+		{"regions differ in a divergent row", state("2", "1", by(poison, false)), state("1", "1", by(poison, false)), divergent, nil, nil},
+		{"broken by a record that doesn't fail it", state("2", "1", by(other, false)), state("2", "1", by(other, false)), nil, nil, []string{"P3"}},
+		{"broken by a table item that fails it", state("2", "1", by(simulation.RecordID{EventID: "E1"}, false)), state("2", "1", nil), nil, nil, nil},
+		{"broken by a table item that doesn't", state("2", "1", by(simulation.RecordID{EventID: "E2"}, false)), state("2", "1", nil), nil, nil, []string{"P3"}},
+		{"broken by its time split", state("2", "1", by(other, true)), state("2", "1", nil), nil, nil, nil},
+		{"not broken", state("2", "1", nil), state("2", "1", nil), nil, nil, []string{"P1", "P3"}},
+		{"a view split by time off", state("3", "1", by(poison, false)), state("3", "1", by(poison, false)), nil, timeSplit, []string{"P1", "P10"}},
+		{"a view split by time off in a divergent row", state("3", "1", by(poison, false)), state("3", "1", by(poison, false)), divergent, timeSplit, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			violations := simulation.CheckViews(oracle, tc.r0, tc.r1, tc.skip)
+			violations := simulation.CheckViews(oracle, tc.r0, tc.r1, tc.skip, tc.timeSplit)
 			var got []string
 			for _, v := range violations {
-				got = append(got, v[:3])
+				property, _, _ := strings.Cut(v, ":")
+				got = append(got, property)
 			}
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("violations %q, want properties %q", violations, tc.want)

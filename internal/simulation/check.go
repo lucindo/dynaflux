@@ -20,32 +20,42 @@ import (
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-// check runs the properties checked at quiescence: P0 on every change stream; P1, P3 and
-// the backfills' end states (P6) per region; P2 across regions. The rest of P4–P9 was
+// check runs the properties checked at quiescence: P0 on every change stream; P1, P3, P10
+// and the backfills' end states (P6) per region; P2 across regions. The rest of P4–P9 was
 // checked as the run went.
 func (r *run) check(ctx context.Context) {
-	for _, rg := range r.regions {
-		r.checkStream(rg)
-		r.checkBackfills(ctx, rg)
-	}
+	divergent := r.divergentRows()
 	states := make([]*State, len(r.regions))
 	for i, rg := range r.regions {
+		r.checkStream(rg)
+		vs, err := meta.New(rg.mem, r.meta).ViewStates(ctx)
+		if err != nil {
+			r.violatef("P6: %s: read the view states: %v", rg.name, err)
+			continue
+		}
+		r.checkBackfills(rg.name, vs)
 		st, err := r.sys.Read(ctx, rg.mem)
 		if err != nil {
 			r.violatef("P1: %s: read: %v", rg.name, err)
 			continue
 		}
-		r.checkRegion(rg.name, r.expect(rg), st)
+		timeSplit := map[string]bool{}
+		for version, s := range vs {
+			timeSplit[version] = s.Split == meta.SplitTime
+		}
+		r.checkRegion(rg.name, r.expect(rg), st, timeSplit, divergent)
+		r.checkSplitBreaks(rg, vs, st)
 		states[i] = &st
 	}
 	if len(r.regions) > 1 {
-		r.converge(ctx, states)
+		r.converge(ctx, states, divergent)
 	}
 }
 
 // converge checks P2 between the first region and each other one, on the logical rows
-// their stores hold. states are what the read path read, nil where it failed.
-func (r *run) converge(ctx context.Context, states []*State) {
+// their stores hold, but for those in divergent. states are what the read path read, nil
+// where it failed.
+func (r *run) converge(ctx context.Context, states []*State, divergent map[RowID]bool) {
 	stored := make([]*State, len(r.regions))
 	for i, rg := range r.regions {
 		if states[i] == nil {
@@ -58,10 +68,9 @@ func (r *run) converge(ctx context.Context, states []*State) {
 		}
 		stored[i] = &State{Rows: rows, Broken: states[i].Broken}
 	}
-	divergent := r.divergentRows()
 	for i := 1; i < len(stored); i++ {
 		if stored[0] != nil && stored[i] != nil {
-			r.checkConvergence(r.regions[0].name+" vs "+r.regions[i].name, *stored[0], *stored[i], divergent)
+			r.checkConvergence(r.regions[0].name, r.regions[i].name, *stored[0], *stored[i], divergent)
 		}
 	}
 }
@@ -223,21 +232,109 @@ func (r *run) feed(o *Oracle, rg *region, property string, keep func(*stream, pr
 	}
 }
 
-// checkBackfills checks that each version the run backfills ended live, or broken.
-func (r *run) checkBackfills(ctx context.Context, rg *region) {
+// checkBackfills checks that each version the run backfills ended live, or broken, in a
+// region whose view states are states. It counts the versions split by time.
+func (r *run) checkBackfills(region string, states map[string]meta.ViewState) {
 	if r.sc.Backfill.Within == 0 {
 		return
 	}
-	states, err := meta.New(rg.mem, r.meta).ViewStates(ctx)
-	if err != nil {
-		r.violatef("P6: %s: read the view states: %v", rg.name, err)
-		return
-	}
 	for _, v := range r.cfg.Backfill {
-		if s := states[v].State; s != meta.Live && s != meta.Broken {
-			r.violatef("P6: %s: the backfill of %s ended %s", rg.name, v, cmp.Or(s, meta.PendingBackfill))
+		vs := states[v]
+		switch {
+		case vs.State != meta.Live && vs.State != meta.Broken:
+			r.violatef("P6: %s: the backfill of %s ended %s", region, v, cmp.Or(vs.State, meta.PendingBackfill))
+		case vs.Split != meta.SplitTime:
+		case vs.State == meta.Live:
+			r.count(&r.stats.TimeSplits)
+		case vs.Failure.Cause == meta.CauseSplit:
+			r.count(&r.stats.SplitBreaks)
 		}
 	}
+}
+
+// checkSplitBreaks checks the breaks of P10: a version that its time split broke names an
+// INSERT at or before its split time that a batch started delivering at or after its late
+// bound, or a MODIFY whose images straddle the split time; where the scenario keeps every
+// bound, only such a MODIFY; and a version split by time whose stream holds such a MODIFY in
+// the region is broken.
+func (r *run) checkSplitBreaks(rg *region, states map[string]meta.ViewState, st State) {
+	for _, view := range slices.Sorted(maps.Keys(states)) {
+		vs := states[view]
+		b, broken := st.Broken[view]
+		switch {
+		case vs.Split != meta.SplitTime:
+		case !broken:
+			if rec, ok := rg.straddle(vs); ok {
+				r.violatef("P10: %s: %s isn't broken, but MODIFY %s straddles its split time", rg.name, view, rec)
+			}
+		case b.Split && rg.places(vs, b.Record):
+			r.violatef("P10: %s: %s broke by its time split at %+v, which the split places", rg.name, view, b.Record)
+		case b.Split && r.sc.splitBoundsHold() && !rg.straddling(b.Record, vs):
+			r.violatef("P10: %s: %s broke by its time split at %+v, though every bound held", rg.name, view, b.Record)
+		}
+	}
+}
+
+// straddling reports whether the record that id names is a MODIFY whose images straddle the
+// split time of vs.
+func (rg *region) straddling(id RecordID, vs meta.ViewState) bool {
+	rec, found := rg.record(id)
+	return found && rec.Op == projector.Modify && straddles(vs, rec)
+}
+
+// places reports whether the time split of vs places the record that id names, which then
+// can't break it: anything but an INSERT at or before the split time that a batch started
+// delivering at or after the late bound, or a MODIFY whose images straddle the split time.
+func (rg *region) places(vs meta.ViewState, id RecordID) bool {
+	rec, found := rg.record(id)
+	switch {
+	case !found:
+		return true
+	case rec.Op == projector.Insert:
+		return ingestTime(rec.New) > vs.SplitAt.UnixMicro() || rg.delivered[RecordID{Unit: id.Unit, Seq: id.Seq}].Before(vs.SplitLate)
+	case rec.Op == projector.Modify:
+		return !straddles(vs, rec)
+	}
+	return true
+}
+
+// straddle returns a MODIFY of the region's change stream of vs's stream whose images straddle
+// its split time.
+func (rg *region) straddle(vs meta.ViewState) (string, bool) {
+	s := rg.streams[rg.run.cfg.Naming.StreamTable(vs.Stream)]
+	for _, u := range s.units {
+		for _, rec := range u.recs {
+			if rec.Op == projector.Modify && straddles(vs, rec) {
+				return u.id + "/" + rec.Seq, true
+			}
+		}
+	}
+	return "", false
+}
+
+func straddles(vs meta.ViewState, rec projector.Record) bool {
+	at := vs.SplitAt.UnixMicro()
+	return (ingestTime(rec.Old) <= at) != (ingestTime(rec.New) <= at)
+}
+
+func ingestTime(it store.Item) int64 { return integer(it[catalog.AttrIngestTime]) }
+
+// record returns the record of the region's change streams that id names, by unit and
+// sequence number.
+func (rg *region) record(id RecordID) (projector.Record, bool) {
+	for _, s := range rg.order {
+		for _, u := range s.units {
+			if u.id != id.Unit {
+				continue
+			}
+			for _, rec := range u.recs {
+				if rec.Seq == id.Seq {
+					return rec, true
+				}
+			}
+		}
+	}
+	return projector.Record{}, false
 }
 
 // checkBreakers checks P3 after a Handle of b returned res without error: a live view
@@ -351,15 +448,24 @@ func compareSeq(a, b string) int {
 	return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b))
 }
 
-// checkRegion checks P1, each view against the oracle, and P3, the breakers. A broken
-// view is left out of P1.
-func (r *run) checkRegion(region string, o *Oracle, st State) {
+// checkRegion checks P1, each view against the oracle, P3, the breakers, and P10's exactness
+// of the views split by time, which timeSplit names. A broken view, or one retired in the
+// region, is left out of P1. So are the rows that divergent names of a view split by time:
+// its backfill reads the table's copy of an event, which may hold the other payload.
+func (r *run) checkRegion(region string, o *Oracle, st State, timeSplit map[string]bool, divergent map[RowID]bool) {
 	broken := func(id RowID) bool {
 		_, ok := st.Broken[id.View]
-		return ok
+		return ok || r.retiredIn(region, id.View) || timeSplit[id.View] && divergent[id]
 	}
+	inexact := map[string]bool{}
 	for _, d := range diffRows(st.Rows, o.result(), broken) {
-		r.violatef("P1: %s %s", region, d)
+		r.violatef("P1: %s %s", region, d.text)
+		inexact[d.id.View] = true
+	}
+	for _, view := range slices.Sorted(maps.Keys(inexact)) {
+		if timeSplit[view] {
+			r.violatef("P10: %s: %s, split by time, is neither exact nor broken", region, view)
+		}
 	}
 	views := slices.Sorted(maps.Keys(st.Broken))
 	for view := range o.poison {
@@ -368,34 +474,42 @@ func (r *run) checkRegion(region string, o *Oracle, st State) {
 		}
 	}
 	for _, view := range views {
-		rec, isBroken := st.Broken[view]
+		b, isBroken := st.Broken[view]
 		failing := o.poison[view]
 		switch {
+		case b.Split:
+			// P10 checks why.
 		case isBroken && len(failing) == 0:
-			r.violatef("P3: %s: view %s is broken by %v, but no record fails it", region, view, rec)
+			r.violatef("P3: %s: view %s is broken by %v, but no record fails it", region, view, b.Record)
 		case !isBroken:
 			r.violatef("P3: %s: view %s isn't broken, but %d records fail it", region, view, len(failing))
-		case !failing[rec]:
-			r.violatef("P3: %s: view %s is broken by %v, which doesn't fail it", region, view, rec)
+		case !slices.ContainsFunc(slices.Collect(maps.Keys(failing)), b.Record.names):
+			r.violatef("P3: %s: view %s is broken by %v, which doesn't fail it", region, view, b.Record)
 		}
 	}
 }
 
-// checkConvergence checks P2: views broken in neither region hold the same rows, but for
-// those in skip.
-func (r *run) checkConvergence(regions string, a, b State, skip map[RowID]bool) {
+// checkConvergence checks P2: views neither retired nor broken in either region hold the
+// same rows, but for those in skip.
+func (r *run) checkConvergence(ra, rb string, a, b State, skip map[RowID]bool) {
 	broken := func(id RowID) bool {
 		_, inA := a.Broken[id.View]
 		_, inB := b.Broken[id.View]
-		return inA || inB || skip[id]
+		return inA || inB || skip[id] || r.retiredIn(ra, id.View) || r.retiredIn(rb, id.View)
 	}
 	for _, d := range diffRows(a.Rows, b.Rows, broken) {
-		r.violatef("P2: %s %s", regions, d)
+		r.violatef("P2: %s vs %s %s", ra, rb, d.text)
 	}
 }
 
+// rowDiff is a row whose got and want differ, and its description.
+type rowDiff struct {
+	id   RowID
+	text string
+}
+
 // diffRows describes each row not skipped whose got and want differ.
-func diffRows(got, want Rows, skip func(RowID) bool) []string {
+func diffRows(got, want Rows, skip func(RowID) bool) []rowDiff {
 	ids := slices.Collect(maps.Keys(got))
 	for id := range want {
 		if _, ok := got[id]; !ok {
@@ -405,14 +519,14 @@ func diffRows(got, want Rows, skip func(RowID) bool) []string {
 	slices.SortFunc(ids, func(a, b RowID) int {
 		return cmp.Or(strings.Compare(a.View, b.View), strings.Compare(a.Key, b.Key))
 	})
-	var out []string
+	var out []rowDiff
 	for _, id := range ids {
 		g, inGot := got[id]
 		w, inWant := want[id]
 		if skip(id) || inGot == inWant && maps.Equal(g, w) {
 			continue
 		}
-		out = append(out, id.View+"/"+id.Key+": got "+showRow(g, inGot)+", want "+showRow(w, inWant))
+		out = append(out, rowDiff{id, id.View + "/" + id.Key + ": got " + showRow(g, inGot) + ", want " + showRow(w, inWant)})
 	}
 	return out
 }

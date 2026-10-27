@@ -5,6 +5,7 @@ package keys
 
 import (
 	"cmp"
+	"encoding/binary"
 	"fmt"
 	"math/big"
 	"strings"
@@ -34,6 +35,21 @@ type Mark struct {
 // Compare orders marks by unit key, then by sequence number.
 func (m Mark) Compare(o Mark) int {
 	return cmp.Or(strings.Compare(m.UnitKey, o.UnitKey), strings.Compare(m.Seq, o.Seq))
+}
+
+// TimeMark returns the mark of an event that a backfill reads from the stream table, which
+// has no unit or sequence number (encoding.md §7.6): eventTime, in microseconds, as 8
+// big-endian bytes with the sign bit flipped in the unit hash's place, and the 128-bit number
+// that eventID encodes as the sequence number. Time marks compare by eventTime, then eventID.
+func TimeMark(eventTime int64, eventID string) (Mark, error) {
+	id, ok := decodeBase32(eventID, eventHashLen)
+	seq := new(big.Int).SetBytes(id)
+	if !ok || seq.Sign() == 0 {
+		return Mark{}, fmt.Errorf("event_id %q is not 26 characters of base32 above zero", eventID)
+	}
+	var t [unitHashLen]byte
+	binary.BigEndian.PutUint64(t[:], uint64(eventTime)^1<<63) //nolint:gosec // two's complement bits, as specified
+	return Mark{UnitKey: string(appendBase32(nil, t[:])), Seq: padded(seq.String(), catalog.SequenceWidth)}, nil
 }
 
 // DecodeHWM reads an item's _hwm attribute; an absent one holds no marks. It accepts only

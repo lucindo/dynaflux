@@ -22,6 +22,7 @@ import (
 	"github.com/lucindo/dynaflux/internal/keys"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/projector"
+	"github.com/lucindo/dynaflux/internal/projector/projectortest"
 	"github.com/lucindo/dynaflux/internal/simulation"
 	"github.com/lucindo/dynaflux/internal/store"
 	"github.com/lucindo/dynaflux/internal/store/mem"
@@ -55,17 +56,25 @@ func newHandoff(t *testing.T) *handoff {
 	for _, v := range h.sys.cat.Catalog().Views {
 		for _, vv := range v.Versions {
 			if id := catalog.VersionID(v.Name, vv.Number); id != siteTotals {
-				h.setState(t, id, meta.Activating)
-				h.setState(t, id, meta.Live)
+				h.activate(t, id, vv.Stream)
+				h.makeLive(t, id)
 			}
 		}
 	}
 	return h
 }
 
-func (h *handoff) setState(t *testing.T, version string, s meta.State) {
+// activate makes a version of stream activating with the fence split, as a backfill does.
+func (h *handoff) activate(t *testing.T, version, stream string) {
 	t.Helper()
-	if err := h.meta.SetViewState(t.Context(), version, s); err != nil {
+	if _, err := h.meta.Activate(t.Context(), version, stream, meta.SplitFence, meta.DefaultBounds); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (h *handoff) makeLive(t *testing.T, version string) {
+	t.Helper()
+	if err := h.meta.MakeLive(t.Context(), version, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -120,7 +129,7 @@ func (h *handoff) handle(t *testing.T, core *projector.Core, unit string, seqs .
 	}
 }
 
-// backfill fills site_totals as the coordinator does with the cut FenceUnits returned: it
+// backfill fills site_totals as a backfill job does with the cut FenceUnits returned: it
 // waits until every record archived by then arrived, keeps the arrived records at or below
 // their unit's fence, applies them and makes the version live.
 func (h *handoff) backfill(t *testing.T, core *projector.Core, cut time.Time) {
@@ -142,7 +151,7 @@ func (h *handoff) backfill(t *testing.T, core *projector.Core, cut time.Time) {
 			fences[u.ID] = f
 		}
 	}
-	sel, err := projector.SelectBackfill(recs, fences)
+	sel, err := projectortest.SelectBackfill(recs, fences)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +160,7 @@ func (h *handoff) backfill(t *testing.T, core *projector.Core, cut time.Time) {
 	if err = core.ApplyBackfill(ctx, siteTotals, sel); err != nil {
 		t.Fatal(err)
 	}
-	h.setState(t, siteTotals, meta.Live)
+	h.makeLive(t, siteTotals)
 }
 
 // views returns site_totals' views of s0.
@@ -169,14 +178,14 @@ func (h *handoff) views(t *testing.T) string {
 // early listing: it doesn't fence the unit, archives the records after the cut and advances
 // past them, and the next batch fences the unit there. Records at or below a fence then
 // arrive in the archive after the backfill read it. Listing only after every core saw the
-// activation (meta.ListingDelay) fences such a unit before it archives anything.
+// activation (meta.DefaultBounds.Listing) fences such a unit before it archives anything.
 func TestUnitsAreListedOnceEveryCoreSawTheActivation(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		h := newHandoff(t)
 		cached, fresh := h.core(h.mem), h.core(h.mem)
 		h.handle(t, cached, "shardId-u0", 1) // caches site_totals pending
-		h.setState(t, siteTotals, meta.Activating)
+		h.activate(t, siteTotals, "page_views")
 		var mu sync.Mutex
 		units := []string{"shardId-u0"}
 		list := func(context.Context) ([]string, error) {
@@ -189,7 +198,7 @@ func TestUnitsAreListedOnceEveryCoreSawTheActivation(t *testing.T) {
 		fenced := make(chan struct{})
 		go func() {
 			defer close(fenced)
-			cut, err = h.meta.FenceUnits(t.Context(), "page_views", siteTotals, list)
+			cut, _, err = h.meta.FenceUnits(t.Context(), "page_views", siteTotals, meta.DefaultBounds, list)
 		}()
 		time.Sleep(time.Second)
 		mu.Lock()
@@ -211,28 +220,28 @@ func TestUnitsAreListedOnceEveryCoreSawTheActivation(t *testing.T) {
 
 // TestRecordArchivedWhileFencingReachesTheBackfill: a batch whose states predate
 // site_totals' activation, and which ran long enough to outlive the listing delay, archives
-// its record and advances the unit between the coordinator's read of the unit and its
-// fence. The batch didn't apply site_totals, so the record is the backfill's: the fence must
-// cover the progress it replaces, and the cut must follow the fence.
+// its record and advances the unit between the job's read of the unit and its fence. The
+// batch didn't apply site_totals, so the record is the backfill's: the fence must cover the
+// progress it replaces, and the cut must follow the fence.
 func TestRecordArchivedWhileFencingReachesTheBackfill(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		h := newHandoff(t)
 		cached := h.core(h.mem)
 		h.handle(t, cached, "shardId-u0", 1) // caches site_totals pending
-		h.setState(t, siteTotals, meta.Activating)
+		h.activate(t, siteTotals, "page_views")
 		b := h.batch(t, "shardId-u0", 2)
 		h.archive.held = make(chan struct{})
 		batch := make(chan error)
 		go func() { batch <- deliver(t.Context(), cached, b) }()
 		var batchErr error
-		coordinator := meta.New(&afterUnitRead{Backend: h.mem, do: func() {
+		job := meta.New(&afterUnitRead{Backend: h.mem, do: func() {
 			time.Sleep(time.Second) // so the record is archived after the listing
 			close(h.archive.held)
 			batchErr = <-batch
 		}}, metaTable())
 		list := func(context.Context) ([]string, error) { return []string{"shardId-u0"}, nil }
-		cut, err := coordinator.FenceUnits(t.Context(), "page_views", siteTotals, list)
+		cut, _, err := job.FenceUnits(t.Context(), "page_views", siteTotals, meta.DefaultBounds, list)
 		if err != nil || batchErr != nil {
 			t.Fatal(err, batchErr)
 		}
@@ -253,9 +262,9 @@ func TestUnitFencesItselfBeforeItArchives(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		h := newHandoff(t)
-		h.setState(t, siteTotals, meta.Activating)
+		h.activate(t, siteTotals, "page_views")
 		none := func(context.Context) ([]string, error) { return nil, nil }
-		cut, err := h.meta.FenceUnits(t.Context(), "page_views", siteTotals, none)
+		cut, _, err := h.meta.FenceUnits(t.Context(), "page_views", siteTotals, meta.DefaultBounds, none)
 		if err != nil {
 			t.Fatal(err)
 		}

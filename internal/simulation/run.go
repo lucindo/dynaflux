@@ -17,6 +17,7 @@ import (
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/engine"
 	"github.com/lucindo/dynaflux/internal/expr"
+	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
@@ -30,19 +31,26 @@ type run struct {
 	meta    string        // the meta table: P3 reads its view states, P5 checks its unit items
 	window  time.Duration // W in P4
 	seed    uint64
-	sched   *sched
-	faults  *rand.Rand // drawn only right after a gate
-	topo    *rand.Rand // drawn only right after a gate
-	arch    *rand.Rand // drawn only right after a gate
-	regions []*region
-	events  []Event
-	counts  map[string]int    // events by stream
-	dedup   map[string]bool   // the streams with DEDUP BY
-	fenced  map[string]bool   // the view versions that need the fenced handoff
-	sources map[string]string // the stream table of each view version's table, for P4
-	views   map[string]string // the view version of each view table, for P2
-	stop    chan struct{}     // closed at quiescence, or when the budget runs out
-	quiet   chan struct{}     // closed when nothing is left to deliver
+	started time.Time // when the stream tables were created
+	// catalogData is the catalog every region registers as deployed, and catalogHash its hash.
+	catalogData []byte
+	catalogHash string
+	sched       *sched
+	faults      *rand.Rand // drawn only right after a gate
+	topo        *rand.Rand // drawn only right after a gate
+	arch        *rand.Rand // drawn only right after a gate
+	regions     []*region
+	builds      []*projector.Compiled // by build; nil for the system's catalog
+	events      []Event
+	counts      map[string]int    // events by stream
+	dedup       map[string]bool   // the streams with DEDUP BY
+	fenced      map[string]bool   // the view versions that need the fenced handoff
+	sources     map[string]string // the stream table of each view version's table, for P4
+	views       map[string]string // the view version of each view table, for P2
+	// writeStart is when the writers start appending, after the run's start.
+	writeStart time.Duration
+	stop       chan struct{} // closed at quiescence, or when the budget runs out
+	quiet      chan struct{} // closed when nothing is left to deliver
 
 	mu         sync.Mutex
 	stats      Stats
@@ -65,26 +73,33 @@ func newRun(ctx context.Context, sc Scenario, sys System, seed uint64) (*run, er
 	if cfg.Catalog == nil || cfg.Naming.Store != cfg.Catalog.Catalog().Store {
 		return nil, fmt.Errorf("the system needs a catalog, and tables named for its store: got %+v", cfg.Naming)
 	}
+	data, merr := catalog.Marshal(cfg.Catalog.Catalog())
+	if merr != nil {
+		return nil, merr
+	}
 	r := &run{
-		sc:        sc,
-		sys:       sys,
-		cfg:       cfg,
-		meta:      cfg.Naming.MetaTable(),
-		window:    time.Duration(cfg.Catalog.Catalog().PruneWindowSeconds) * time.Second,
-		seed:      seed,
-		faults:    newRand(seed, streamFaults),
-		topo:      newRand(seed, streamTopology),
-		arch:      newRand(seed, streamArchive),
-		counts:    map[string]int{},
-		dedup:     map[string]bool{},
-		fenced:    map[string]bool{},
-		sources:   map[string]string{},
-		views:     map[string]string{},
-		stop:      make(chan struct{}),
-		quiet:     make(chan struct{}),
-		applied:   map[tableKey]int{},
-		expired:   map[tableKey]bool{},
-		divergent: map[tableKey]bool{},
+		sc:          sc,
+		sys:         sys,
+		cfg:         cfg,
+		meta:        cfg.Naming.MetaTable(),
+		window:      time.Duration(cfg.Catalog.Catalog().PruneWindowSeconds) * time.Second,
+		seed:        seed,
+		started:     time.Now(),
+		catalogData: data,
+		catalogHash: catalog.Hash(data),
+		faults:      newRand(seed, streamFaults),
+		topo:        newRand(seed, streamTopology),
+		arch:        newRand(seed, streamArchive),
+		counts:      map[string]int{},
+		dedup:       map[string]bool{},
+		fenced:      map[string]bool{},
+		sources:     map[string]string{},
+		views:       map[string]string{},
+		stop:        make(chan struct{}),
+		quiet:       make(chan struct{}),
+		applied:     map[tableKey]int{},
+		expired:     map[tableKey]bool{},
+		divergent:   map[tableKey]bool{},
 	}
 	for _, st := range cfg.Catalog.Catalog().Streams {
 		r.dedup[st.Name] = len(st.DedupBy) > 0
@@ -99,6 +114,10 @@ func newRun(ctx context.Context, sc Scenario, sys System, seed uint64) (*run, er
 		}
 	}
 	r.sched = newSched(seed, r.violatef)
+	r.writeStart = between(r.actorRNG("writers"), 0, sc.WriteStart)
+	if err := r.compileBuilds(); err != nil {
+		return nil, err
+	}
 	if err := r.generate(); err != nil {
 		return nil, err
 	}
@@ -167,8 +186,8 @@ func (r *run) generate() error {
 	return nil
 }
 
-// start opens every region's units and starts the writers, the backfills and the actor
-// that stops the run.
+// start opens every region's units and starts the writers, the backfills, the deploys and
+// the actor that stops the run.
 func (r *run) start() {
 	r.pending = r.sc.Writers
 	for _, rg := range r.regions {
@@ -179,9 +198,18 @@ func (r *run) start() {
 		if r.sc.Sweep != (Sweep{}) {
 			r.sched.goActor(rg.sweeper.run)
 		}
-		for _, c := range rg.coordinators() {
+		for _, d := range rg.drivers() {
 			r.pending++
-			r.sched.goActor(c.run)
+			rg.backfilling++
+			r.sched.goActor(d.run)
+		}
+		if r.sc.Builds != (Builds{}) {
+			r.pending++
+			r.sched.goActor(rg.deploy)
+		}
+		if r.sc.Builds.Retire > 0 {
+			r.pending++
+			r.sched.goActor(rg.retire)
 		}
 	}
 	for w := range r.sc.Writers {
@@ -194,17 +222,19 @@ func (r *run) start() {
 // the append is acknowledged. A retry gets a new event_id, so an append that applied
 // before its caller saw a timeout stays as an event of its own; on a DEDUP BY stream, the
 // retry finds the event stored. An event of a DEDUP BY stream may be appended in a second
-// region too, with its divergent payload if it has one.
+// region too, with its divergent payload if it has one, and with TimeSplit.Failover from
+// another client. The writer's clock is up to TimeSplit.Skew off.
 func (r *run) write(w int) {
 	id := "w" + strconv.Itoa(w)
-	rng := r.actorRNG(id)
-	ctx := withInvocation(context.Background(), &invocation{id: id, stallAt: -1})
+	rng, clocks := r.actorRNG(id), r.actorRNG(id+" clock")
+	ctx := withInvocation(context.Background(), &invocation{id: id, stallAt: -1, skew: r.clockSkew(clocks)})
 	// Entropy of its own keeps the writer's event_ids apart from the others'.
 	entropy := rand.NewChaCha8(sha256.Sum256(fmt.Appendf(nil, "%d %s", r.seed, id)))
 	engines := make([]*engine.Engine, len(r.regions))
 	for i, rg := range r.regions {
 		engines[i] = engine.New(rg.store, engine.Options{Region: rg.name, Prefix: r.cfg.Naming.Prefix, Entropy: entropy})
 	}
+	time.Sleep(r.writeStart)
 	for n := w; n < len(r.events); n += r.sc.Writers {
 		time.Sleep(between(rng, 0, r.sc.WriteGap))
 		ev, home := r.events[n], rng.IntN(len(engines))
@@ -218,11 +248,23 @@ func (r *run) write(w int) {
 				r.divergent[tableKey{r.cfg.Naming.StreamTable(ev.Stream), k}] = true
 				r.mu.Unlock()
 			}
-			r.append(ctx, engines[(home+1+rng.IntN(len(engines)-1))%len(engines)], ev.Stream, vals)
+			other, dup := engines[(home+1+rng.IntN(len(engines)-1))%len(engines)], ctx
+			if r.sc.TimeSplit.Failover {
+				dup = withInvocation(context.Background(), &invocation{id: id + " failover", stallAt: -1, skew: r.clockSkew(clocks)})
+			}
+			r.append(dup, other, ev.Stream, vals)
 		}
 	}
 	r.sched.gate(id, "done")
 	r.settle(1)
+}
+
+// clockSkew draws how far a client's clock is off, up to TimeSplit.Skew either way.
+func (r *run) clockSkew(rng *rand.Rand) time.Duration {
+	if s := r.sc.TimeSplit.Skew; s > 0 {
+		return between(rng, -s, s)
+	}
+	return 0
 }
 
 // append appends an event until it is acknowledged, and returns its key. On a DEDUP BY

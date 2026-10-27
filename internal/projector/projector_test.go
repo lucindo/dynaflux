@@ -53,10 +53,17 @@ AS SELECT page, count() AS views, sum(ms) AS total_ms, uniqExact(user_id) AS use
 FROM clicks
 GROUP BY page;
 
--- Idempotent only, and reads no ms.
+-- Reads no ms. Idempotent, but uniqExact takes the fenced handoff.
 CREATE MATERIALIZED VIEW page_users
 ORDER BY (page)
 AS SELECT page, uniqExact(user_id) AS users
+FROM clicks
+GROUP BY page;
+
+-- Idempotent only, and reads no ms.
+CREATE MATERIALIZED VIEW page_visitors
+ORDER BY (page)
+AS SELECT page, uniq(user_id) AS visitors
 FROM clicks
 GROUP BY page;
 
@@ -270,21 +277,23 @@ func (f *fixture) row(t *testing.T, version string, key ...expr.Value) string {
 func page(p string) expr.Value { return expr.String(p) }
 
 // TestHandleWithoutInsertSendsNoRequest: TTL deletes reach the projector as REMOVE records,
-// and a batch of them, or of MODIFY records, costs no store call.
+// and a batch of them costs no store call. A batch with a MODIFY reads only the view
+// states, for G3.
 func TestHandleWithoutInsertSendsNoRequest(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
 		recs      func(a, b store.Item) []projector.Record
+		queries   int64
 		divergent int
 	}{
-		{"no record", func(_, _ store.Item) []projector.Record { return nil }, 0},
+		{"no record", func(_, _ store.Item) []projector.Record { return nil }, 0, 0},
 		{"REMOVE records", func(a, b store.Item) []projector.Record {
 			return []projector.Record{{Op: projector.Remove, Seq: seq(1), Old: a}, {Op: projector.Remove, Seq: seq(2), Old: b}}
-		}, 0},
+		}, 0, 0},
 		{"a MODIFY with another payload and a REMOVE", func(a, b store.Item) []projector.Record {
 			return []projector.Record{{Op: projector.Modify, Seq: seq(1), Old: a, New: b}, {Op: projector.Remove, Seq: seq(2), Old: b}}
-		}, 1},
+		}, 1, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -293,8 +302,10 @@ func TestHandleWithoutInsertSendsNoRequest(t *testing.T) {
 				calls := &callCount{}
 				f := newFixture(t, func(b store.Backend) store.Backend { calls.Backend = b; return calls })
 				res := f.handle(t, tt.recs(f.click(t, "u1", "/a", 100), f.click(t, "u1", "/a", 200))...)
-				if n, archived := calls.n.Load(), f.archive.seqs(); n != 0 || len(archived) > 0 || res.Stats.Divergent != tt.divergent {
-					t.Errorf("%d store calls, archived %v, %d divergent; want 0, none, %d", n, archived, res.Stats.Divergent, tt.divergent)
+				n, queries, archived := calls.n.Load(), calls.queries.Load(), f.archive.seqs()
+				if n != tt.queries || queries != tt.queries || len(archived) > 0 || res.Stats.Divergent != tt.divergent {
+					t.Errorf("%d store calls, %d queries, archived %v, %d divergent; want only %d queries, none archived, %d divergent",
+						n, queries, archived, res.Stats.Divergent, tt.queries, tt.divergent)
 				}
 			})
 		})
@@ -477,11 +488,11 @@ func TestHandleReportsOnlyBreakersItOpens(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var f *fixture
 		var markErr error
-		first := meta.Failure{Unit: "shardId-2", Seq: padSeq(t, seq(9)), EventID: "e", Error: "first"}
+		first := meta.Failure{Cause: meta.CauseRecord, Unit: "shardId-2", Seq: padSeq(t, seq(9)), EventID: "e", Error: "first"}
 		// Another unit's batch opens the breaker after this batch read the view states.
 		f = newFixture(t, func(b store.Backend) store.Backend {
 			return &afterViewStates{Backend: b, do: func(ctx context.Context) {
-				_, markErr = f.meta.MarkBroken(ctx, "page_rates@v1", first)
+				_, _, markErr = f.meta.MarkBroken(ctx, "page_rates@v1", "clicks", first)
 			}}
 		})
 		res := f.handle(t, insert(1, f.click(t, "u1", "/a", 0))) // page_rates divides by ms
@@ -540,10 +551,10 @@ func TestHandleSkipsVersionItFoundBroken(t *testing.T) {
 // another unit once the core has read the view states.
 func openBreakerAfterViewStates(t *testing.T, f **fixture) func(store.Backend) store.Backend {
 	t.Helper()
-	other := meta.Failure{Unit: "shardId-2", Seq: padSeq(t, seq(9)), EventID: "e", Error: "other"}
+	other := meta.Failure{Cause: meta.CauseRecord, Unit: "shardId-2", Seq: padSeq(t, seq(9)), EventID: "e", Error: "other"}
 	return func(b store.Backend) store.Backend {
 		return &afterViewStates{Backend: b, do: func(ctx context.Context) {
-			if _, err := (*f).meta.MarkBroken(ctx, "page_rates@v1", other); err != nil {
+			if _, _, err := (*f).meta.MarkBroken(ctx, "page_rates@v1", "clicks", other); err != nil {
 				t.Error(err)
 			}
 		}}
@@ -720,13 +731,11 @@ func TestHandleAppliesAdditiveVersionOnlyOnceActivating(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newPendingFixture(t, nil)
 		f.handle(t, insert(1, f.click(t, "u1", "/a", 100)))
-		got := []string{f.row(t, "page_totals@v1", page("/a")), f.row(t, "page_users@v1", page("/a"))}
-		if want := []string{"", "/a 1"}; !slices.Equal(got, want) {
+		got := []string{f.row(t, "page_totals@v1", page("/a")), f.row(t, "page_users@v1", page("/a")), f.row(t, "page_visitors@v1", page("/a"))}
+		if want := []string{"", "", "/a 1"}; !slices.Equal(got, want) {
 			t.Errorf("rows while pending %q, want %q", got, want)
 		}
-		if err := f.meta.SetViewState(t.Context(), "page_totals@v1", meta.Activating); err != nil {
-			t.Fatal(err)
-		}
+		f.activate(t, "page_totals@v1")
 		time.Sleep(meta.MaxViewStateAge) // the core uses the states it read until then
 		f.handle(t, insert(2, f.click(t, "u2", "/a", 200)))
 		if got, want := f.row(t, "page_totals@v1", page("/a")), "/a 200 2.00 200 200 1 1"; got != want {
@@ -831,11 +840,11 @@ func TestRowMergesSplitItems(t *testing.T) {
 	})
 }
 
-// callCount counts the store calls.
+// callCount counts the store calls, and the queries among them.
 type callCount struct {
 	store.Backend
 
-	n atomic.Int64
+	n, queries atomic.Int64
 }
 
 func (c *callCount) Get(ctx context.Context, table string, k store.Key, consistent bool) (store.Item, error) {
@@ -850,6 +859,7 @@ func (c *callCount) BatchGet(ctx context.Context, table string, ks []store.Key, 
 
 func (c *callCount) Query(ctx context.Context, table string, q store.Query) iter.Seq2[store.Item, error] {
 	c.n.Add(1)
+	c.queries.Add(1)
 	return c.Backend.Query(ctx, table, q)
 }
 

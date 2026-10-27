@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/backfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/store"
@@ -40,10 +41,13 @@ var (
 // writer, which has no deadline and never crashes.
 type invocation struct {
 	id       string
+	start    time.Time
 	deadline time.Time     // zero for harness actors
-	noInsert bool          // a core invocation whose batch holds no INSERT
+	idle     bool          // a core invocation whose batch holds neither INSERT nor MODIFY
 	stallAt  int           // the request whose response stalls; -1 for none
+	crashAt  int           // the request at which a core invocation dies; -1 for none
 	stall    time.Duration // how long before the deadline the stalled response returns
+	skew     time.Duration // a writer's clock offset, which its appends' ingest_time carries
 	// taken is set when a writer's write of an event found another call's event at its key.
 	// Only the writer touches it.
 	taken bool
@@ -84,6 +88,14 @@ func (inv *invocation) admit(now time.Time) (int, bool, bool) {
 	return inv.requests - 1, true, inv.returned
 }
 
+// lifetime is how long a core invocation lives: 0 for a harness actor.
+func (inv *invocation) lifetime() time.Duration {
+	if inv.deadline.IsZero() {
+		return 0
+	}
+	return inv.deadline.Sub(inv.start)
+}
+
 func (inv *invocation) isDead() bool {
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
@@ -110,32 +122,50 @@ type region struct {
 	store    store.Backend // mem behind the gates and faults: what the code under test gets
 	archiver Archiver
 	archive  *archive
+	runs     *backfill.MemRuns // the backfills' staged objects
 	sweeper  *sweeper
 	streams  map[string]*stream // by table
 	order    []*stream          // in catalog order
 	mappings []*mapping
 	links    []*link
-	pool     []Core // idle warm containers
-	unitIDs  map[string]bool
-	units    map[string]*unit // by unit key, as high-water marks name them
+	pool     []container // idle warm containers
+	build    int         // the build that new containers run
+	// backfillStart is when the region's backfills start with Backfill.Together, after the
+	// run's start; backfilling counts those that haven't ended. retiredAt is when the region's
+	// tombstone of Config.Retire was first stored, zero before.
+	backfillStart time.Duration
+	backfilling   int
+	retiredAt     time.Time
+	unitIDs       map[string]bool
+	units         map[string]*unit // by unit key, as high-water marks name them
 	// written holds the keys of the items written to each view table, for P2.
 	written map[string]map[store.Key]bool
+	// delivered holds when the last invocation that delivered each record started, for P10.
+	delivered map[RecordID]time.Time
 }
 
 func newRegion(ctx context.Context, r *run, i int) (*region, error) {
 	rg := &region{
-		run:     r,
-		name:    "r" + strconv.Itoa(i),
-		mem:     mem.New(),
-		archive: &archive{cfg: r.sc.Archive},
-		streams: map[string]*stream{},
-		unitIDs: map[string]bool{},
-		units:   map[string]*unit{},
-		written: map[string]map[store.Key]bool{},
+		run:       r,
+		name:      "r" + strconv.Itoa(i),
+		mem:       mem.New(),
+		archive:   &archive{cfg: r.sc.Archive},
+		runs:      backfill.NewMemRuns(),
+		streams:   map[string]*stream{},
+		unitIDs:   map[string]bool{},
+		units:     map[string]*unit{},
+		written:   map[string]map[store.Key]bool{},
+		delivered: map[RecordID]time.Time{},
 	}
 	rg.store = gated{rg}
 	rg.archiver = archiver{rg}
 	rg.sweeper = &sweeper{rg: rg, id: rg.name + " sweeper", queue: newDueQueue[sweep]()}
+	if r.sc.Builds.Switch > 0 {
+		rg.build = buildOld
+	}
+	if r.sc.Backfill.Together {
+		rg.backfillStart = between(r.actorRNG(rg.name+" backfill"), 0, r.sc.Backfill.Within)
+	}
 	rg.mappings = []*mapping{{rg: rg, name: "m0", start: time.Now()}}
 	if r.sc.ESM.Replay > 0 {
 		start := time.Now().Add(between(r.topo, 0, r.sc.ESM.Replay))
@@ -148,6 +178,9 @@ func newRegion(ctx context.Context, r *run, i int) (*region, error) {
 		rg.order = append(rg.order, st)
 	}
 	if err := rg.setLive(ctx); err != nil {
+		return nil, err
+	}
+	if _, err := meta.New(rg.mem, r.meta).RegisterCatalog(ctx, r.catalogData, "sim"); err != nil {
 		return nil, err
 	}
 	return rg, nil
@@ -163,10 +196,11 @@ func (rg *region) setLive(ctx context.Context) error {
 			if r.backfills(id) {
 				continue
 			}
-			for _, s := range []meta.State{meta.Activating, meta.Live} {
-				if err := m.SetViewState(ctx, id, s); err != nil {
-					return err
-				}
+			if _, err := m.Activate(ctx, id, vv.Stream, meta.SplitFence, meta.DefaultBounds); err != nil {
+				return err
+			}
+			if err := m.MakeLive(ctx, id, time.Time{}); err != nil {
+				return err
 			}
 		}
 	}
@@ -225,14 +259,14 @@ func (rg *region) enter(ctx context.Context, k kind, op string) (time.Duration, 
 		runtime.Goexit()
 	}
 	r.count(&r.stats.Requests)
-	if inv.noInsert {
-		r.violatef("P9: %s: %s for a batch without an INSERT", inv.id, op)
+	if inv.idle {
+		r.violatef("P9: %s: %s for a batch without an INSERT or a MODIFY", inv.id, op)
 	}
 	core := !inv.deadline.IsZero()
 	if d, has := ctx.Deadline(); core && (!has || d.After(inv.deadline)) {
 		r.violatef("P7: %s: %s with a context that outlives the invocation's deadline", inv.id, op)
 	}
-	if core && r.draw(r.sc.Faults.Crash) {
+	if core && (r.draw(r.sc.Faults.Crash) || n == inv.crashAt) {
 		r.count(&r.stats.Crashes)
 		inv.kill()
 		runtime.Goexit()
@@ -399,6 +433,9 @@ func (g gated) Put(ctx context.Context, table string, it store.Item, c store.Con
 		g.rg.landLate(ctx, table, it, c)
 	case faultNone, faultAmbiguous, faultRetried:
 	}
+	if skew := invocationOf(ctx).skew; skew != 0 && g.rg.streams[table] != nil {
+		g.rg.skew(it, skew)
+	}
 	err := g.rg.apply(ctx, table, it, c)
 	if g.rg.streams[table] != nil {
 		var ce *store.ConditionError
@@ -416,6 +453,14 @@ func (g gated) Put(ctx context.Context, table string, it store.Item, c store.Con
 		err = errAmbiguous
 	}
 	return err
+}
+
+// skew shifts an append's ingest_time by its writer's clock offset. It changes the caller's
+// item, as the writer's clock would have written it, so the append still knows its event.
+func (rg *region) skew(it store.Item, by time.Duration) {
+	at := integer(it[catalog.AttrIngestTime]) + by.Microseconds()
+	it[catalog.AttrIngestTime] = store.Value{Type: store.N, Str: strconv.FormatInt(at, 10)}
+	rg.run.count(&rg.run.stats.Skewed)
 }
 
 // landLate applies a write up to LateMax after its invocation's deadline. The invocation
@@ -446,24 +491,27 @@ func (rg *region) apply(ctx context.Context, table string, it store.Item, c stor
 		return err
 	}
 	if getErr == nil {
-		rg.checkWrite(table, cur, it)
+		rg.checkWrite(table, cur, it, invocationOf(ctx).lifetime())
 	}
 	switch {
 	case rg.run.views[table] != "":
+		rg.checkRetired(ctx, table)
 		if rg.written[table] == nil {
 			rg.written[table] = map[store.Key]bool{}
 		}
 		rg.written[table][keyOf(it)] = true
 	case table == rg.run.meta:
 		rg.sweeper.expire(table, it)
+		rg.noteTombstone(it)
 	}
 	return nil
 }
 
-// checkWrite checks a write that replaced cur with next: the row version rises by
-// exactly one, and a marker's owner, a unit's progress and its fences never go back
-// (P5); a row's high-water marks stay within the units that can still deliver (P4).
-func (rg *region) checkWrite(table string, cur, next store.Item) {
+// checkWrite checks a write that replaced cur with next, sent by an invocation that lives
+// lifetime: the row version rises by exactly one, and a marker's owner, a unit's progress and
+// its fences never go back (P5); a row's high-water marks stay within the units that can
+// still deliver (P4).
+func (rg *region) checkWrite(table string, cur, next store.Item, lifetime time.Duration) {
 	r := rg.run
 	where := rg.name + " " + table + " " + keyText(next)
 	if v, ok := next[catalog.AttrRowVersion]; ok {
@@ -490,7 +538,7 @@ func (rg *region) checkWrite(table string, cur, next store.Item) {
 		}
 	}
 	if hwm, ok := next[catalog.AttrHighWaterMarks]; ok {
-		rg.checkMarks(where, table, cur[catalog.AttrHighWaterMarks].Map, hwm.Map)
+		rg.checkMarks(where, table, cur[catalog.AttrHighWaterMarks].Map, hwm.Map, lifetime)
 	}
 }
 
@@ -498,9 +546,9 @@ func (rg *region) checkWrite(table string, cur, next store.Item) {
 // with next: no entry of a unit that finished by prunableSince, and at most one per unit
 // of the view's stream that may still need its own, plus the backfill's. It counts the
 // entries the write dropped.
-func (rg *region) checkMarks(where, table string, old, next map[string]store.Value) {
+func (rg *region) checkMarks(where, table string, old, next map[string]store.Value, lifetime time.Duration) {
 	r := rg.run
-	since := rg.prunableSince(time.Now())
+	since := rg.prunableSince(time.Now(), lifetime)
 	n, bound := len(next), rg.streams[r.sources[table]].liveUnits(since)+1
 	if n > bound {
 		r.violatef("P4: %s: %d high-water marks, over the bound %d", where, n, bound)
@@ -528,13 +576,14 @@ func (rg *region) checkMarks(where, table string, old, next map[string]store.Val
 }
 
 // prunableSince returns the time at or before which a unit must have finished for a row
-// write that lands at now to drop its high-water mark. A unit finished at f had its progress stamped by f + timeout at
-// the latest, and a write lands at most a timeout after it read progress, plus LateMax when
-// writes land late; from f + W + 2·timeout (+ LateMax) on, every write prunes the unit's
-// entry.
-func (rg *region) prunableSince(now time.Time) time.Time {
+// write that lands at now, from an invocation that lives lifetime, to drop its high-water
+// mark. A unit finished at f had its progress stamped by f + timeout at the latest, and a
+// write lands at most its invocation's lifetime after it read progress, plus LateMax when
+// writes land late; from f + W + timeout + lifetime (+ LateMax) on, every write prunes the
+// unit's entry. A backfill step may live longer than a projector's timeout.
+func (rg *region) prunableSince(now time.Time, lifetime time.Duration) time.Time {
 	sc := rg.run.sc
-	since := now.Add(-rg.run.window - 2*sc.ESM.Timeout)
+	since := now.Add(-rg.run.window - sc.ESM.Timeout - lifetime)
 	if sc.Faults.Late > 0 {
 		since = since.Add(-sc.Faults.LateMax)
 	}
@@ -552,14 +601,32 @@ func (s *stream) liveUnits(since time.Time) int {
 	return n
 }
 
-// acquire takes a warm container, or starts a new one.
-func (rg *region) acquire(actor string, rng *rand.Rand) Core {
-	rg.run.sched.gate(actor, "acquire")
-	if len(rg.pool) == 0 {
-		rg.run.count(&rg.run.stats.Containers)
-		return rg.run.sys.NewCore(rg.store, rg.archiver)
+// container is a warm container: its core, and the build the core runs.
+type container struct {
+	core  Core
+	build int
+}
+
+// acquire takes a warm container of the region's build, or of the full build for a backfill
+// worker, or starts a new one.
+func (rg *region) acquire(actor string, rng *rand.Rand, worker bool) container {
+	r := rg.run
+	r.sched.gate(actor, "acquire")
+	build := rg.build
+	if worker {
+		build = buildFull
 	}
-	i := rng.IntN(len(rg.pool))
+	var idle []int
+	for i, c := range rg.pool {
+		if c.build == build {
+			idle = append(idle, i)
+		}
+	}
+	if len(idle) == 0 {
+		r.count(&r.stats.Containers)
+		return container{core: r.sys.NewCore(rg.store, rg.archiver, r.builds[build]), build: build}
+	}
+	i := idle[rng.IntN(len(idle))]
 	c := rg.pool[i]
 	rg.pool = slices.Delete(rg.pool, i, i+1)
 	return c

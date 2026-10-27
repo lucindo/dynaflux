@@ -5,47 +5,53 @@ package simulation
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math/rand/v2"
-	"slices"
 	"strconv"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/backfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
-	"github.com/lucindo/dynaflux/internal/keys"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/projector"
 )
 
 const (
-	watermarkPoll = 10 * time.Second // between a coordinator's reads of the archive's watermark
-	stepRetry     = time.Second      // before a coordinator repeats a step that failed
+	stepRetry     = time.Second // before the state machine repeats a step that failed
+	backfillPoll  = 10 * time.Second
+	backfillBytes = 2560 << 10 // a step's memory: runs of a few dozen records, merged in passes
+	stepRequests  = 8          // what a step sends for, as a batch sends for its records
+	crashWithin   = 200        // a crashed step dies at one of its first crashWithin requests
+	twinSteps     = 5          // the most steps a duplicate worker takes
+	execution     = "local"
 )
 
-// coordinator backfills one view version in one region, as the backfill command will
-// (S1b rule 2, S9 rule 4): it activates the version and fences the stream's units, unless
-// the version is idempotent-only; waits until the archive holds every record put before the
-// cut; selects the archived records by the fences on the units' items, read after the
-// archive; applies them chunk by chunk, each chunk in a worker invocation of its own; and
-// makes the version live. A failed step is repeated; one that finds the version broken ends
-// the backfill.
-type coordinator struct {
+// driver backfills one view version in one region as dynaflux backfill and the state machine
+// do: backfill.Start, then backfill.Step in a loop, each step an invocation of a backfill
+// worker on a container of the full build, honoring the wait it returns. A step that fails is
+// repeated. The driver adds a production run's faults: a step that dies at a random request,
+// after which the job is claimed for a new attempt; a duplicate worker that steps the same
+// attempt for a while, with another deadline; and staged runs lost before apply.
+type driver struct {
 	rg      *region
 	id      string
 	version string
 	stream  *stream
-	fenced  bool // whether the version needs the fenced handoff
-	ctx     context.Context
 	rng     *rand.Rand
-	meta    *meta.Meta
-	chunks  int      // worker invocations so far
-	listed  []string // the units of the last listing
+	attempt int
+	steps   int
+	twins   int
+	kept    bool         // whether the job keeps its staged runs from now on: it lost them, or never will
+	env     backfill.Env // each step's container gives its Core, and its name its Entropy
 }
 
-// coordinators returns the region's coordinators, one per version the run backfills.
-func (rg *region) coordinators() []*coordinator {
+// drivers returns the region's drivers, one per version the run backfills.
+func (rg *region) drivers() []*driver {
 	r := rg.run
-	var out []*coordinator
+	var out []*driver
 	for _, v := range r.cfg.Catalog.Catalog().Views {
 		for i := range v.Versions {
 			vv := &v.Versions[i]
@@ -54,78 +60,110 @@ func (rg *region) coordinators() []*coordinator {
 				continue
 			}
 			actor := rg.name + " backfill " + id
-			out = append(out, &coordinator{
-				rg:      rg,
-				id:      actor,
-				version: id,
-				stream:  rg.streams[r.cfg.Naming.StreamTable(vv.Stream)],
-				fenced:  vv.FencedHandoff(),
-				ctx:     withInvocation(context.Background(), &invocation{id: actor, stallAt: -1}),
-				rng:     r.actorRNG(actor),
-				meta:    meta.New(rg.store, r.meta),
-			})
+			s := rg.streams[r.cfg.Naming.StreamTable(vv.Stream)]
+			out = append(out, &driver{rg: rg, id: actor, version: id, stream: s, rng: r.actorRNG(actor), env: rg.backfillEnv()})
 		}
 	}
 	return out
 }
 
-func (c *coordinator) run() {
-	r := c.rg.run
-	defer func() {
-		r.sched.gate(c.id, "done")
-		r.settle(1)
-	}()
-	time.Sleep(between(c.rng, 0, r.sc.Backfill.Within))
-	if !c.do("activate", func() error { return c.meta.SetViewState(c.ctx, c.version, meta.Activating) }) {
-		return
-	}
-	cut := time.Now()
-	if c.fenced && !c.do("fence", func() error {
-		var err error
-		cut, err = c.meta.FenceUnits(c.ctx, c.stream.name, c.version, c.list)
-		return err
-	}) {
-		return
-	}
-	r.sched.gate(c.id, "archive")
-	for !c.rg.archive.completeThrough(cut, time.Now()) {
-		time.Sleep(watermarkPoll)
-		r.sched.gate(c.id, "watermark")
-	}
-	recs := c.read()
-	var sel []projector.BackfillRecord
-	if !c.do("select", func() error {
-		fences, err := c.fences(unitsOf(recs))
-		if err == nil {
-			sel, err = projector.SelectBackfill(recs, fences)
-		}
-		return err
-	}) {
-		return
-	}
-	for chunk := range slices.Chunk(sel, r.sc.Backfill.Chunk) {
-		if !c.do("apply", func() error { return c.apply(chunk) }) {
-			return
-		}
-	}
-	if c.do("live", func() error { return c.meta.SetViewState(c.ctx, c.version, meta.Live) }) {
-		r.count(&r.stats.Backfills)
+// backfillEnv returns a step's environment in the region: its store, archive and staging
+// behind the gates.
+func (rg *region) backfillEnv() backfill.Env {
+	r := rg.run
+	return backfill.Env{
+		Naming:  r.cfg.Naming,
+		Catalog: r.cfg.Catalog.Catalog(),
+		Hash:    r.catalogHash,
+		Meta:    meta.New(rg.store, r.meta),
+		Store:   rg.store,
+		Units:   lister{rg},
+		Tables:  tables{rg},
+		Archive: archiveReader{rg},
+		Runs:    gatedRuns{rg},
+		Lag:     lagger{rg},
+		Bounds:  meta.DefaultBounds,
+		Memory:  backfillBytes,
+		Chunk:   r.sc.Backfill.Chunk,
+		Log:     slog.New(slog.DiscardHandler),
 	}
 }
 
-// do repeats f until it succeeds, and reports whether it did. It gives up when the run
-// stops, or when f finds the version broken.
-func (c *coordinator) do(step string, f func() error) bool {
-	r := c.rg.run
+func (d *driver) run() {
+	r := d.rg.run
+	defer func() {
+		r.sched.gate(d.id, "done")
+		d.rg.backfilling--
+		r.settle(1)
+	}()
+	start := between(d.rng, 0, r.sc.Backfill.Within)
+	if r.sc.Backfill.Together {
+		start = d.rg.backfillStart
+	}
+	time.Sleep(start)
+	if !d.start() {
+		return
+	}
+	d.kept = !chance(d.rng, r.sc.Backfill.Lose)
 	for !r.stopped() {
-		err := f()
+		d.lose()
+		if chance(d.rng, r.sc.Backfill.Twin) {
+			d.twin()
+		}
+		crashAt := -1
+		if chance(d.rng, r.sc.Backfill.Crash) {
+			crashAt = d.rng.IntN(crashWithin)
+		}
+		d.steps++
+		wait, done, err := d.step(d.id+" #"+strconv.Itoa(d.steps), d.rng, d.attempt, r.sc.Backfill.Step, crashAt)
+		switch {
+		case err == nil && done:
+			d.finish()
+			return
+		case err == nil:
+			time.Sleep(wait)
+		case crashAt >= 0 && errors.Is(err, errCrashed):
+			r.count(&r.stats.Resumed)
+			if !d.start() {
+				return
+			}
+		case d.failed(err):
+			return
+		default:
+			time.Sleep(stepRetry)
+		}
+	}
+}
+
+// start creates the job, or claims it for a new attempt, as dynaflux backfill does. The job
+// reads the archive, split at fences, or with Backfill.Table the stream table: an additive
+// version split by time, an idempotent one not split.
+func (d *driver) start() bool {
+	r := d.rg.run
+	ctx := withInvocation(context.Background(), &invocation{id: d.id, stallAt: -1})
+	split := meta.SplitFence
+	switch {
+	case r.sc.Backfill.Table && r.fenced[d.version]:
+		split = meta.SplitTime
+	case r.sc.Backfill.Table:
+		split = meta.SplitNone
+	}
+	req := backfill.Request{Version: d.version, Stream: d.stream.name, Name: d.version, Execution: func(int) string { return execution }, Split: split, Rate: r.sc.Backfill.Rate}
+	for !r.stopped() {
+		j, err := backfill.Start(ctx, d.env.Meta, req)
 		switch {
 		case err == nil:
+			d.attempt = j.Attempt
 			return true
-		case errors.Is(err, meta.ErrTransition), errors.Is(err, meta.ErrNotActivating), errors.Is(err, projector.ErrBroken):
+		case errors.Is(err, meta.ErrTransition):
+			// The version broke or was retired while the job ran: dynaflux backfill refuses it
+			// (DF7502).
 			return false
-		case !errors.Is(err, errTransient) && !errors.Is(err, errAmbiguous) && !errors.Is(err, errTimeout) && !errors.Is(err, errCrashed):
-			r.violatef("backfill: %s: %s: %v", c.id, step, err)
+		case errors.Is(err, meta.ErrJobExists):
+			// The step that died, or a duplicate worker, ended the job.
+			d.finish()
+			return false
+		case d.failed(err):
 			return false
 		}
 		time.Sleep(stepRetry)
@@ -133,73 +171,155 @@ func (c *coordinator) do(step string, f func() error) bool {
 	return false
 }
 
-// list returns the IDs of the stream's units that DescribeStream returns: all but those
-// that every mapping finished delivering, which stand for units past the stream's
-// retention.
-func (c *coordinator) list(ctx context.Context) ([]string, error) {
-	lat, f := c.rg.enter(ctx, kindRead, "list "+c.stream.name)
+// step runs one step of attempt as an invocation of a backfill worker that times out after
+// timeout and, unless crashAt is negative, dies at that request.
+func (d *driver) step(id string, rng *rand.Rand, attempt int, timeout time.Duration, crashAt int) (time.Duration, bool, error) {
+	var wait time.Duration
+	var done bool
+	o := d.rg.invoke(id, rng, invocationSpec{n: stepRequests, worker: true, timeout: timeout, crashAt: crashAt},
+		func(ctx context.Context, core Core) (projector.Result, error) {
+			env := d.env
+			env.Core = core
+			seed := sha256.Sum256(fmt.Appendf(nil, "%d %s", d.rg.run.seed, id))
+			env.Entropy = rand.NewChaCha8(seed)
+			var err error
+			wait, done, err = backfill.Step(ctx, &env, d.version, attempt, execution)
+			return projector.Result{}, err
+		})
+	if o.err != nil {
+		// A step that timed out may still run: only a finished one has set wait and done.
+		return 0, false, o.err
+	}
+	return wait, done, nil
+}
+
+// failed reports, as a violation, an error that no fault explains.
+func (d *driver) failed(err error) bool {
+	for _, injected := range []error{errTransient, errAmbiguous, errTimeout, errCrashed, context.DeadlineExceeded} {
+		if errors.Is(err, injected) {
+			return false
+		}
+	}
+	d.rg.run.violatef("backfill: %s: %v", d.id, err)
+	return true
+}
+
+// twin starts a duplicate worker of the current attempt, as a step that Step Functions
+// repeated while the first still ran, or a continuation that overlaps its predecessor. It
+// takes a few steps, each with a deadline of its own, so its runs have other extents.
+func (d *driver) twin() {
+	r := d.rg.run
+	r.count(&r.stats.Twins)
+	d.twins++
+	id := d.id + " twin " + strconv.Itoa(d.twins)
+	attempt, steps := d.attempt, 1+d.rng.IntN(twinSteps)
+	timeout := between(d.rng, r.sc.Backfill.Step/2+time.Minute/2, r.sc.Backfill.Step)
+	r.sched.goActor(func() {
+		rng := r.actorRNG(id)
+		for i := range steps {
+			if r.stopped() {
+				break
+			}
+			wait, done, err := d.step(id+" #"+strconv.Itoa(i+1), rng, attempt, timeout, -1)
+			if done || err != nil && d.failed(err) {
+				break
+			}
+			time.Sleep(max(wait, stepRetry))
+		}
+		r.sched.gate(id, "done")
+	})
+}
+
+// lose deletes the job's staged runs once it applies them, as their lifecycle rule would,
+// unless the job lost them already or is not to.
+func (d *driver) lose() {
+	r := d.rg.run
+	if d.kept {
+		return
+	}
+	r.sched.gate(d.id, "lose")
+	j, ok, err := meta.New(d.rg.mem, r.meta).Job(context.Background(), d.version)
+	if err != nil || !ok || j.Phase != meta.PhaseApply {
+		return
+	}
+	d.kept = true
+	r.count(&r.stats.Lost)
+	if err = d.rg.runs.DeletePrefix(context.Background(), j.Staging); err != nil {
+		r.violatef("harness: %s: delete the staged runs: %v", d.id, err)
+	}
+}
+
+// finish counts what the job did.
+func (d *driver) finish() {
+	r := d.rg.run
+	j, _, err := meta.New(d.rg.mem, r.meta).Job(context.Background(), d.version)
+	if err != nil {
+		r.violatef("harness: %s: read the job: %v", d.id, err)
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stats.Chunks += j.Chunks
+	if j.State == meta.JobDone {
+		r.stats.Backfills++
+	}
+	if j.Fresh {
+		r.stats.Fresh++
+	}
+}
+
+// lister lists a stream's units as DescribeStream does: all but those that every mapping
+// finished delivering, which stand for units past the stream's retention.
+type lister struct{ rg *region }
+
+func (l lister) Units(ctx context.Context, table string) ([]string, error) {
+	lat, f := l.rg.enter(ctx, kindRead, "list "+table)
 	defer time.Sleep(lat)
 	if f == faultTransient {
 		return nil, errTransient
 	}
-	c.stream.listed = true
-	c.listed = nil
-	for _, u := range c.stream.units {
+	s := l.rg.streams[table]
+	s.listed = true
+	var out []string
+	for _, u := range s.units {
 		if u.finished.IsZero() {
-			c.listed = append(c.listed, u.id)
+			out = append(out, u.id)
 		}
 	}
-	return c.listed, nil
+	return out, nil
 }
 
-// read returns the stream's records in the archive, delivered or in the error prefix.
-func (c *coordinator) read() []projector.BackfillRecord {
-	c.rg.run.sched.gate(c.id, "read")
-	var out []projector.BackfillRecord
-	for _, e := range c.rg.archive.arrived(time.Now()) {
-		if e.stream == c.stream.name {
-			out = append(out, projector.BackfillRecord{Unit: e.unit, Seq: e.rec.Seq, Item: e.rec.New})
+// tables describes the stream tables, which every region created when the run started.
+type tables struct{ rg *region }
+
+func (t tables) Born(ctx context.Context, table string) (time.Time, bool, error) {
+	lat, f := t.rg.enter(ctx, kindRead, "describe "+table)
+	defer time.Sleep(lat)
+	if f == faultTransient {
+		return time.Time{}, false, errTransient
+	}
+	return t.rg.run.started, false, nil
+}
+
+// lagger reports the region's projector lag: the age of the oldest record a started mapping
+// hasn't delivered.
+type lagger struct{ rg *region }
+
+func (l lagger) Lag(ctx context.Context) (time.Duration, error) {
+	lat, f := l.rg.enter(ctx, kindRead, "lag")
+	defer time.Sleep(lat)
+	if f == faultTransient {
+		return 0, errTransient
+	}
+	now, lag := time.Now(), time.Duration(0)
+	for _, s := range l.rg.order {
+		for _, u := range s.units {
+			for _, ln := range u.lanes {
+				if !ln.m.start.After(now) && ln.acked < len(ln.at) {
+					lag = max(lag, now.Sub(ln.at[ln.acked]))
+				}
+			}
 		}
 	}
-	return out
-}
-
-// unitsOf returns the units of recs.
-func unitsOf(recs []projector.BackfillRecord) []string {
-	var ids []string
-	for _, rec := range recs {
-		ids = append(ids, rec.Unit)
-	}
-	slices.Sort(ids)
-	return slices.Compact(ids)
-}
-
-// fences reads the items of units, consistently, and returns their fences for the version.
-func (c *coordinator) fences(units []string) (map[string]string, error) {
-	unitKeys := make([]string, len(units))
-	for i, id := range units {
-		unitKeys[i] = keys.UnitKey(id)
-	}
-	items, err := c.meta.Units(c.ctx, c.stream.name, unitKeys, true)
-	if err != nil {
-		return nil, err
-	}
-	fences := map[string]string{}
-	for _, u := range items {
-		if f, ok := u.Fences[c.version]; ok {
-			fences[u.ID] = f
-		}
-	}
-	return fences, nil
-}
-
-// apply applies a chunk in one worker invocation.
-func (c *coordinator) apply(chunk []projector.BackfillRecord) error {
-	r := c.rg.run
-	c.chunks++
-	r.count(&r.stats.Chunks)
-	id := c.id + " #" + strconv.Itoa(c.chunks)
-	return c.rg.invoke(id, c.rng, len(chunk), func(ctx context.Context, core Core) (projector.Result, error) {
-		return projector.Result{}, core.ApplyBackfill(ctx, c.version, chunk)
-	}).err
+	return lag, nil
 }

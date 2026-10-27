@@ -61,8 +61,7 @@ FROM page_views
 GROUP BY site, day;
 
 -- Ties in ms go by event. A poison event's label, over 4 KB, fails the evaluation though it
--- is never the largest. Idempotent only, so a record reaches it live while it is pending,
--- and again through its backfill: pages counts the record's page once.
+-- is never the largest. Idempotent only, but uniqExact takes the fenced handoff.
 CREATE MATERIALIZED VIEW user_latest
 ORDER BY (user_id)
 AS SELECT user_id, argMax(page, ms) AS slowest_page, argMin(page, ms) AS fastest_page,

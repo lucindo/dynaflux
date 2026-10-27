@@ -63,6 +63,9 @@ func (e *explainer) viewLayout(est *estimate, i int) {
 }
 
 func backfillText(vv *catalog.ViewVersion) string {
+	if !vv.FencedHandoff() {
+		return "no fence: every aggregate is idempotent"
+	}
 	var additive []string
 	for _, a := range vv.Aggregates {
 		if !a.Fn.Idempotent() && !slices.Contains(additive, string(a.Fn)) {
@@ -70,7 +73,7 @@ func backfillText(vv *catalog.ViewVersion) string {
 		}
 	}
 	if len(additive) == 0 {
-		return "no fence: every aggregate is idempotent"
+		return "fenced handoff: uniqExact counts a value only for the event that marked it"
 	}
 	return "fenced handoff: " + andList(additive) + " " + plural(float64(len(additive)), "is", "are") + " additive"
 }

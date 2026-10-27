@@ -115,9 +115,11 @@ func (l *lane) nextID() string {
 	return l.id + " #" + strconv.Itoa(l.invocations)
 }
 
+// outcome is an invocation's result, and when it started.
 type outcome struct {
-	res projector.Result
-	err error
+	res   projector.Result
+	err   error
+	start time.Time
 }
 
 // call is one invocation in flight; out is set before finished closes.
@@ -131,16 +133,24 @@ type call struct {
 func (m *mapping) invoke(l *lane, id string, rng *rand.Rand, recs []projector.Record) outcome {
 	r := m.rg.run
 	b := projector.Batch{Stream: l.unit.s.name, Unit: l.unit.id, Records: make([]projector.Record, len(recs))}
-	inserts := 0
+	sends := 0 // the records a core sends for: INSERTs, and MODIFYs for G3
 	for i, rec := range recs {
 		b.Records[i] = cloneRecord(rec)
-		if rec.Op == projector.Insert {
-			inserts++
+		if rec.Op != projector.Remove {
+			sends++
 		}
 	}
-	o := m.rg.invoke(id, rng, inserts, func(ctx context.Context, core Core) (projector.Result, error) {
+	o := m.rg.invoke(id, rng, invocationSpec{n: sends, stalls: true, timeout: r.sc.ESM.Timeout, crashAt: -1}, func(ctx context.Context, core Core) (projector.Result, error) {
 		return core.Handle(ctx, b)
 	})
+	for _, rec := range recs {
+		if id := (RecordID{Unit: b.Unit, Seq: rec.Seq}); o.start.After(m.rg.delivered[id]) {
+			m.rg.delivered[id] = o.start
+		}
+	}
+	if errors.Is(o.err, projector.ErrUnknownVersion) {
+		r.count(&r.stats.Guarded)
+	}
 	if o.err == nil {
 		r.checkBreakers(m.rg, b, o.res)
 		r.checkReported(id, b, o.res)
@@ -165,23 +175,34 @@ func (r *run) checkReported(id string, b projector.Batch, res projector.Result) 
 	r.mu.Unlock()
 }
 
-// invoke runs f, which applies n records, the INSERTs of a batch or a backfill chunk, as one
-// invocation on a warm container, and waits for its result or its deadline, whichever comes
-// first.
-func (rg *region) invoke(id string, rng *rand.Rand, n int, f func(context.Context, Core) (projector.Result, error)) outcome {
+// invocationSpec shapes an invocation: the records it sends for, those of a batch, or a few
+// for a backfill step; whether it runs on a backfill worker's container, of the full build;
+// whether a response may stall, as ESM.Slow says; its timeout; and the request at which it
+// dies, -1 for none.
+type invocationSpec struct {
+	n              int
+	worker, stalls bool
+	timeout        time.Duration
+	crashAt        int
+}
+
+// invoke runs f as one invocation on a warm container, and waits for its result or its
+// deadline, whichever comes first.
+func (rg *region) invoke(id string, rng *rand.Rand, spec invocationSpec, f func(context.Context, Core) (projector.Result, error)) outcome {
 	r := rg.run
 	e := r.sc.ESM
-	core := rg.acquire(id, rng)
-	inv := &invocation{id: id, deadline: time.Now().Add(e.Timeout), noInsert: n == 0, stallAt: -1}
-	if n > 0 && chance(rng, e.Slow) {
-		inv.stallAt = rng.IntN(stallSpread * n)
-		inv.stall = between(rng, -time.Millisecond, e.Timeout/stallFraction)
+	warm := rg.acquire(id, rng, spec.worker)
+	now := time.Now()
+	inv := &invocation{id: id, start: now, deadline: now.Add(spec.timeout), idle: spec.n == 0, stallAt: -1, crashAt: spec.crashAt}
+	if spec.stalls && spec.n > 0 && chance(rng, e.Slow) {
+		inv.stallAt = rng.IntN(stallSpread * spec.n)
+		inv.stall = between(rng, -time.Millisecond, spec.timeout/stallFraction)
 	}
 	ctx, cancel := context.WithDeadline(withInvocation(context.Background(), inv), inv.deadline)
 	defer cancel()
 	c := &call{finished: make(chan struct{})}
 	r.count(&r.stats.Invocations)
-	r.sched.goActor(func() { r.handle(inv, c, func() (projector.Result, error) { return f(ctx, core) }) })
+	r.sched.goActor(func() { r.handle(inv, c, func() (projector.Result, error) { return f(ctx, warm.core) }) })
 	timer := time.NewTimer(time.Until(inv.deadline))
 	defer timer.Stop()
 	select {
@@ -194,11 +215,12 @@ func (rg *region) invoke(id string, rng *rand.Rand, n int, f func(context.Contex
 	if !isClosed(c.finished) {
 		// The invocation is dead: the gates refuse whatever it sends from now on.
 		r.count(&r.stats.Timeouts)
-		return outcome{err: errTimeout}
+		return outcome{err: errTimeout, start: now}
 	}
 	if !errors.Is(c.out.err, errCrashed) {
-		rg.pool = append(rg.pool, core)
+		rg.pool = append(rg.pool, warm)
 	}
+	c.out.start = now
 	return c.out
 }
 

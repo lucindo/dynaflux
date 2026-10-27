@@ -55,11 +55,12 @@ func CheckChangeStream(applied, deleted []store.Item, records []projector.Record
 
 func NewOracle() *Oracle { return newOracle() }
 
-// CheckViews checks P1 and P3 on region r0, whose oracle is o, and P2 between r0 and r1,
-// but for the rows in skip.
-func CheckViews(o *Oracle, r0, r1 State, skip map[RowID]bool) []string {
+// CheckViews checks P1, P3 and P10 on region r0, whose oracle is o and whose views timeSplit
+// names are split by time, and P2 between r0 and r1, but for the rows in skip, which a
+// divergent duplicate reached.
+func CheckViews(o *Oracle, r0, r1 State, skip map[RowID]bool, timeSplit map[string]bool) []string {
 	r := &run{}
-	r.checkRegion("r0", o, r0)
-	r.checkConvergence("r0 vs r1", r0, r1, skip)
+	r.checkRegion("r0", o, r0, timeSplit, skip)
+	r.checkConvergence("r0", "r1", r0, r1, skip)
 	return r.violations
 }

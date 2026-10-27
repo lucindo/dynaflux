@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
-	"github.com/lucindo/dynaflux/internal/keys"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/projector"
+	"github.com/lucindo/dynaflux/internal/projector/projectortest"
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
@@ -65,7 +65,7 @@ func (f *fixture) unit(t *testing.T) meta.Unit {
 
 func (f *fixture) activate(t *testing.T, version string) {
 	t.Helper()
-	if err := f.meta.SetViewState(t.Context(), version, meta.Activating); err != nil {
+	if _, err := f.meta.Activate(t.Context(), version, "clicks", meta.SplitFence, meta.DefaultBounds); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -140,26 +140,6 @@ func TestHandleAppliesFencedVersionAboveItsFence(t *testing.T) {
 	})
 }
 
-// The cached view states' age is on the wall clock: states stamped an hour ahead, as after
-// the clock stepped back, are read again. The stamp keeps no monotonic reading, which stops
-// while Lambda freezes the environment. The test runs outside synctest, whose clock has no
-// monotonic reading.
-func TestHandleRereadsStatesStampedAhead(t *testing.T) {
-	t.Parallel()
-	f := newPendingFixture(t, nil)
-	c1, c2 := f.click(t, "u1", "/a", 100), f.click(t, "u2", "/a", 200)
-	f.handle(t, insert(1, c1))
-	f.activate(t, pageTotals)
-	f.core.SetStatesAt(time.Now().Add(time.Hour).Round(0))
-	f.handle(t, insert(2, c2))
-	if got, want := f.row(t, pageTotals, page("/a")), "/a 200 2.00 200 200 1 1"; got != want {
-		t.Errorf("page_totals /a is %q, want %q", got, want)
-	}
-	if at := f.core.StatesAt(); at != at.Round(0) {
-		t.Errorf("the view states are stamped %v, with a monotonic reading", at)
-	}
-}
-
 // A batch whose cached states predate an activation finds the version's fence on the unit
 // and reads the states again, instead of failing on the fence.
 func TestHandleRefreshesStatesThatPredateAFence(t *testing.T) {
@@ -188,7 +168,7 @@ func TestHandleFailsOnAFenceItDidNotApply(t *testing.T) {
 		var f *fixture
 		var fenceErr error
 		hook := &afterUnitRead{do: func(ctx context.Context) {
-			if fenceErr = f.meta.SetViewState(ctx, pageTotals, meta.Activating); fenceErr == nil {
+			if _, fenceErr = f.meta.Activate(ctx, pageTotals, "clicks", meta.SplitFence, meta.DefaultBounds); fenceErr == nil {
 				_, fenceErr = f.meta.EnsureFence(ctx, f.unit(t), pageTotals)
 			}
 		}}
@@ -229,30 +209,6 @@ func TestBrokenVersionCountsAsCovered(t *testing.T) {
 	})
 }
 
-func TestSelectBackfill(t *testing.T) {
-	t.Parallel()
-	// Name the units so that a's key sorts before b's.
-	a, b := "shardId-a", "shardId-b"
-	if keys.UnitKey(a) > keys.UnitKey(b) {
-		a, b = b, a
-	}
-	rec := func(u string, n int) projector.BackfillRecord { return projector.BackfillRecord{Unit: u, Seq: seq(n)} }
-	recs := []projector.BackfillRecord{rec(b, 5), rec(a, 9), rec(b, 2), rec(a, 1), rec(b, 2), rec(b, 9), rec(a, 30)}
-	got, err := projector.SelectBackfill(recs, map[string]string{b: padSeq(t, seq(5))})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// a has no fence and keeps every record; b keeps those up to its fence, once each.
-	if want := []projector.BackfillRecord{rec(a, 1), rec(a, 9), rec(a, 30), rec(b, 2), rec(b, 5)}; !slices.EqualFunc(got, want, sameRecord) {
-		t.Errorf("SelectBackfill = %v, want %v", got, want)
-	}
-	if _, err = projector.SelectBackfill([]projector.BackfillRecord{rec(a, 1), {Unit: a, Seq: "12"}}, nil); err == nil {
-		t.Error("SelectBackfill took a sequence number of 2 digits")
-	}
-}
-
-func sameRecord(x, y projector.BackfillRecord) bool { return x.Unit == y.Unit && x.Seq == y.Seq }
-
 func (f *fixture) applyBackfill(t *testing.T, version string, chunk []projector.BackfillRecord) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -271,11 +227,11 @@ func TestBackfillAndLiveCountEachRecordOnce(t *testing.T) {
 		f.handle(t, insert(1, c[0]), insert(2, c[1])) // archived twice
 		f.activate(t, pageTotals)
 		list := func(context.Context) ([]string, error) { return []string{unit}, nil }
-		if _, err := f.meta.FenceUnits(t.Context(), "clicks", pageTotals, list); err != nil {
+		if _, _, err := f.meta.FenceUnits(t.Context(), "clicks", pageTotals, meta.DefaultBounds, list); err != nil {
 			t.Fatal(err)
 		}
 		f.handle(t, insert(3, c[2]), insert(4, c[3]))
-		sel, err := projector.SelectBackfill(f.archive.recs, map[string]string{unit: f.unit(t).Fences[pageTotals]})
+		sel, err := projectortest.SelectBackfill(f.archive.recs, map[string]string{unit: f.unit(t).Fences[pageTotals]})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -291,15 +247,20 @@ func TestBackfillAndLiveCountEachRecordOnce(t *testing.T) {
 	})
 }
 
-// An idempotent-only version takes records live while pending its backfill, which applies
-// them again: the backfill's uniqExact markers have owners of their own.
-func TestLiveAndBackfillCountAValueOnce(t *testing.T) {
+// A pending version with uniqExact takes no record live, so its backfill writes every marker:
+// a value counts only for the record whose marker holds it, and a live attempt that wrote one
+// and was never retried would leave a value the backfill never counts.
+func TestBackfillAloneMarksAPendingVersion(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		f := newPendingFixture(t, nil)
 		c := f.click(t, "u1", "/a", 100)
 		f.handle(t, insert(1, c))
-		if err := f.applyBackfill(t, "page_users@v1", []projector.BackfillRecord{{Unit: unit, Seq: seq(1), Item: c}}); err != nil {
+		items, _, err := f.mem.ScanPage(t.Context(), "app-view-page_users-v1", store.Scan{Segments: 1}, nil)
+		if err != nil || len(items) > 0 {
+			t.Fatalf("page_users holds %d items after a live batch, %v; want none", len(items), err)
+		}
+		if err = f.applyBackfill(t, "page_users@v1", []projector.BackfillRecord{{Unit: unit, Seq: seq(1), Item: c}}); err != nil {
 			t.Fatal(err)
 		}
 		if got, want := f.row(t, "page_users@v1", page("/a")), "/a 1"; got != want {

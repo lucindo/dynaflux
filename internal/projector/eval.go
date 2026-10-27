@@ -4,6 +4,7 @@
 package projector
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 
@@ -87,6 +88,8 @@ func (rs *rows) add(v *view, rec *record, vals []expr.Value, bad []error) error 
 		EventTime: vals[n+implicitEventTime].AsMicros(),
 		EventID:   vals[n+implicitEventID].AsString(),
 	}
+	// A table item has no unit: its SPLIT item goes by its event_id.
+	by := cmp.Or(rec.unit, in.EventID)
 	byRow := map[store.Key]*contribution{}
 	for _, src := range srcs {
 		ok, kvs, kerr := v.rowKeys(&src.frame)
@@ -96,7 +99,7 @@ func (rs *rows) add(v *view, rec *record, vals []expr.Value, bad []error) error 
 		if !ok {
 			continue
 		}
-		k, lsk, kerr := v.itemKey(kvs, rec.unit)
+		k, lsk, kerr := v.itemKey(kvs, by)
 		if kerr != nil {
 			return kerr
 		}
@@ -153,9 +156,10 @@ func (v *view) rowKeys(f *expr.Frame) (bool, []expr.Value, error) {
 	return true, kvs, nil
 }
 
-// itemKey returns the key of the item that a record of unit writes for the row with key
-// values kvs, and the row's sort fields without a SPLIT suffix.
-func (v *view) itemKey(kvs []expr.Value, unit string) (store.Key, string, error) {
+// itemKey returns the key of the item that a record whose SPLIT bucket goes by by, its unit
+// or a table item's event_id, writes for the row with key values kvs, and the row's sort
+// fields without a SPLIT suffix.
+func (v *view) itemKey(kvs []expr.Value, by string) (store.Key, string, error) {
 	n := v.def.PartitionKeyLen
 	pk, err := keys.Key(v.keyTypes[:n], kvs[:n])
 	if err != nil {
@@ -170,7 +174,7 @@ func (v *view) itemKey(kvs []expr.Value, unit string) (store.Key, string, error)
 	sk := lsk
 	switch {
 	case v.def.Split > 1:
-		sk = keys.SplitKey(lsk, keys.Bucket(unit, v.def.Split))
+		sk = keys.SplitKey(lsk, keys.Bucket(by, v.def.Split))
 	case sk == "":
 		sk = keys.NoSortKey
 	}

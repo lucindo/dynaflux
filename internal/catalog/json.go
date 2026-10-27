@@ -6,7 +6,10 @@ package catalog
 import (
 	"bytes"
 	"cmp"
+	"compress/gzip"
+	"crypto/sha256"
 	"encoding"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,6 +116,31 @@ func Unmarshal(data []byte) (*Catalog, error) {
 		return nil, errors.New("decode catalog: not in canonical form")
 	}
 	return env.Catalog, nil
+}
+
+// MaxCompressedSize is the most bytes a catalog may take compressed (DF6019): the meta
+// table stores it in one item, which DynamoDB limits to 400 KB (encoding.md §8.4).
+const MaxCompressedSize = 350_000
+
+// Compress returns the gzip of data, a catalog's bytes as [Marshal] returns them, as the
+// meta table stores it. Equal data give equal bytes.
+func Compress(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(data); err != nil {
+		return nil, fmt.Errorf("compress catalog: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return nil, fmt.Errorf("compress catalog: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// Hash returns the lowercase hex SHA-256 of data, a catalog's bytes as [Marshal] returns
+// them, which names the catalog in the meta table.
+func Hash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // encode checks c and returns its canonical JSON in the given format version.

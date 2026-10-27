@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -343,16 +344,19 @@ func TestFenceUnits(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				m := meta.New(bk.new(t), table)
 				advance(t, m, "old", seq(10))
-				setStates(t, m, meta.Activating)
-				if _, err := m.FenceUnits(t.Context(), stream, version, listing(new(time.Time), "old", "new")); err != nil {
-					t.Fatal(err)
+				activate(t, m)
+				want := map[string]string{"old": seq(10), "new": seq(0)}
+				_, fences, err := m.FenceUnits(t.Context(), stream, version, meta.DefaultBounds, listing(new(time.Time), "old", "new"))
+				if err != nil || !maps.Equal(fences, want) {
+					t.Fatalf("FenceUnits = %v, %v; want %v", fences, err, want)
 				}
 				advance(t, m, "old", seq(20))
-				// Repeating the call keeps the fences.
-				if _, err := m.FenceUnits(t.Context(), stream, version, listing(new(time.Time), "old", "new")); err != nil {
-					t.Fatal(err)
+				// Repeating the call keeps the fences, and returns them again.
+				_, fences, err = m.FenceUnits(t.Context(), stream, version, meta.DefaultBounds, listing(new(time.Time), "old", "new"))
+				if err != nil || !maps.Equal(fences, want) {
+					t.Fatalf("FenceUnits again = %v, %v; want %v", fences, err, want)
 				}
-				wantFences(t, m, map[string]string{"old": seq(10), "new": seq(0)})
+				wantFences(t, m, want)
 			})
 		})
 	}
@@ -368,26 +372,29 @@ func wantFences(t *testing.T, m *meta.Meta, want map[string]string) {
 }
 
 // A listing taken before every projector saw the version activating could miss a unit that
-// such a projector creates without a fence, so the listing waits 90 s from the activation.
+// such a projector creates without a fence, so the listing waits the bounds' listing delay
+// from the activation: 90 s in production.
 func TestFenceUnitsListsAfterTheDelay(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
+		listing    time.Duration
 		call, list time.Duration // after the activation
 	}{
-		{"called at the activation", 0, 90 * time.Second},
-		{"called just before the delay", 90*time.Second - time.Microsecond, 90 * time.Second},
-		{"called after the delay", time.Hour, time.Hour},
+		{"called at the activation", 90 * time.Second, 0, 90 * time.Second},
+		{"called just before the delay", 90 * time.Second, 90*time.Second - time.Microsecond, 90 * time.Second},
+		{"called after the delay", 90 * time.Second, time.Hour, time.Hour},
+		{"without a delay", 0, 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				m := meta.New(mem.New(), table)
-				setStates(t, m, meta.Activating)
+				activate(t, m)
 				time.Sleep(tt.call)
 				var listedAt time.Time
-				cut, err := m.FenceUnits(t.Context(), stream, version, listing(&listedAt, "u1"))
+				cut, _, err := m.FenceUnits(t.Context(), stream, version, meta.Bounds{Listing: tt.listing}, listing(&listedAt, "u1"))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -405,10 +412,10 @@ func TestFenceUnitsWaitEndsWithContext(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		m := meta.New(mem.New(), table)
-		setStates(t, m, meta.Activating)
+		activate(t, m)
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
-		if _, err := m.FenceUnits(ctx, stream, version, noListing(t)); !errors.Is(err, context.DeadlineExceeded) {
+		if _, _, err := m.FenceUnits(ctx, stream, version, meta.DefaultBounds, noListing(t)); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("FenceUnits = %v, want context.DeadlineExceeded", err)
 		}
 		if now, want := time.Now(), bubbleStart.Add(time.Minute); !now.Equal(want) {
@@ -421,9 +428,9 @@ func TestFenceUnitsListError(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		m := meta.New(mem.New(), table)
-		setStates(t, m, meta.Activating)
+		activate(t, m)
 		errList := errors.New("list failed")
-		_, err := m.FenceUnits(t.Context(), stream, version, func(context.Context) ([]string, error) { return nil, errList })
+		_, _, err := m.FenceUnits(t.Context(), stream, version, meta.DefaultBounds, func(context.Context) ([]string, error) { return nil, errList })
 		if !errors.Is(err, errList) {
 			t.Fatalf("FenceUnits = %v, want the list error", err)
 		}
@@ -437,8 +444,9 @@ func TestFenceUnitsNeedsActivating(t *testing.T) {
 		setup func(t *testing.T, m *meta.Meta)
 	}{
 		{"pending_backfill", func(*testing.T, *meta.Meta) {}},
-		{"live", func(t *testing.T, m *meta.Meta) { t.Helper(); setStates(t, m, meta.Activating, meta.Live) }},
-		{"broken", func(t *testing.T, m *meta.Meta) { t.Helper(); markBroken(t, m) }},
+		{"live", makeLive},
+		{"broken", markBroken},
+		{"retired", retire},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -446,11 +454,39 @@ func TestFenceUnitsNeedsActivating(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				m := meta.New(mem.New(), table)
 				tt.setup(t, m)
-				if _, err := m.FenceUnits(t.Context(), stream, version, noListing(t)); !errors.Is(err, meta.ErrNotActivating) {
+				if _, _, err := m.FenceUnits(t.Context(), stream, version, meta.DefaultBounds, noListing(t)); !errors.Is(err, meta.ErrNotActivating) {
 					t.Errorf("FenceUnits = %v, want ErrNotActivating", err)
 				}
 				if u := readUnit(t, m, "u1"); u.Fences != nil {
 					t.Errorf("fences %v", u.Fences)
+				}
+			})
+		})
+	}
+}
+
+// Fences hand records over to an archive backfill: a version split by time or of another
+// stream has none.
+func TestFenceUnitsNeedsTheFenceSplitOfItsStream(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		stream string
+		split  meta.Split
+	}{
+		"time split":     {stream, meta.SplitTime},
+		"no split":       {stream, meta.SplitNone},
+		"another stream": {"clicks", meta.SplitFence},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				m := meta.New(mem.New(), table)
+				if _, err := m.Activate(t.Context(), version, tt.stream, tt.split, meta.DefaultBounds); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := m.FenceUnits(t.Context(), stream, version, meta.DefaultBounds, noListing(t)); err == nil {
+					t.Error("FenceUnits succeeded")
 				}
 			})
 		})
