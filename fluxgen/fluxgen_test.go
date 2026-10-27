@@ -45,6 +45,16 @@ SELECT request_id, price FROM api_calls
 WHERE account_id = {account:String} AND day = {day:Date}
 ORDER BY event_time DESC
 LIMIT 1;
+
+CREATE MATERIALIZED VIEW account_calls
+ORDER BY (account_id)
+AS SELECT account_id, count() AS calls
+FROM api_calls
+GROUP BY account_id;
+
+-- name: AccountCalls :one
+SELECT calls FROM account_calls
+WHERE account_id = {account:String};
 `
 
 // apiCall and its fields are what dynaflux generate writes for api_calls.
@@ -447,6 +457,24 @@ func TestQueryRowNotFound(t *testing.T) {
 		if !errors.Is(err, dynaflux.ErrNotFound) {
 			t.Errorf("%s: got %v, want ErrNotFound", query, err)
 		}
+	}
+}
+
+func TestQueryOptionsReachTheEngine(t *testing.T) {
+	t.Parallel()
+	account := "acme"
+	query := func(opts ...dynaflux.QueryOption) error {
+		_, err := fluxgen.QueryRow(t.Context(), newStore(mem.New()), loadCatalog(t), "AccountCalls", []any{&account},
+			func(r *uint64) []any { return []any{r} }, opts...)
+		return err
+	}
+	// No backfill made the view's version live.
+	const notReady = "dynaflux: query AccountCalls: view version not ready: account_calls@v1 is pending_backfill in us-east-1"
+	if err := query(); !errors.Is(err, dynaflux.ErrViewNotReady) || err.Error() != notReady {
+		t.Errorf("without options: %v, want %q", err, notReady)
+	}
+	if err := query(dynaflux.AllowPartial()); !errors.Is(err, dynaflux.ErrNotFound) {
+		t.Errorf("with AllowPartial: %v, want ErrNotFound from the view read", err)
 	}
 }
 

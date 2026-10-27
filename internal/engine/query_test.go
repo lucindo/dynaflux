@@ -204,7 +204,7 @@ func newQueryStore(t *testing.T, sql string) *queryStore {
 	if err := meta.New(m, naming.MetaTable()).SetLive(t.Context(), cat.Catalog()); err != nil {
 		t.Fatal(err)
 	}
-	reads := &readLog{Backend: m}
+	reads := &readLog{Backend: m, metaTable: naming.MetaTable()}
 	return &queryStore{
 		cat:   cat,
 		mem:   m,
@@ -249,7 +249,17 @@ func (s *queryStore) project(t *testing.T, stream string, ev []expr.Value) {
 // query runs a query and returns its rows as text, or the error.
 func (s *queryStore) query(t *testing.T, name string, params ...expr.Value) ([]string, error) {
 	t.Helper()
-	rows, err := s.e.Query(t.Context(), s.cat, name, params)
+	return s.queryWith(t, engine.QueryOptions{}, name, params...)
+}
+
+func (s *queryStore) queryWith(t *testing.T, o engine.QueryOptions, name string, params ...expr.Value) ([]string, error) {
+	t.Helper()
+	rows, err := s.e.Query(t.Context(), s.cat, name, params, o)
+	return rowsText(rows), err
+}
+
+// rowsText returns each row as its values' text, joined by spaces.
+func rowsText(rows [][]expr.Value) []string {
 	var out []string
 	for _, row := range rows {
 		parts := make([]string, len(row))
@@ -258,7 +268,7 @@ func (s *queryStore) query(t *testing.T, name string, params ...expr.Value) ([]s
 		}
 		out = append(out, strings.Join(parts, " "))
 	}
-	return out, err
+	return out
 }
 
 func text(v expr.Value) string {
@@ -287,11 +297,13 @@ func strs(ss ...string) expr.Value {
 	return expr.Array(vs)
 }
 
-// readLog counts the reads sent and the items they returned.
+// readLog counts the reads sent to stream and view tables and the items they returned, and
+// apart from them the Query requests sent to the meta table.
 type readLog struct {
 	store.Backend
 
-	requests, items atomic.Int64
+	metaTable                  string
+	requests, items, metaReads atomic.Int64
 }
 
 func (l *readLog) Get(ctx context.Context, table string, k store.Key, consistent bool) (store.Item, error) {
@@ -305,6 +317,10 @@ func (l *readLog) BatchGet(ctx context.Context, table string, ks []store.Key, co
 }
 
 func (l *readLog) Query(ctx context.Context, table string, q store.Query) iter.Seq2[store.Item, error] {
+	if table == l.metaTable {
+		l.metaReads.Add(1)
+		return l.Backend.Query(ctx, table, q)
+	}
 	l.requests.Add(1)
 	return func(yield func(store.Item, error) bool) {
 		for it, err := range l.Backend.Query(ctx, table, q) {
@@ -316,7 +332,7 @@ func (l *readLog) Query(ctx context.Context, table string, q store.Query) iter.S
 	}
 }
 
-func (l *readLog) reset() { l.requests.Store(0); l.items.Store(0) }
+func (l *readLog) reset() { l.requests.Store(0); l.items.Store(0); l.metaReads.Store(0) }
 
 func TestQueryRows(t *testing.T) {
 	t.Parallel()
@@ -584,6 +600,83 @@ func TestReadRowChecksKeyValues(t *testing.T) {
 	ve, isVE := errors.AsType[*engine.ValueError](err)
 	if ok || !isVE || ve.Name != "hour" || !errors.Is(err, engine.ErrInvalidValue) {
 		t.Errorf("ReadRow with a String hour = %v, %v; want an invalid value of hour", ok, err)
+	}
+}
+
+// partition reads a partition of a view version and returns its rows as text.
+func (s *queryStore) partition(t *testing.T, version string, key ...expr.Value) ([]string, error) {
+	t.Helper()
+	var rows [][]expr.Value
+	for row, err := range s.e.ReadPartition(t.Context(), s.cat, version, key) {
+		if err != nil {
+			return rowsText(rows), err
+		}
+		rows = append(rows, row)
+	}
+	return rowsText(rows), nil
+}
+
+func TestReadPartition(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		s := newQueryStore(t, queries)
+		for _, v := range []struct {
+			site string
+			ms   uint64
+			ago  time.Duration
+		}{{"a", 10, 3 * time.Hour}, {"a", 20, time.Hour}, {"a", 30, time.Hour}, {"b", 40, time.Hour}} {
+			s.visit(t, v.site, "u1", v.ms, expr.Null(), start.Add(-v.ago))
+		}
+		// The keys, then the aggregates in catalog order (longest, views), row by row in
+		// ORDER BY order; a SPLIT row's items, from two units, are one row.
+		hours, err := s.partition(t, "site_hours@v1", expr.String("a"))
+		if want := []string{"a 12-31T21:00 10 1", "a 12-31T23:00 30 2"}; err != nil || !slices.Equal(hours, want) {
+			t.Errorf("site_hours of a = %q, %v; want %q", hours, err, want)
+		}
+		split, err := s.partition(t, "split_hours@v1", expr.String("a"))
+		if want := []string{"a 12-31T21:00 1", "a 12-31T23:00 2"}; err != nil || !slices.Equal(split, want) {
+			t.Errorf("split_hours of a = %q, %v; want %q", split, err, want)
+		}
+		// site_hours rows expire 2 days after their hour.
+		time.Sleep(46 * time.Hour)
+		hours, err = s.partition(t, "site_hours@v1", expr.String("a"))
+		if want := []string{"a 12-31T23:00 30 2"}; err != nil || !slices.Equal(hours, want) {
+			t.Errorf("site_hours of a after 46 h = %q, %v; want %q", hours, err, want)
+		}
+	})
+}
+
+func TestReadPartitionChecksTheKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		version string
+		key     []expr.Value
+		want    string
+	}{
+		{"unknown version", "site_hours@v9", []expr.Value{expr.String("a")}, "dynaflux: no view version site_hours@v9 in the catalog"},
+		{"the whole ORDER BY key", "site_hours@v1", []expr.Value{expr.String("a"), expr.Micros(0)},
+			"dynaflux: 2 values for the 1 PRIMARY KEY columns of view site_hours@v1"},
+		{"invalid value", "site_hours@v1", []expr.Value{expr.String("\xff")}, "dynaflux: site: invalid value: not valid UTF-8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newQueryStore(t, queries)
+			if got, err := s.partition(t, tt.version, tt.key...); err == nil || err.Error() != tt.want || len(got) != 0 {
+				t.Errorf("ReadPartition = %q, %v; want the error %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadPartitionWithAKeyTooLongReadsNothing(t *testing.T) {
+	t.Parallel()
+	s := newQueryStore(t, queries)
+	s.reads.reset()
+	got, err := s.partition(t, "site_hours@v1", expr.String(strings.Repeat("s", 2049)))
+	if n := s.reads.requests.Load(); err != nil || len(got) != 0 || n != 0 {
+		t.Errorf("ReadPartition = %q, %v after %d requests; want no rows, no error and no request", got, err, n)
 	}
 }
 

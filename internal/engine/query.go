@@ -4,6 +4,7 @@
 package engine
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -12,6 +13,7 @@ import (
 	"github.com/lucindo/dynaflux/internal/agg"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/expr"
+	"github.com/lucindo/dynaflux/internal/meta"
 )
 
 // query is a compiled named query.
@@ -274,10 +276,20 @@ func (q *query) followsKey(unbound []string) (bool, bool) {
 	return true, desc
 }
 
+// QueryOptions change how Query runs.
+type QueryOptions struct {
+	// AllowPartial reads a view whose version isn't live, without reading its state.
+	AllowPartial bool
+}
+
 // Query runs the named query with params, in the order of its parameters, and returns its
 // rows, each with the output columns in SELECT order. A :one query that finds no row
 // returns ErrNotFound. An evaluation error matches ErrEvaluation.
-func (e *Engine) Query(ctx context.Context, cat *Catalog, name string, params []expr.Value) ([][]expr.Value, error) {
+//
+// A query over a view fails with ErrViewNotReady unless the view's current version is live
+// in the engine's region, in states read from the meta table at most
+// [meta.MaxViewStateAge] ago, or o.AllowPartial is set.
+func (e *Engine) Query(ctx context.Context, cat *Catalog, name string, params []expr.Value, o QueryOptions) ([][]expr.Value, error) {
 	q, ok := cat.queries[name]
 	if !ok {
 		return nil, fmt.Errorf("dynaflux: no query %s in the catalog", name)
@@ -290,6 +302,11 @@ func (e *Engine) Query(ctx context.Context, cat *Catalog, name string, params []
 			return nil, err
 		}
 	}
+	if q.view != nil && !o.AllowPartial {
+		if err := e.ready(ctx, cat, q.viewID); err != nil {
+			return nil, fmt.Errorf("dynaflux: query %s: %w", name, err)
+		}
+	}
 	rows, err := e.run(ctx, cat, q, params)
 	if err != nil {
 		return nil, fmt.Errorf("dynaflux: query %s: %w", name, err)
@@ -298,6 +315,36 @@ func (e *Engine) Query(ctx context.Context, cat *Catalog, name string, params []
 		return nil, ErrNotFound
 	}
 	return rows, nil
+}
+
+// ready returns nil when view version id is live in the engine's region, and otherwise an
+// error that matches ErrViewNotReady and names the state, with a broken version's failure.
+func (e *Engine) ready(ctx context.Context, cat *Catalog, id string) error {
+	states, err := e.stateCache(e.naming(cat).MetaTable()).States(ctx, false)
+	if err != nil {
+		return err
+	}
+	vs := states[id]
+	if vs.State == meta.Live {
+		return nil
+	}
+	if vs.State == meta.Broken {
+		return fmt.Errorf("%w: %s is broken in %s: event %s: %s", ErrViewNotReady, id, e.region, vs.Failure.EventID, vs.Failure.Error)
+	}
+	// A version without a state item is pending.
+	return fmt.Errorf("%w: %s is %s in %s", ErrViewNotReady, id, cmp.Or(vs.State, meta.PendingBackfill), e.region)
+}
+
+// stateCache returns the cache of the view states in meta table.
+func (e *Engine) stateCache(table string) *meta.StateCache {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	c, ok := e.states[table]
+	if !ok {
+		c = meta.NewStateCache(meta.New(e.b, table))
+		e.states[table] = c
+	}
+	return c
 }
 
 func (e *Engine) run(ctx context.Context, cat *Catalog, q *query, params []expr.Value) ([][]expr.Value, error) {

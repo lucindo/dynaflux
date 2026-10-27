@@ -43,6 +43,13 @@ func init() {
 			}
 			return o.since, o.until
 		},
+		QueryOptions: func(opts any) engine.QueryOptions {
+			var o queryOptions
+			for _, opt := range opts.([]QueryOption) {
+				opt(&o)
+			}
+			return engine.QueryOptions(o)
+		},
 	})
 }
 
@@ -68,8 +75,12 @@ type Config struct {
 
 // Open returns a store backed by the DynamoDB tables that the generated templates create
 // for cfg.Prefix in cfg.AWS.Region. It makes no AWS call, so a missing table or grant shows
-// on the first append, read or query. Queries don't check yet that a view's version is
-// live: one that isn't returns the rows projected so far.
+// on the first append, read or query.
+//
+// A query over a view checks that the view's version is live in the region, in the view
+// states it read from the store's meta table at most 30 seconds before, and returns
+// [ErrViewNotReady] when it isn't. The application needs dynamodb:Query on the meta table
+// for that read.
 func Open(cfg Config) (*Store, error) {
 	if cfg.AWS.Region == "" {
 		return nil, errors.New("dynaflux: Config.AWS has no Region")
@@ -106,11 +117,17 @@ type AppendOption func(*appendOptions)
 
 type appendOptions struct{}
 
-// QueryOption configures a query. There are none yet; every generated query method takes
-// them, so adding one won't change the methods' types.
+// QueryOption configures a query.
 type QueryOption func(*queryOptions)
 
-type queryOptions struct{}
+type queryOptions engine.QueryOptions
+
+// AllowPartial runs a query over a view whose version isn't live in the store's region,
+// without reading its state, instead of returning [ErrViewNotReady]. The rows may miss
+// events: those a backfill hasn't applied yet, or every event after the version broke.
+func AllowPartial() QueryOption {
+	return func(o *queryOptions) { o.AllowPartial = true }
+}
 
 // ReadOption configures a stream read.
 type ReadOption func(*readOptions)

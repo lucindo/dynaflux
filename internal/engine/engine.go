@@ -20,6 +20,7 @@ import (
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/expr"
 	"github.com/lucindo/dynaflux/internal/keys"
+	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
 )
@@ -32,6 +33,7 @@ var (
 	ErrInvalidValue  = errors.New("invalid value")
 	ErrNotFound      = errors.New("dynaflux: no row found")
 	ErrTooManyKeys   = errors.New("too many key combinations")
+	ErrViewNotReady  = errors.New("view version not ready")
 	// ErrEvaluation is expr.ErrEval: a query's evaluation errors are those of sql.md §5.8.
 	ErrEvaluation = expr.ErrEval
 )
@@ -172,14 +174,15 @@ type Engine struct {
 	prefix string
 	ulids  *keys.ULIDs
 
-	mu   sync.Mutex
-	last int64 // the clock reading of the last Append call, in microseconds
+	mu     sync.Mutex
+	last   int64                       // the clock reading of the last Append call, in microseconds
+	states map[string]*meta.StateCache // by meta table, made on first use
 }
 
 // New returns an engine over b. Its event_ids are monotonic: within one millisecond, each
 // is one more than the one before, so one engine's appends keep their order.
 func New(b store.Backend, o Options) *Engine {
-	return &Engine{b: b, region: o.Region, prefix: o.Prefix, ulids: keys.NewULIDs(o.Entropy)}
+	return &Engine{b: b, region: o.Region, prefix: o.Prefix, ulids: keys.NewULIDs(o.Entropy), states: map[string]*meta.StateCache{}}
 }
 
 // now reads the clock for an Append call. Each call gets a later microsecond than the one

@@ -23,17 +23,12 @@ import (
 // in catalog order. ok is false when the row doesn't exist or has expired. The items of a
 // SPLIT row are one Query.
 func (e *Engine) ReadRow(ctx context.Context, cat *Catalog, version string, key []expr.Value) ([]expr.Value, bool, error) {
-	name, vv, ok := cat.p.Version(version)
-	if !ok {
-		return nil, false, fmt.Errorf("dynaflux: no view version %s in the catalog", version)
+	name, vv, err := cat.version(version)
+	if err == nil {
+		err = checkViewKey(version, vv, key, len(vv.Keys), "keys")
 	}
-	if len(key) != len(vv.Keys) {
-		return nil, false, fmt.Errorf("dynaflux: %d values for the %d keys of view %s", len(key), len(vv.Keys), version)
-	}
-	for i, k := range vv.Keys {
-		if _, _, err := encode(k.Name, k.Expr.Type, key[i]); err != nil {
-			return nil, false, err
-		}
+	if err != nil {
+		return nil, false, err
 	}
 	sq, ok, err := rowQuery(vv, key)
 	if err != nil || !ok {
@@ -55,22 +50,88 @@ func (e *Engine) ReadRow(ctx context.Context, cat *Catalog, version string, key 
 			items = append(items, it)
 		}
 	}
-	ks, states, ok, err := cat.p.Row(version, items, time.Now())
+	row, ok, err := cat.wholeRow(version, vv, items, time.Now())
 	if err != nil {
 		return nil, false, fmt.Errorf("dynaflux: %w", err)
 	}
+	return row, ok, nil
+}
+
+// ReadPartition yields the logical rows of view version whose PRIMARY KEY values are key,
+// in ORDER BY order, each as [Engine.ReadRow] returns it. Expired rows are left out. It
+// yields at most one error and then stops.
+func (e *Engine) ReadPartition(ctx context.Context, cat *Catalog, version string, key []expr.Value) iter.Seq2[[]expr.Value, error] {
+	return func(yield func([]expr.Value, error) bool) {
+		name, vv, err := cat.version(version)
+		if err == nil {
+			err = checkViewKey(version, vv, key, vv.PartitionKeyLen, "PRIMARY KEY columns")
+		}
+		var pk string
+		if err == nil {
+			pk, err = keys.Key(keyTypes(vv)[:len(key)], key)
+		}
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		if len(pk) > store.MaxPKLen {
+			return
+		}
+		now := time.Now()
+		table := e.naming(cat).ViewTable(name, vv.Number)
+		for items, qerr := range rowItems(e.b.Query(ctx, table, store.Query{PK: pk, PageSize: firstPage}), vv.Split > 1) {
+			if qerr != nil {
+				yield(nil, fmt.Errorf("dynaflux: read view %s: %w", version, qerr))
+				return
+			}
+			row, ok, rerr := cat.wholeRow(version, vv, items, now)
+			if rerr != nil {
+				yield(nil, fmt.Errorf("dynaflux: %w", rerr))
+				return
+			}
+			if ok && !yield(row, nil) {
+				return
+			}
+		}
+	}
+}
+
+// version returns the view and the definition of view version id.
+func (c *Catalog) version(id string) (string, *catalog.ViewVersion, error) {
+	name, vv, ok := c.p.Version(id)
 	if !ok {
-		return nil, false, nil
+		return "", nil, fmt.Errorf("dynaflux: no view version %s in the catalog", id)
+	}
+	return name, vv, nil
+}
+
+// checkViewKey checks that key holds values of the first n key columns of view version id,
+// which what names.
+func checkViewKey(id string, vv *catalog.ViewVersion, key []expr.Value, n int, what string) error {
+	if len(key) != n {
+		return fmt.Errorf("dynaflux: %d values for the %d %s of view %s", len(key), n, what, id)
+	}
+	for i, v := range key {
+		if _, _, err := encode(vv.Keys[i].Name, vv.Keys[i].Expr.Type, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// wholeRow returns the logical row of view version id that items hold, with every
+// aggregate finalized; false when there is none or it expired at now.
+func (c *Catalog) wholeRow(id string, vv *catalog.ViewVersion, items []store.Item, now time.Time) ([]expr.Value, bool, error) {
+	ks, states, ok, err := c.p.Row(id, items, now)
+	if err != nil || !ok {
+		return nil, false, err
 	}
 	all := make([]int, len(states))
 	for i := range all {
 		all[i] = i
 	}
-	row, err := finalize(version, vv, ks, states, all)
-	if err != nil {
-		return nil, false, fmt.Errorf("dynaflux: %w", err)
-	}
-	return row, true, nil
+	row, err := finalize(id, vv, ks, states, all)
+	return row, err == nil, err
 }
 
 // finalize returns the columns of a row of view version id from its key values ks and

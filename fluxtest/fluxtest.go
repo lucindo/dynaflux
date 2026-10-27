@@ -10,6 +10,8 @@
 //   - SYNC views are updated the same way, so an evaluation error in one fails the test, as
 //     an ASYNC view's does, instead of failing the append.
 //   - Reads are consistent: a read sees every append that returned before it started.
+//   - Every view version is live from the start, so queries never return
+//     dynaflux.ErrViewNotReady. A deployed version is live once its backfill finished.
 //   - Every event's origin_region is "local".
 //   - Event IDs come from a fixed random source, so inside testing/synctest a test's IDs are
 //     the same in every run.

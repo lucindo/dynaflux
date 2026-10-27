@@ -449,30 +449,33 @@ func (s *pageViews) Read(ctx context.Context, b store.Backend) (simulation.State
 	return st, nil
 }
 
-// readView adds the rows that q reads to rows, and those of the view's retained versions at
-// the same keys, which a query can't read. q's one parameter, from all, holds every value
-// of a partition key column.
+// readView adds the rows that q reads to rows, and those of the view's retained versions,
+// which a query can't read, a partition at a time. q's one parameter, from all, holds every
+// value of the partition key, which is one column.
 func (s *pageViews) readView(ctx context.Context, e *engine.Engine, q *catalog.Query, all map[string]expr.Value, rows simulation.Rows) error {
 	v, _ := s.cat.Catalog().View(q.Source.Name)
 	cur, _ := v.Current()
-	got, err := e.Query(ctx, s.cat, q.Name, []expr.Value{all[q.Params[0].Name]})
+	values := all[q.Params[0].Name]
+	// The oracle has the rows of every version, live or not.
+	got, err := e.Query(ctx, s.cat, q.Name, []expr.Value{values}, engine.QueryOptions{AllowPartial: true})
 	if err != nil {
 		return fmt.Errorf("%s: %w", q.Name, err)
 	}
 	for _, vals := range got {
 		addRow(rows, catalog.VersionID(v.Name, cur.Number), len(cur.Keys), q.Columns, vals)
-		for i := range v.Versions {
-			vv := &v.Versions[i]
-			if vv.Number == cur.Number {
-				continue
-			}
-			id := catalog.VersionID(v.Name, vv.Number)
-			old, ok, rerr := e.ReadRow(ctx, s.cat, id, vals[:len(cur.Keys)])
-			if rerr != nil {
-				return fmt.Errorf("%s: %w", id, rerr)
-			}
-			if ok {
-				addRow(rows, id, len(vv.Keys), versionColumns(vv), old)
+	}
+	for i := range v.Versions {
+		vv := &v.Versions[i]
+		if vv.Number == cur.Number {
+			continue
+		}
+		id := catalog.VersionID(v.Name, vv.Number)
+		for _, key := range values.AsArray() {
+			for row, rerr := range e.ReadPartition(ctx, s.cat, id, []expr.Value{key}) {
+				if rerr != nil {
+					return fmt.Errorf("%s: %w", id, rerr)
+				}
+				addRow(rows, id, len(vv.Keys), versionColumns(vv), row)
 			}
 		}
 	}

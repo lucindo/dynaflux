@@ -128,7 +128,7 @@ func ReadEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catal
 }
 
 // QueryRows runs query with the parameters whose fields are params, and returns its rows.
-func QueryRows[R any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, query string, params []any, fields func(*R) []any, _ ...dynaflux.QueryOption) ([]R, error) {
+func QueryRows[R any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, query string, params []any, fields func(*R) []any, opts ...dynaflux.QueryOption) ([]R, error) {
 	qc, err := openQuery(s, c, query, params, fields(new(R)))
 	if err != nil {
 		return nil, err
@@ -139,7 +139,7 @@ func QueryRows[R any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalo
 			return nil, err
 		}
 	}
-	rows, err := qc.e.Query(ctx, qc.cat, query, vals)
+	rows, err := qc.e.Query(ctx, qc.cat, query, vals, access.Get().QueryOptions(opts))
 	if err != nil {
 		return nil, public(err)
 	}

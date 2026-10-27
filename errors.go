@@ -30,6 +30,11 @@ var (
 	// ErrEvaluation is an expression of a query that failed on the rows it read, such as an
 	// integer division by zero, or a sum outside its result type.
 	ErrEvaluation = engine.ErrEvaluation // "evaluation error"
+	// ErrViewNotReady is a query over a view whose version isn't live in the store's region:
+	// no backfill has made it live yet, or it broke or was retired. The error names the
+	// version, its state and the region, and a broken version's failure. [AllowPartial]
+	// reads the view anyway.
+	ErrViewNotReady = engine.ErrViewNotReady // "view version not ready"
 )
 
 // ValueError is a value that Dynaflux can't store: invalid UTF-8, a Float64 that isn't
