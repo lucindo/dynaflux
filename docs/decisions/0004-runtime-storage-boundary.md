@@ -9,6 +9,8 @@ SPDX-License-Identifier: Apache-2.0
 - Date: 2026-10-26
 - Amended by [ADR 0010](0010-runtime-entry-point.md): the core, not the Lambda adapter, stops
   sending a reserve before the context's deadline
+- Amended by [ADR 0012](0012-view-version-activation.md): `retire` deletes no fence; the
+  catalog's list of retired versions settles them
 
 ## Context
 
@@ -74,8 +76,9 @@ func IfVersion(v int64) Cond  // _v = v
   results back into place; callers don't deduplicate.
 - There is no `UpdateItem`, `DeleteItem` or free-form condition expression. Items are always
   written whole.
-- `Transact` (for `SYNC` views) arrives in M6 and `Scan` (table-source backfill) in M5, each
-  with the same condition set. `Transact` and `_ttl` work only on MREC global tables: MRSC
+- `Transact` (for `SYNC` views) arrives in M6, with the same condition set. `ScanPage`
+  (table-source backfill) arrived in M5: one page of one segment per call, so a caller
+  keeps each segment's resume key. `Transact` and `_ttl` work only on MREC global tables: MRSC
   global tables support neither transactions nor TTL ([global tables][gtworks]), so
   strongly consistent streams, planned for a later version on MRSC tables, can't use `SYNC`
   or `LOG RETENTION` as designed.

@@ -37,6 +37,14 @@ found details that ADR 0002 leaves open or states differently:
   number, an entry without a state or a mode, and an entry that isn't a valid view version,
   such as a hand edit whose definition no longer matches its fingerprint. Every lock error
   is DF6013 and stops `validate` and `generate`; there is never a fallback to v1.
+- **Retired entries and rebuild counts** (added in M5, which answers the open question
+  below): a `retired` entry holds only its `number`, `state` and `fingerprint`, which is
+  all numbering needs; any other field is DF6013. A definition matches only entries that
+  aren't retired, so a retired number never comes back. A top-level `rebuild` object,
+  between `format` and `views`, maps a view to the count that `dynaflux generate -rebuild`
+  raises. A version defined while its view's count is above 0 records the count as
+  `rebuild` in its entry, where it enters the fingerprint. Both fields are absent until
+  used, so no existing lock or fingerprint changes and the format stays 1.
 - **Two `current` versions are repaired:** numbering first marks every `current` entry
   `retained`, then the SQL picks which version is current. Nothing is dropped, so the repair
   needs no question to the user.
@@ -54,8 +62,8 @@ found details that ADR 0002 leaves open or states differently:
   locked version when their fingerprints are equal after computing the definition's
   fingerprint with that version's storage format. Nothing changes while format 1 is the
   only one, so this is decided, implemented and tested with the first format bump.
-- **Retired entries** (M5): whether they keep the whole definition or only `number`,
-  `state` and `fingerprint`, which is all numbering needs.
+- **Retired entries** (M5): answered above; they hold only `number`, `state` and
+  `fingerprint`.
 
 ## Consequences
 

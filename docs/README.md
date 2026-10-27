@@ -16,8 +16,9 @@ The specifications are normative: they define what Dynaflux accepts and what it 
 |----------|----------------|
 | [spec/sql.md](spec/sql.md) | The SQL dialect: types, expressions, functions, streams, materialized views and named queries. [Section 12](spec/sql.md#12-worked-examples) has worked examples, and [Appendix A](spec/sql.md#appendix-a-diagnostics) lists every diagnostic code with its message and hint. |
 | [spec/config.md](spec/config.md) | The `dynaflux.yaml` schema: every key and its default, the SQL file patterns, the AWS resource names, and the diagnostic codes for the file. |
-| [spec/encoding.md](spec/encoding.md) | How Dynaflux stores data in DynamoDB: item keys, attribute values, aggregate states, and the bookkeeping items of the projector. |
+| [spec/encoding.md](spec/encoding.md) | How Dynaflux stores data in DynamoDB: item keys, attribute values, aggregate states, and the bookkeeping items in the meta table. |
 | [spec/infra.md](spec/infra.md) | The CloudFormation templates that `dynaflux generate` writes: every resource with its name and settings, IAM, alarms, and how to deploy and change them. |
+| [spec/lifecycle.md](spec/lifecycle.md) | What happens to a view version from deploy to removal: its states, activation, backfill, when queries may read it, repairs and retiring, and the diagnostics of the operator commands. |
 
 ## Decisions
 

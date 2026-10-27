@@ -38,7 +38,7 @@ Athena, over an archive of events that Dynaflux writes to S3.
 
 ## Status
 
-Dynaflux is in early development, at milestone M3: the AWS runtime. What works:
+Dynaflux is in early development, at milestone M5: the operator commands. What works:
 
 - The SQL dialect and `dynaflux.yaml` are specified in [docs/spec](docs/spec).
 - `dynaflux validate` checks a project and reports each problem with its file, line and a
@@ -53,12 +53,22 @@ Dynaflux is in early development, at milestone M3: the AWS runtime. What works:
   `fluxtest`, with the projector keeping views current.
   [examples/analytics](examples/analytics) compiles and passes its tests this way.
 - `dynaflux.Open` returns a store backed by DynamoDB. The Lambda binary runs the projector,
-  which keeps views current and archives events through Firehose, and the setup function
-  that the templates' custom resources call. The integration tests run the store and the
-  projector against DynamoDB Local.
+  which keeps views current and archives events through Firehose, the setup function that
+  the templates' custom resources call, and the backfill function that each region's state
+  machine steps. The integration tests run the store, the projector and the commands against
+  DynamoDB Local.
+- The operator commands work on a deployed store, one environment per run. `status` shows
+  each view version's state in each region and what needs an action, `diff` compares the
+  project with the deployed store, `backfill` fills new view versions so they go live, and
+  `retire` removes the ones no longer current. `inspect` and `query` read events, rows and
+  named queries, and `import` loads past events.
+  [docs/spec/lifecycle.md](docs/spec/lifecycle.md) specifies them.
+- `dynaflux init` starts a project, and `dynaflux dev` runs its store on DynamoDB Local for
+  an application under development.
 
-Nothing has run on AWS yet. The operations commands, such as `status` and `backfill`, come
-next. Until v1.0, the dialect, the configuration and the commands may change.
+Nothing has run on AWS yet. Milestone M6 adds `SYNC` views and wait tokens, backfills that
+read the archive of a stream that already has events, and HTTP query endpoints. Until v1.0,
+the dialect, the configuration and the commands may change.
 
 ## Install
 
@@ -139,7 +149,7 @@ Ask what the stream and its view cost at 100 events per second:
 ```console
 $ dynaflux explain -rate 100 page_views
 stream page_views
-  assumptions  --rate 100  --event-kb 1  --rows page_daily=1000  --uniq-new page_daily=0.3
+  assumptions  -rate 100  -event-kb 1  -rows page_daily=1000  -uniq-new page_daily=0.3
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote
 
@@ -204,6 +214,8 @@ dynaflux/top_pages.sql:4:1: error DF4101: TopPages: view page_daily is partition
 - [docs/spec/encoding.md](docs/spec/encoding.md): how Dynaflux stores data in DynamoDB.
 - [docs/spec/infra.md](docs/spec/infra.md): the CloudFormation templates that
   `dynaflux generate` writes.
+- [docs/spec/lifecycle.md](docs/spec/lifecycle.md): view versions from deploy to removal,
+  and the operator commands.
 - [docs/decisions](docs/decisions/README.md): architecture decision records.
 - [docs/README.md](docs/README.md): an index of all the docs.
 

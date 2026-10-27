@@ -13,17 +13,18 @@ is reproduced by rerunning its seed. The package doc lists the properties a run 
 
 | Target | What runs | Time |
 |--------|-----------|------|
-| `make test` | The smoke tier with `-race`: one seed of each scenario but `poison` and `long`, two seeds of `late` run twice, control C3 at 2 seeds, and the scripted tests | 10 s for `internal/simulation` |
-| `make sim` | The full tier: 300 seeds × 3 regions of each of the 8 scenarios, and four seeds each of `late` and `regions` run twice | 6.5 min |
-| `make sim-controls` | Every negative control: code mutants, environment and configuration controls, baselines and self-checks. Each must be caught | 5.5 min |
+| `make test` | The smoke tier with `-race`: one seed of each scenario but `poison` and `long`, two seeds of `late` run twice, control C3 at 2 seeds, and the scripted tests | 25 s for `internal/simulation` |
+| `make sim` | The full tier: 300 seeds × 3 regions of each scenario, 100 of `guards-table`, `rollback`, `retire`, `timesplit-late` and `table`, and four seeds each of `late` and `regions` run twice | 21 min |
+| `make sim-controls` | Every negative control: code mutants, environment and configuration controls, baselines and self-checks. Each must be caught | 20 min |
 | `make sim-seed SCENARIO=x SEED=n` | One seed of one scenario, verbose | 1–3 s |
 
 `make sim` and `make sim-seed` leave `-race` off; set `SIM_RACE=-race` to turn it on. The
 scheduler runs one actor at a time, so `-race` finds only races between goroutines the core
 starts, and the smoke tier already covers those.
 
-The times are from a 12-core Apple silicon laptop in October 2026. `long` takes 40% of
-`make sim`: a seed of it costs three times one of `d23a`.
+The times are from a 12-core Apple silicon laptop in October 2026. Every scenario with a
+backfill runs its jobs through `backfill.Step`, which stages and merges the archive or the
+stream table, so those seeds cost the most.
 
 ## A failing seed
 
@@ -43,4 +44,10 @@ flags a control caught in under 10% of seeds as weak. `-run` picks controls by I
 go run ./internal/simulation/mutants -run '^C1[0-3]$'
 ```
 
-A control with a scripted test is caught when that test fails.
+A control with a scripted test is caught when that test fails. Where its scenario catches a
+control in too few seeds, a scripted test of the same rule backs it instead:
+
+| Control | Scripted test in `internal/backfill` | Why not its scenario |
+|---------|--------------------------------------|----------------------|
+| C53 | `TestStepFencesEveryVersion` | `guards` caught it in 13 of 300 seeds: a batch of an older build must read its unit before the activation and move its progress after the cut |
+| C73 | `TestStepNoSplit` | `guards-table` caught it in about 7 of 100 seeds: the batch of an older build must take the only record of a row |

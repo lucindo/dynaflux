@@ -1024,10 +1024,12 @@ vary by architecture.
   The projector uses it to apply each event to each row exactly once, despite retries and
   duplicate deliveries.
 - A new view version is filled by a backfill while live projection runs. Views with at
-  least one additive aggregate use the *fenced handoff*: each delivery unit is split at a
-  fence, the backfill applies events up to the fence, and live projection applies the rest.
-  Views with only idempotent aggregates need no fence. `dynaflux explain` and
-  `dynaflux status` show which one applies.
+  least one additive aggregate or a `uniqExact` use the *fenced handoff*: each delivery unit
+  is split at a fence, the backfill applies events up to the fence, and live projection
+  applies the rest. `uniqExact` needs it because a value counts only for the event whose
+  marker holds it, so an event that live projection marked but never finished would never
+  count for the backfill. Views with only other idempotent aggregates need no fence.
+  `dynaflux explain` and `dynaflux status` show which one applies.
 
 ### 7.6 Unsupported aggregates
 
@@ -1226,7 +1228,7 @@ differently from reality.
 
 ### 8.9 Changing a stream
 
-Deployed streams change only additively. `dynaflux diff` (M5) enforces this and gives
+Deployed streams change only additively. `dynaflux diff` enforces this and gives
 these checks their codes. `validate` can't check them, because it has no record of the
 deployed stream.
 
@@ -1274,8 +1276,11 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
   converge: once every event has replicated, every region holds the same rows, except for:
   - views that read `ingest_time` or `origin_region` of a `DEDUP BY` stream (DF3504)
   - a dedup key appended in two regions with different payloads ([§8.5](#85-dedup-by))
-  - a version backfilled from a table scan instead of an archive, whose starting point is
-    approximate (`dynaflux backfill`, M5)
+  - a version backfilled from a stream table instead of an archive: the backfill reads only
+    the events still in the table, so the version's history can start at a different time in
+    each region ([lifecycle.md §5.2](lifecycle.md#52-sources)). Its split with live
+    projection, the time split, is exact within its bounds
+    ([lifecycle.md §5.1](lifecycle.md#51-how-events-are-split)).
 - One view version is one DynamoDB table per region.
 
 ### 9.3 SELECT rules
@@ -1426,21 +1431,33 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
   - A fingerprint of a retained version, an older version that is still deployed, makes
     that version current again, with no new number and no backfill.
   - A fingerprint of a retired version gets a new number.
+  - `dynaflux generate -rebuild <view>` gives the view's current definition a new number
+    although it didn't change, to fill it again after a gap or a fix in Dynaflux itself
+    ([lifecycle.md §7.3](lifecycle.md#73-rebuilding-a-version)). The lock keeps a rebuild
+    count for the view, which `-rebuild` raises by one. A count above 0 enters the
+    fingerprint of the current definition, so the fingerprints of a view never rebuilt
+    don't change.
   - When a git merge leaves two `current` versions of one view, both become `retained`
     first, and the definition in the SQL files then picks the current one by the rules
     above. Nothing is dropped.
 - The lock is JSON indented by two spaces, with a `format` field (1). Views are sorted by
   name, and each view's versions run newest first, so branches that change different views
   merge cleanly. Each entry is the version's catalog definition, with its `number`,
-  `state`, `fingerprint` and `mode`.
+  `state`, `fingerprint` and `mode`. A `retired` entry holds only its `number`, `state` and
+  `fingerprint`, which is all numbering needs.
+- `dynaflux retire` marks a retained version `retired` in the lock after it retired the
+  version in every region of one environment
+  ([lifecycle.md §8](lifecycle.md#8-retiring-a-version)). The next `generate` leaves the
+  version's table out of the templates, and the catalog lists the version as retired.
 - `validate`, `explain` and `generate` read the lock, so they agree on version numbers;
   only `generate` writes it. Without a lock file, every view is version 1.
 - Reading is strict. A lock that isn't valid JSON in this format, has an unknown field or
   `format`, repeats a key within one object, has a key that isn't in lower case, repeats a
   number within a view, holds an entry whose definition doesn't match its fingerprint, or
-  holds a `retired` entry is DF6013 ([config.md](config.md#codes)). It stops `validate`
-  and `generate`: Dynaflux never falls back to version 1. Until `dynaflux retire` arrives
-  (M5), no lock holds a `retired` entry.
+  holds a `retired` entry with more than its `number`, `state` and `fingerprint`, or has a
+  rebuild count below 1, of a view it doesn't hold, or below a version's count is DF6013
+  ([config.md](config.md#codes)). It stops `validate` and `generate`: Dynaflux never falls
+  back to version 1.
 - A retained version keeps running, so its stream must still exist and have every column
   it reads, with the same type, and no column named like its `ARRAY JOIN` alias; and no
   stream may take its view's name (DF6015 in [config.md](config.md#codes)).

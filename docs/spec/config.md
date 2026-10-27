@@ -155,7 +155,7 @@ The **Used by** column names who reads each value. `validate` checks every key.
 | `catalog` | Resolved into the catalog that the generated code embeds and the runtime reads (M2). |
 | `codegen` | The Go files that `dynaflux generate` writes (M2). |
 | `infra` | The generated CloudFormation/SAM templates ([infra.md](infra.md); HTTP front doors in M6). |
-| `names` | The [resource names](#resource-names). The operate commands find resources by these names (M5). |
+| `names` | The [resource names](#resource-names). The operator commands find resources by these names. |
 
 A clause in SQL always wins over a config default: `MODE` over `defaults.view_mode`, and
 `LOG RETENTION` over `defaults.log_retention`.
@@ -181,8 +181,9 @@ A clause in SQL always wins over a config default: `MODE` over `defaults.view_mo
   this key, so one set of templates serves every environment from the same checkout: deploy
   them with `Prefix=staging-`, for example ([infra.md](infra.md#2-parameters)). `validate`
   checks the names with this key's value. The parameter's maximum length is the longest
-  prefix with which every name fits, so CloudFormation refuses a longer one. How the
-  operate commands target another environment is decided in M5.
+  prefix with which every name fits, so CloudFormation refuses a longer one. The operator
+  commands take `-prefix`, whose default is this key, and work on one environment per run
+  ([lifecycle.md §10](lifecycle.md#10-regions-and-environments)).
 - The order of `regions` and `archive.regions` doesn't matter: the catalog stores them
   sorted.
 - All of `regions` must be in one AWS partition, because a Global Table can't span
@@ -314,10 +315,10 @@ Choosing a placement:
 | Setting | Result |
 |---------|--------|
 | `regions: all`, `events: all` (default) | Every region has a complete archive. Athena and backfills work in any region, including during an outage. Costs one copy per region. |
-| `regions: [r]`, `events: all` | One complete archive, in `r`. If `r` is down, archiving pauses and catches up when it recovers. Other regions backfill from `r`. |
+| `regions: [r]`, `events: all` | One complete archive, in `r`. If `r` is down, archiving pauses and catches up when it recovers. Other regions backfill from their own tables; reading `r`'s archive from another region comes in M6. |
 | `regions: all`, `events: local` | One copy in total, but the full history is the union of the regional tables. |
 
-How each placement affects backfills is specified with `dynaflux backfill` (M5).
+How each placement affects backfills is in [lifecycle.md §5.2](lifecycle.md#52-sources).
 
 ### `http`
 
@@ -508,7 +509,8 @@ compares its output with the templates it wrote last time: `DF6016` to `DF6018`
 ### Codes
 
 Unlike `DF1xxx` to `DF5xxx`, a `DF6xxx` code's number doesn't tell its severity: see the
-Severity column.
+Severity column. The `DF7xxx` codes of the commands that read and change a deployed store,
+such as `status` and `backfill`, are in [lifecycle.md §12](lifecycle.md#12-diagnostics).
 
 | Code | Severity | Meaning | Hint |
 |------|----------|---------|------|
@@ -524,10 +526,10 @@ Severity column.
 | DF6010 | error | An integer is out of range. | The range and where it comes from, such as the Lambda limit. |
 | DF6011 | error | A list that needs at least one entry is empty. | Add at least one entry, or, for a key with a default, remove the key. |
 | DF6012 | error | A list has the same entry twice. | Remove the repeat. |
-| DF6013 | error | `dynaflux.lock` can't be used: it isn't valid JSON in the lock format (for example, it has merge-conflict markers), it has an unknown field or `format`, a key that appears twice in one object (as "accept both" in a merge tool can leave) or isn't in lower case, a view repeats a version number, an entry's definition doesn't match its fingerprint (a hand edit), or an entry is `retired`, which only `dynaflux retire` (M5) writes. The message gives the reason. Reported from M2. | If it has merge conflicts, keep the lock from the branch that merged first, then run `dynaflux generate`. Undo hand edits. Don't delete the file: that renumbers every view. |
+| DF6013 | error | `dynaflux.lock` can't be used: it isn't valid JSON in the lock format (for example, it has merge-conflict markers), it has an unknown field or `format`, a key that appears twice in one object (as "accept both" in a merge tool can leave) or isn't in lower case, a view repeats a version number, an entry's definition doesn't match its fingerprint (a hand edit), a `retired` entry holds more than its `number`, `state` and `fingerprint`, or a rebuild count is below 1, names a view the lock doesn't hold, or is below the count of one of the view's versions (a merge lost it). The message gives the reason. Reported from M2. | If it has merge conflicts, keep the lock from the branch that merged first, then run `dynaflux generate`. Undo hand edits. Don't delete the file: that renumbers every view. |
 | DF6014 | error | The file uses an anchor (`&a`), an alias (`*a`), a merge key (`<<`) or an explicit tag (`!!str`, `!x`). | Write each value out in full. Quote a string instead of tagging it. |
-| DF6015 | error | A view version that `dynaflux.lock` retains can't be maintained: the stream it reads is gone, the stream no longer has a column it reads with the type it reads, the stream now has a column named like the version's `ARRAY JOIN` alias (the column would win), or a stream now has the view's name. The message names the version and the reason. | Restore the stream or the column, or rename the stream or the new column; or retire the version with `dynaflux retire` (M5). |
-| DF6016 | error | Reported by `generate` only. A view version's table in the `regional.yaml` that `generate` wrote last time is missing from the new one, and `dynaflux.lock` doesn't mark the version retired; or a version keeps its number but its fingerprint changed. Deploying would delete a table the application reads, or write rows of a new definition into an old version's table. This happens when the lock was lost, reverted or merged badly. Until `dynaflux retire` (M5), no version may disappear. | Restore `dynaflux.lock` from version control and run `dynaflux generate` again. To start over on purpose, delete the old templates first. |
+| DF6015 | error | A view version that `dynaflux.lock` retains can't be maintained: the stream it reads is gone, the stream no longer has a column it reads with the type it reads, the stream now has a column named like the version's `ARRAY JOIN` alias (the column would win), or a stream now has the view's name. The message names the version and the reason. | Restore the stream or the column, or rename the stream or the new column; or retire the version with `dynaflux retire`. |
+| DF6016 | error | Reported by `generate` only. A view version's table in the `regional.yaml` that `generate` wrote last time is missing from the new one, and `dynaflux.lock` doesn't mark the version retired; or a version keeps its number but its fingerprint changed. Deploying would delete a table the application reads, or write rows of a new definition into an old version's table. This happens when the lock was lost, reverted or merged badly. | Restore `dynaflux.lock` from version control and run `dynaflux generate` again. To start over on purpose, delete the old templates first. |
 | DF6017 | error | Reported by `generate` only. `regions` differs by more than one region from the replica regions of the `global.yaml` that `generate` wrote last time. CloudFormation adds or removes one Global Table replica per stack update. | Add or remove one region, generate and deploy `global.yaml`; then the next region. |
 | DF6018 | error | Reported by `generate` only. `regions` drops a region whose stream table replicas have deletion protection in the `global.yaml` that `generate` wrote last time. Turning protection off is the first step of removing a region. | Put the region back, run `dynaflux generate -unprotect-region <region>` and deploy `global.yaml`; then remove the region. |
 | DF6019 | error | Reported by `generate` only. The catalog takes more than 350,000 bytes compressed with gzip; the message gives its size. Each region's meta table stores the deployed catalog in one item, which DynamoDB limits to 400 KB ([encoding.md §8.4](encoding.md#84-deployed-catalog)). A store within CloudFormation's limit of 500 resources per stack stays below it. | Retire view versions that are no longer needed, remove views, queries or streams, or split the store. |

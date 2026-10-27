@@ -6,6 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # ADR 0008: A custom resource served by the runtime binary migrates the archive schema
 
 - Status: Accepted
+- Amended by [ADR 0013](0013-deployed-catalog-registration.md): the setup function also
+  serves `Custom::DynafluxCatalog`, whose handler reads the binary's catalog and retires
+  versions in the cleanup phase of an update.
 - Date: 2026-10-26
 
 ## Context

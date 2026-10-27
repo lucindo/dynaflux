@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Dynaflux storage encoding
 
 This page is the normative specification of how Dynaflux stores data in DynamoDB: item keys,
-attribute values, aggregate states and the bookkeeping the projector keeps. `internal/keys`
+attribute values, aggregate states and the bookkeeping in the meta table. `internal/keys`
 and `internal/agg` implement exactly what it says, and their tests check it.
 
 - Storage format: 1 (`catalog.StorageFormatVersion`).
@@ -57,7 +57,7 @@ Every table has a string partition key `pk` and a string sort key `sk`
 | Stream (Global Table) | events | `PRIMARY KEY` fields (§3.2), plus a shard suffix with `SHARDS` | `event_time` and `event_id` |
 | View version (regional) | rows | `PRIMARY KEY` fields | the remaining `ORDER BY` fields, plus a `SPLIT` suffix; `!` when there are none |
 | | `uniqExact` markers | `!` and a hash (§7.4) | `!` |
-| Meta (regional, one per store) | units, view states (§8); M5 and M6 add others | §8 | §8 |
+| Meta (regional, one per store) | units, view states, backfill jobs, the deployed catalog (§8); M6 adds others | §8 | §8 |
 
 Attribute names:
 
@@ -216,7 +216,9 @@ item (§8.1), so a view row can find the meta item of every unit it has an entry
   retried `DEDUP BY` append reaches the same item.
 - **`SPLIT` item:** the projector writes a record's contribution to item `bucket(u, n)` of
   the logical row, where `u` is the record's delivery unit. The backfill uses the unit the
-  record was first delivered by (the archive's `_shard`).
+  record was first delivered by (the archive's `_shard`). A record that a backfill reads
+  from the stream table has no unit: it goes to item `bucket(event_id, n)`, so every worker
+  of the backfill puts it in the same item.
 
 ### 4.4 Canonical value bytes
 
@@ -475,6 +477,14 @@ which record introduced it.
 | a unit key (§4.2) | The last sequence number of that unit applied to this item, as §5.3. |
 | `B` | The backfill's mark: the 8 bytes `H(u)[0:8]` of the last applied record's unit, then that record's sequence number as §5.3. The backfill applies records in order of (unit key, sequence number), and the mark compares in that order. |
 
+- A backfill that reads the stream table
+  ([lifecycle.md §5.2](lifecycle.md#52-sources)) gets items without a unit or a sequence
+  number. In place of both, in the `B` value and in its marker owners (§7.4), it uses a
+  record's *time mark*: the 8 bytes are `event_time` in microseconds, big-endian two's
+  complement with the sign bit flipped, and the sequence number is the 128-bit number that
+  `event_id` encodes (§4.1), stored as §5.3 stores sequence numbers. Time marks compare by
+  `event_time`, then `event_id`. A version keeps its split for life (§8.2), so its rows
+  never mix the two kinds of mark.
 - When the projector writes an item, it removes each live entry whose unit's `progress`
   (§8.1) is at or above the entry and whose `progress_at` is more than
   [`runtime.prune_window_seconds`](config.md#runtime) in the past. The `B` entry is never
@@ -516,12 +526,13 @@ with an alarm, never the view's breaker, and pruning (§7.6) heals it.
 
 ## 8. Meta items
 
-These are the items the projector and the backfill handoff need. M5 adds the rest of the
-meta table (catalog, backfill jobs, gaps) and M6 adds wait receipts. Meta items are
-read-modify-written whole, conditional on `_v` (§7.1). Their times, `progress_at`,
-`activated_at` and `broken.at`, are in Unix microseconds, rounded up to the microsecond, so
-a stored deadline or activation time is never earlier than the real one, and a wait
-measured from it is never short.
+These are the items of the projector, the backfill and the operator commands. M6 adds
+stream items and wait receipts. Meta items are read-modify-written whole, conditional on
+`_v` (§7.1); a catalog body (§8.4) is written once and never changes. Each kind of item
+has partitions of its own, so the projector's query of the `view` partition never meets
+another kind. Times are N values in Unix microseconds, rounded up to the microsecond, so a
+stored deadline or activation time is never earlier than the real one, and a wait measured
+from it is never short. `_ttl` is the exception: it is in seconds (§5.4).
 
 ### 8.1 Unit item
 
@@ -556,10 +567,73 @@ One per view version, in each region:
 |-----------|-------|
 | `pk` | `view` |
 | `sk` | The version ID, such as `page_daily@v2`. |
-| `state` | S: `pending_backfill`, `activating`, `live` or `broken`. A version without an item is `pending_backfill`. The state moves only from `pending_backfill` to `activating` to `live`, or from any state to `broken`, which is final. |
-| `activated_at` | N, microseconds: when the state became `activating`. Units are listed for fencing only after `activated_at` + 30 s (the longest a projector uses a view state it read) + 60 s. |
-| `broken` | M, only when `state` is `broken`: `unit` (S, the full unit ID), `seq` (S, 40 digits), `event_id` (S), `error` (S, the evaluation error, cut to at most 1,024 bytes), `at` (N, microseconds). |
+| `state` | S: `pending_backfill`, `activating`, `live`, `broken` or `retired`. A version without an item is `pending_backfill`, and no write sets that state. The moves are in [lifecycle.md §3](lifecycle.md#3-view-version-states): from `pending_backfill` to `activating` to `live`, from any state but `retired` to `broken`, and from any state to `retired`, which is final. |
+| `stream` | S: the version's stream. A projector reads it to find the versions of its batch's stream that its catalog doesn't know ([lifecycle.md §4.1](lifecycle.md#41-guards)). |
+| `activated_at` | N: when the state became `activating`. Present from `activating` on. Units are listed for fencing only after `activated_at` + 30 s (the longest a projector uses a view state it read) + 60 s. |
+| `split` | S, with `activated_at`: `fence`, `time` or `none`, how the backfill and live projection split the version's events ([lifecycle.md §5.1](lifecycle.md#51-how-events-are-split)). It fixes the source of every job of the version: `fence` reads the archive, `time` and `none` the stream table. Written by the write that sets `activating`, and never changed. |
+| `split_at` | N, only when `split` is `time`: the split time `B`, `activated_at` plus the job's listing delay and writer clock bound ε (90 s and 5 minutes). Live projection applies the version to an `INSERT` exactly when its `_it` is above `split_at`. |
+| `split_late` | N, with `split_at`: `split_at` + ε + L, where L is the job's landing bound (15 minutes). The projector breaks the version, with cause `split`, on an `INSERT` with `_it` ≤ `split_at` in a batch it started at or after `split_late` by its own clock, and on a `MODIFY` whose old and new images have `_it` on different sides of `split_at`. |
+| `partial_since` | N, set when a version filled from the stream table goes `live` without proof that the table held every event: the earliest `ingest_time` from which the version is complete: the later of the job's `read_after` (§8.3), the scan's earliest start, minus `LOG RETENTION`, and the time the job makes the version `live`, after the scan's end, minus `LOG RETENTION` minus 3,600 seconds, since DynamoDB may delete an item once its `_ttl` (§5.4) passed, also while the scan runs. Absent when the version is complete: the stream uses `LOG RETENTION FOREVER`, or its table's earliest replica was created more than the writer clock bound ε (5 minutes) after that time, so no event before it existed. |
+| `broken` | M, once the version broke: `cause` (S: `record` for an evaluation error, `split` for an event the time split can't place), `unit` (S, the full unit ID), `seq` (S, 40 digits), `event_id` (S), `error` (S, cut to at most 1,024 bytes), `at` (N). A record that a backfill read from the stream table has no unit or sequence number: its `unit` and `seq` are empty strings, and `event_id` identifies it. |
+| `retired_at` | N, only when `state` is `retired`: when the version was retired. |
 | `_v` | N, as §7.1. |
+
+A move to `broken` or `retired` keeps every attribute the item had, so a retired version
+that broke first keeps its `broken` map.
+
+### 8.3 Job item
+
+One per view version that a backfill job was started for, in each region
+([lifecycle.md §5.4](lifecycle.md#54-jobs),
+[ADR 0011](../decisions/0011-backfill-coordinator.md)). The job's steps read and write it;
+it stays after the job ends.
+
+| Attribute | Value |
+|-----------|-------|
+| `pk` | `job` |
+| `sk` | The version ID. |
+| `stream` | S: the version's stream. |
+| `source` | S: `archive` or `table`, which follows from `split`. |
+| `split` | S: the view-state item's `split` (§8.2): `fence` with the archive source; `time` (additive versions) or `none` (idempotent versions) with the table source. |
+| `state` | S: `running`, `cancelled`, `done` or `broken`. |
+| `phase` | S: `activate`, `fence`, `fresh`, `watermark`, `wait`, `stage`, `apply` or `live`. |
+| `attempt` | N, at least 1: the attempt that owns the job. Resuming the job claims it for the next attempt. |
+| `name` | S: the name of the job's executions without the `-a<attempt>` and `-c<k>` suffixes. |
+| `execution` | S: the ARN of the execution that ran the last step, or `local` when `dynaflux dev` or a test runs the job. |
+| `created_at`, `updated_at` | N. |
+| `cut` | N, with the archive source: the time the fences were taken. |
+| `read_after` | N, with the table source: the earliest time the scan may start. With the time split it is `split_late` plus the clock margin (60 s), otherwise `activated_at` plus the listing delay (90 s). |
+| `scanned_at` | N, with the table source: when the scan ended. The version holds every event from that time less the stream's `LOG RETENTION` and an hour ([lifecycle.md §5.2](lifecycle.md#52-sources)). |
+| `fresh` | BOOL, once `done`: whether the fresh-stream rule made the version live ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)). |
+| `staging` | S: the staging prefix in the region's bucket, `backfill/<version>/<created_at>/`. |
+| `stage` | M: where staging resumes. With the table source: `segments` (N, the scan's segment count), `next` (M, a segment number → M with the `pk` and `sk` of the last item staged from it), `finished` (L of N, the segments read to their end). The archive source's fields come with the archive read (M6). |
+| `runs` | L of M: the committed runs, each with `name` (S), `records` (N), and `first` and `last` (B, the marks of its first and last records, as §7.6's `B` value). A run in the staging prefix that this list doesn't name is garbage. With the archive source, a staged run's name ends with `-f<n>`: the committed runs hold the export's first n files in full, and staging resumes at file n (until M6 adds the archive's fields to `stage`). |
+| `merge` | M, during a merge pass: `inputs` (L of S, the run names), `outputs` (L, as `runs`), `mark` (B, the last mark written). |
+| `staged` | N: records staged. |
+| `mark` | B, as §7.6's `B` value: the cursor, the mark of the last record of the last completed chunk. Absent before the first chunk completes. |
+| `applied`, `skipped`, `chunks` | N: the records applied and skipped, and the chunks completed. |
+| `rate` | N: the most records per second to apply, 0 for no limit. |
+| `paused` | BOOL, true while apply waits for the projector's lag to fall under 2.5 minutes ([lifecycle.md §5.4](lifecycle.md#54-jobs)). Absent otherwise. |
+| `waits` | S, with the archive source at `watermark`: `archive_read` when the job waits for the archive read of a later release, which a stream that got an event before the fresh check needs ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)); no step runs it until then, and a claim of the job removes it. Absent otherwise. |
+| `error` | M, the last failure: `phase` (S), `message` (S, cut to at most 1,024 bytes), `at` (N). |
+| `_v` | N, as §7.1. |
+| `_ttl` | 400 days after the job became `done` or `broken`, as §5.4. None while `running` or `cancelled`. |
+
+### 8.4 Deployed catalog
+
+The catalog that the region's functions run, registered by the setup function at each
+deploy ([lifecycle.md §9](lifecycle.md#9-the-deployed-catalog)): one body item per catalog,
+which never changes, and one item that names the current catalog.
+
+| `pk` | `sk` | Attributes |
+|------|------|------------|
+| `catalog#<hash>` | `body` | `body` (B): the gzip of the bytes that `catalog.Marshal` returns. Written only if absent; a failed condition whose stored item is equal counts as success. No `_ttl`. |
+| `catalog` | `current` | `hash` (S): the lowercase hex SHA-256 of the catalog's bytes, the `<hash>` of its body item; `format` (N): the catalog format; `generator` (S): the version of the Dynaflux module that generated the catalog; `registered_at` (N); `_v` (N, as §7.1). |
+
+A reader gets `current`, then the body, with consistent `GetItem`s, decompresses at most
+16 MiB, checks the hash and decodes the catalog. `generate` refuses a catalog whose gzip
+passes 350,000 bytes (DF6019 in [config.md](config.md#codes)), so a body fits DynamoDB's
+400 KB item limit.
 
 ## 9. Determinism rules
 

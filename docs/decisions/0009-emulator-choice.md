@@ -162,9 +162,9 @@ end-to-end runbook does.
 - DynamoDB Local closes and splits no shards, raises no `TransactionConflictException`,
   and runs no event source mapping. Shard lineage and conflicts stay with the simulation
   harness and the AWS end-to-end suite. Lambda's delivery rules are reproduced by explicit
-  handler calls over `internal/esmlocal`, a test-only reader of the emulator's stream; the
-  rules come from the AWS documentation and the measured results of
-  [ADR 0003](0003-shard-identity-from-tumbling-window.md).
+  handler calls over `internal/esmlocal`, a reader of the emulator's stream that only tests
+  and `dynaflux dev` use; the rules come from the AWS documentation and the measured
+  results of [ADR 0003](0003-shard-identity-from-tumbling-window.md).
 - When the emulator and the AWS documentation disagree, or neither settles a behavior,
   the item goes to the maintainer's one-shot run on real DynamoDB: U+0000 in a string, Query
   bounds over 1024 bytes and keys over 2048 bytes, the N text returned for `1e-130`,
@@ -181,6 +181,15 @@ end-to-end runbook does.
   the 500 on U+0000 and on a fractional TTL value, the empty result of an inverted `BETWEEN`,
   the ignored 16 MB `BatchGetItem` limit, and the `MODIFY` record for a write that changes
   nothing.
+- AWS's usage notes say DynamoDB Local ignores `Scan`'s `Segment` and `TotalSegments`
+  ([usage notes][usage]). Version 3.3.2 splits them as AWS documents: the store suite's
+  segment check, each item in exactly one of 2 and of 5 segments, passes on it, so it runs
+  there like every other check.
+- DynamoDB Local numbers the stream records of every table in one sequence, and a shard
+  iterator it returned for a shard holding no record fails a later `GetRecords` with
+  `TrimmedDataAccessException` once another table's record took the next number.
+  `internal/esmlocal` takes a new `TRIM_HORIZON` iterator on each read until the shard
+  yields a record.
 - DynamoDB Local is closed source and changes without notice. The digest pin keeps the lane
   reproducible, and a version bump reruns the fidelity tests of `internal/store/dynamo`.
 
