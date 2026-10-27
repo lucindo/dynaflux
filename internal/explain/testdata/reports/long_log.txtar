@@ -23,7 +23,7 @@ FROM page_views
 GROUP BY user_id;
 -- explain page_views --
 stream page_views
-  assumptions  --rate 1000  --event-kb 1
+  assumptions  -rate 1000  -event-kb 1
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote
 
@@ -63,7 +63,7 @@ warning user_totals: rows reach 1.62 KB with ~64 high-water marks, one for each 
   hint: SPLIT 2 keeps each item at 1 write unit, saving ~$1,807 a month per region; queries then read 2 items per row; or use fewer SHARDS on page_views
 -- explain user_totals --
 view user_totals, from stream page_views
-  assumptions  --rate 1000  --event-kb 1
+  assumptions  -rate 1000  -event-kb 1
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote
 

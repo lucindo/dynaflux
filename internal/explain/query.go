@@ -61,7 +61,7 @@ func (e *explainer) queryReport(q *catalog.Query) error {
 
 func (e *explainer) streamQuery(q *catalog.Query) error {
 	s, _ := e.cat.Stream(q.Source.Name)
-	e.header(fmt.Sprintf("query %s :%s, from stream %s", q.Name, q.Cardinality, s.Name), []string{"--event-kb " + flagValue(e.w.EventKB)})
+	e.header(fmt.Sprintf("query %s :%s, from stream %s", q.Name, q.Cardinality, s.Name), []string{"-event-kb " + flagValue(e.w.EventKB)})
 	r := newReadPlan(q, append(slices.Clone(s.PrimaryKey), catalog.ColumnEventTime, catalog.ColumnEventID), s.Shards)
 	e.b.WriteString("\n")
 	e.rangeRead(&r, e.w.EventKB)

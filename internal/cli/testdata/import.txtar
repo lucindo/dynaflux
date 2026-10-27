@@ -1,0 +1,85 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The deployed store of TestImport, and the files it imports.
+-- dynaflux.yaml --
+store: shop
+regions: [us-east-1, us-west-2]
+-- dynaflux/shop.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    duration_ms UInt32,
+    tags        Array(String) DEFAULT [],
+    referrer    Nullable(String)
+)
+PRIMARY KEY (user_id);
+
+CREATE STREAM payments (account String, payment_id UUID, amount Decimal(10, 2))
+PRIMARY KEY (account)
+DEDUP BY (payment_id);
+
+CREATE STREAM typed (
+    id    String,
+    u8    UInt8,
+    u16   UInt16,
+    u32   UInt32,
+    u64   UInt64,
+    i8    Int8,
+    i16   Int16,
+    i32   Int32,
+    i64   Int64,
+    f     Float64,
+    d     Decimal(10, 2),
+    b     Bool,
+    u     UUID,
+    day   Date,
+    ms    DateTime64(3),
+    tags  Array(LowCardinality(String)),
+    nums  Array(Int32),
+    note  Nullable(String)
+)
+PRIMARY KEY (id);
+
+CREATE MATERIALIZED VIEW page_hourly
+ORDER BY (page, hour)
+PRIMARY KEY (page)
+AS SELECT page, toStartOfHour(ingest_time) AS hour, count() AS views
+FROM page_views
+GROUP BY page, hour;
+
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT page, toStartOfDay(event_time) AS day, count() AS views
+FROM page_views
+GROUP BY page, day;
+-- input/views.jsonl --
+{"user_id":"u1","page":"/home","duration_ms":120,"event_time":"2024-05-31T13:45:00.25Z"}
+
+{"user_id":"u2","page":"/cart","duration_ms":"80","tags":["a","b"],"referrer":"https://example.com/?a=1&b=2","event_time":"2024-05-31T14:00:00+02:00"}
+{"event_time":"2024-06-01T00:00:00Z","referrer":null,"page":"/home","duration_ms":7,"user_id":"u1"}
+-- input/bad.jsonl --
+{"user_id":"u1","page":"/home","duration_ms":120,"event_time":"2024-05-31T13:45:00Z"}
+["u1","/home"]
+{"user_id":"u1","page":"/home","duration_ms":120,"event_time":"2024-05-31T13:45:00Z"
+{"user_id":"u1","pag":"/home","duration_ms":1,"event_time":"2024-05-31T13:45:00Z"}
+{"user_id":"u1","page":"/","duration_ms":1,"event_id":"01J0","event_time":"2024-05-31T13:45:00Z"}
+{"user_id":"u1","user_id":"u2","page":"/","duration_ms":1,"event_time":"2024-05-31T13:45:00Z"}
+{"user_id":"u1","duration_ms":1,"event_time":"2024-05-31T13:45:00Z"}
+{"user_id":"u1","page":"/","duration_ms":1}
+{"user_id":"u1","page":"/","duration_ms":1,"event_time":null}
+{"user_id":"u1","page":"/","duration_ms":-1,"event_time":"2024-05-31T13:45:00Z"}
+{"user_id":"u1","page":"/","duration_ms":1,"event_time":"yesterday"}
+{"user_id":"u1","page":"/","duration_ms":1,"event_time":"2024-05-31T13:45:00Z"} {}
+{"user_id":"u1","pa\u001b[31mge":"/","duration_ms":1,"event_time":"2024-05-31T13:45:00Z"}
+-- input/payments.jsonl --
+{"account":"acme","payment_id":"61f0c404-5cb3-11e7-907b-a6006ad3dba0","amount":"12.50","event_time":"2024-05-31T10:00:00Z"}
+{"account":"acme","payment_id":"61f0c404-5cb3-11e7-907b-a6006ad3dba1","amount":3,"event_time":"2024-05-31T11:00:00Z"}
+-- input/payments_changed.jsonl --
+{"account":"acme","payment_id":"61f0c404-5cb3-11e7-907b-a6006ad3dba0","amount":12.5,"event_time":"2024-05-31T10:00:00Z"}
+{"account":"acme","payment_id":"61f0c404-5cb3-11e7-907b-a6006ad3dba1","amount":4,"event_time":"2024-05-31T11:00:00Z"}
+{"account":"acme","payment_id":"61f0c404-5cb3-11e7-907b-a6006ad3dba2","amount":5,"event_time":"2024-05-31T12:00:00Z"}
+-- input/typed.jsonl --
+{"id":"max","u8":255,"u16":65535,"u32":4294967295,"u64":"18446744073709551615","i8":-128,"i16":-32768,"i32":-2147483648,"i64":"-9223372036854775808","f":1.5e100,"d":"-99999999.99","b":true,"u":"61F0C404-5CB3-11E7-907B-A6006AD3DBA0","day":"2106-02-07","ms":"2024-05-31T13:45:00.123Z","tags":["x","it's"],"nums":[1,-2],"note":"ok","event_time":"2024-05-31T13:45:00.123456Z"}
+{"id":"min","u8":0,"u16":0,"u32":0,"u64":0,"i8":0,"i16":0,"i32":0,"i64":9007199254740993,"f":-0.25,"d":0.1,"b":false,"u":"00000000-0000-0000-0000-000000000000","day":"1970-01-01","ms":"1970-01-01T00:00:00.000999Z","tags":[],"nums":[],"note":null,"event_time":"1970-01-01T00:00:00Z"}

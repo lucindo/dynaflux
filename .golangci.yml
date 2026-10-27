@@ -206,11 +206,13 @@ linters:
             - pkg: log$
               desc: Use log/slog instead, see https://go.dev/blog/slog
         # Dynaflux: ADR 0004 keeps the protocol above the storage interface, so AWS calls stay
-        # in the adapters. `*` stops at `/`: internal/archive/firehose and
-        # internal/setup/awssetup are adapters, outside these globs.
+        # in the adapters. `*` stops at `/`: internal/archive/firehose,
+        # internal/setup/awssetup and internal/backfill/awsbackfill are adapters, outside these
+        # globs.
         "adapters only":
           files:
             - "**/internal/projector/*.go"
+            - "**/internal/backfill/*.go"
             - "**/internal/meta/*.go"
             - "**/internal/engine/*.go"
             - "**/internal/setup/*.go"
@@ -222,19 +224,29 @@ linters:
           deny:
             - pkg: github.com/aws/
               desc: Only the AWS adapters import AWS packages, see docs/decisions/0004-runtime-storage-boundary.md
-        # Dynaflux: internal/esmlocal and internal/emulatortest serve the tests against DynamoDB
-        # Local (docs/decisions/0009-emulator-choice.md), so production code, the Lambda binary
-        # included, never imports them.
+        # Dynaflux: internal/emulatortest serves the tests against DynamoDB Local
+        # (docs/decisions/0009-emulator-choice.md), and awsbackfilltest fakes S3 and CloudWatch
+        # for them, so production code, the Lambda binary included, never imports either.
         "test support":
           files:
             - "!$test"
-            - "!**/internal/esmlocal/*.go"
             - "!**/internal/emulatortest/*.go"
+            - "!**/internal/backfill/awsbackfill/awsbackfilltest/*.go"
           deny:
-            - pkg: github.com/lucindo/dynaflux/internal/esmlocal
-              desc: A test-only stream reader; production code never imports it
             - pkg: github.com/lucindo/dynaflux/internal/emulatortest
               desc: Test support for the emulator; production code never imports it
+            - pkg: github.com/lucindo/dynaflux/internal/backfill/awsbackfill/awsbackfilltest
+              desc: Fakes of S3 and CloudWatch that ignore signatures; production code never imports it
+        # Dynaflux: internal/esmlocal reads streams on DynamoDB Local for the tests and dynaflux
+        # dev, which the CLI runs; the Lambda binary never imports it.
+        "local only":
+          files:
+            - "!$test"
+            - "!**/internal/esmlocal/*.go"
+            - "!**/internal/cli/*.go"
+          deny:
+            - pkg: github.com/lucindo/dynaflux/internal/esmlocal
+              desc: A stream reader for DynamoDB Local; only dynaflux dev and tests import it
 
     embeddedstructfieldcheck:
       # Checks that sync.Mutex and sync.RWMutex are not used as embedded fields.

@@ -17,9 +17,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.46.2
 	github.com/aws/aws-sdk-go-v2/service/firehose v1.52.6
 	github.com/aws/aws-sdk-go-v2/service/glue v1.172.0
+	github.com/aws/aws-sdk-go-v2/service/lambda v1.113.3
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5
+	github.com/aws/aws-sdk-go-v2/service/sfn v1.52.1
+	github.com/aws/aws-sdk-go-v2/service/sts v1.51.5
 	github.com/aws/smithy-go v1.28.6
 	go.yaml.in/yaml/v4 v4.0.0-rc.6
+	golang.org/x/term v0.43.0
 )
 
 require (
@@ -37,5 +41,5 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/signin v1.10.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.5 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.51.5 // indirect
+	golang.org/x/sys v0.44.0 // indirect
 )

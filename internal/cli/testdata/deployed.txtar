@@ -1,0 +1,289 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The deployed store of TestDeployed, and under want/ what each case prints (go test -update
+rewrites them).
+-- dynaflux.yaml --
+store: shop
+regions: [us-east-1, us-west-2]
+archive:
+  streams:
+    orders:
+      enabled: false
+-- dynaflux/shop.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    duration_ms UInt32,
+    tags        Array(String) DEFAULT []
+)
+PRIMARY KEY (user_id);
+
+CREATE STREAM visits (site UUID, day Date, kind UInt8, note String)
+PRIMARY KEY (site, day, kind);
+
+CREATE STREAM orders (order_id String, total Decimal(10, 2))
+PRIMARY KEY (order_id);
+
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+SPLIT 2
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    avg(duration_ms)         AS avg_ms
+FROM page_views
+GROUP BY page, day;
+
+CREATE MATERIALIZED VIEW user_pages
+ORDER BY (user_id)
+PRIMARY KEY (user_id)
+AS SELECT user_id, count() AS views
+FROM page_views
+GROUP BY user_id;
+
+-- name: PageStats :many
+SELECT day, views, visitors, avg_ms
+FROM page_daily
+WHERE page = {page:String} AND day BETWEEN {from:Date} AND {to:Date}
+ORDER BY day;
+
+-- name: DayViews :one
+SELECT views FROM page_daily WHERE page = {page:String} AND day = {day:Date};
+
+-- name: UserViews :many
+SELECT user_id, views FROM user_pages WHERE user_id IN {users:Array(String)};
+
+-- name: UserEvents :many
+SELECT event_time, page, tags FROM page_views WHERE user_id IN {users:Array(String)} ORDER BY event_time;
+-- want/another_prefix_not_deployed.stderr --
+store shop  prefix prod-  account 123456789012  region us-east-1
+dynaflux query: us-east-1: no catalog is deployed in prod-shop-meta
+  hint: deploy regional.yaml in us-east-1
+-- want/another_prefix_not_deployed.stdout --
+-- want/inspect_retired_version.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux inspect: user_pages@v1 is retired in us-east-1
+-- want/inspect_retired_version.stdout --
+-- want/inspect_stream.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+note: events that arrived before 1999-12-30T00:00:00Z are past LOG RETENTION 2 DAY; the archive has them, in Athena:
+  SELECT * FROM "shop"."page_views_dedup" WHERE "user_id" = 'u1' ORDER BY "event_time", "event_id"
+-- want/inspect_stream.stdout --
+event_id                    event_time                   ingest_time                  origin_region  user_id  page   duration_ms  tags
+00VHNCZB00V63QXKKD6T5AR6KH  1999-12-30T09:00:00.000000Z  2000-01-01T00:00:00.000002Z  us-east-1      u1       /home  300          ['it\'s']
+00VHNCZB00V63QXKKD6T5AR6KF  1999-12-31T10:00:00.000000Z  2000-01-01T00:00:00.000000Z  us-east-1      u1       /home  100          ['a','b']
+00VHNCZB00V63QXKKD6T5AR6KJ  1999-12-31T12:00:00.123456Z  2000-01-01T00:00:00.000003Z  us-east-1      u1       /cart  50           []
+-- want/inspect_stream_json.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+note: events that arrived before 1999-12-30T00:00:00Z are past LOG RETENTION 2 DAY; the archive has them, in Athena:
+  SELECT * FROM "shop"."page_views_dedup" WHERE "user_id" = 'u2' ORDER BY "event_time", "event_id"
+-- want/inspect_stream_json.stdout --
+{"event_id":"00VHNCZB00V63QXKKD6T5AR6KG","event_time":"1999-12-31T11:00:00.000000Z","ingest_time":"2000-01-01T00:00:00.000001Z","origin_region":"us-east-1","user_id":"u2","page":"/home","duration_ms":200,"tags":[]}
+-- want/inspect_stream_not_archived.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+note: events that arrived before 1999-12-30T00:00:00Z are past LOG RETENTION 2 DAY, and orders isn't archived in us-east-1
+-- want/inspect_stream_not_archived.stdout --
+event_id  event_time  ingest_time  origin_region  order_id  total
+-- want/inspect_stream_range.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+note: stopped after 1 events; -limit 0 prints them all
+-- want/inspect_stream_range.stdout --
+event_id                    event_time                   ingest_time                  origin_region  user_id  page   duration_ms  tags
+00VHNCZB00V63QXKKD6T5AR6KH  1999-12-30T09:00:00.000000Z  2000-01-01T00:00:00.000002Z  us-east-1      u1       /home  300          ['it\'s']
+-- want/inspect_stream_with_-raw.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux inspect: -raw applies to views
+Run 'dynaflux help inspect' for usage.
+-- want/inspect_stream_with_-raw.stdout --
+-- want/inspect_stream_with_typed_keys.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+note: events that arrived before 1999-12-30T00:00:00Z are past LOG RETENTION 2 DAY; the archive has them, in Athena:
+  SELECT * FROM "shop"."visits_dedup" WHERE "site" = '61f0c404-5cb3-11e7-907b-a6006ad3dba0' AND "day" = DATE '1999-12-31' AND "kind" = 7 AND "event_time" >= TIMESTAMP '1999-12-01 00:00:00.000000' AND "event_time" < TIMESTAMP '1999-12-31 00:00:00.500000' ORDER BY "event_time", "event_id"
+-- want/inspect_stream_with_typed_keys.stdout --
+event_id  event_time  ingest_time  origin_region  site  day  kind  note
+-- want/inspect_stream_without_its_key.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux inspect: give every PRIMARY KEY column of page_views with -key: user_id
+Run 'dynaflux help inspect' for usage.
+-- want/inspect_stream_without_its_key.stdout --
+-- want/inspect_unknown.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux inspect: the deployed catalog of us-east-1 has no stream or view page_dayly; did you mean page_daily?
+Run 'dynaflux help inspect' for usage.
+-- want/inspect_unknown.stdout --
+-- want/inspect_view_json.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/inspect_view_json.stdout --
+{"format":1,"region":"us-east-1","version":"page_daily@v1","state":"live","rows":[{"page":"/home","day":"1999-12-30T00:00:00Z","avg_ms":300,"views":"1","visitors":"1"},{"page":"/home","day":"1999-12-31T00:00:00Z","avg_ms":150,"views":"2","visitors":"2"}]}
+-- want/inspect_view_not_live.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+note: user_pages@v1 is pending_backfill in us-east-1, so its rows may miss events
+dynaflux inspect: user_pages@v1 has no row with that key in us-east-1
+-- want/inspect_view_not_live.stdout --
+-- want/inspect_view_part_of_the_sort_key.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux inspect: -key views=1: no ORDER BY column views
+Run 'dynaflux help inspect' for usage.
+-- want/inspect_view_part_of_the_sort_key.stdout --
+-- want/inspect_view_partition.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/inspect_view_partition.stdout --
+page   day                   avg_ms  views  visitors
+/home  1999-12-30T00:00:00Z  300     1      1
+/home  1999-12-31T00:00:00Z  150     2      2
+-- want/inspect_view_raw_empty_partition.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/inspect_view_raw_empty_partition.stdout --
+-- want/inspect_view_raw_partition.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+note: stopped after 1 items; -limit 0 prints them all
+-- want/inspect_view_raw_partition.stdout --
+item pk "/home" sk "1999-12-30T00:00:00Z#p01": 121 of DynamoDB's 409600 bytes
+  _hwm      unit 6TERYTY2146E9 seq 0000000000000000000100000000000000000003
+  _v        N 1
+  avg_ms    L [N 300, N 1]
+  day       N 946512000000000
+  page      S "/home"
+  views     N 1
+  visitors  N 1
+-- want/inspect_view_raw_row.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/inspect_view_raw_row.stdout --
+item pk "/home" sk "1999-12-31T00:00:00Z#p01": 122 of DynamoDB's 409600 bytes
+  _hwm      unit 6TERYTY2146E9 seq 0000000000000000000100000000000000000002
+  _v        N 2
+  avg_ms    L [N 300, N 2]
+  day       N 946598400000000
+  page      S "/home"
+  views     N 2
+  visitors  N 2
+-- want/inspect_view_row.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/inspect_view_row.stdout --
+page   day                   avg_ms  views  visitors
+/home  1999-12-31T00:00:00Z  150     2      2
+-- want/inspect_view_row_not_found.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux inspect: page_daily@v1 has no row with that key in us-east-1
+-- want/inspect_view_row_not_found.stdout --
+-- want/inspect_view_with_-from.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux inspect: -from and -to apply to streams
+Run 'dynaflux help inspect' for usage.
+-- want/inspect_view_with_-from.stdout --
+-- want/inspect_view_without_a_current_version.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux inspect: user_pages has no current version in the deployed catalog of us-east-1; name one: user_pages@v1
+Run 'dynaflux help inspect' for usage.
+-- want/inspect_view_without_a_current_version.stdout --
+-- want/invalid_prefix.stderr --
+dynaflux query: -prefix "Prod" isn't a prefix: use lowercase letters, digits and -, starting with a letter and ending with -, such as prod-, or "" for none
+Run 'dynaflux help query' for usage.
+-- want/invalid_prefix.stdout --
+-- want/newer_catalog_format.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7001: the deployed catalog has format 2; this dynaflux reads formats 1 to 1
+  hint: upgrade dynaflux to the version that generated it, v9.0.0
+-- want/newer_catalog_format.stdout --
+-- want/query.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/query.stdout --
+day                   views  visitors  avg_ms
+1999-12-30T00:00:00Z  1      1         300
+1999-12-31T00:00:00Z  2      2         150
+-- want/query_invalid_value.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux query: -param from: invalid Date "yesterday": want YYYY-MM-DD
+Run 'dynaflux help query' for usage.
+-- want/query_invalid_value.stdout --
+-- want/query_json.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/query_json.stdout --
+{"day":"1999-12-30T00:00:00Z","views":"1","visitors":"1","avg_ms":300}
+{"day":"1999-12-31T00:00:00Z","views":"2","visitors":"2","avg_ms":150}
+-- want/query_missing_parameters.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux query: PageStats needs -param for from (Date), to (Date)
+Run 'dynaflux help query' for usage.
+-- want/query_missing_parameters.stdout --
+-- want/query_no_name.stderr --
+dynaflux query: name one query
+Run 'dynaflux help query' for usage.
+-- want/query_no_name.stdout --
+-- want/query_of_a_stream.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/query_of_a_stream.stdout --
+event_time                   page   tags
+1999-12-30T09:00:00.000000Z  /home  ['it\'s']
+1999-12-31T10:00:00.000000Z  /home  ['a','b']
+1999-12-31T11:00:00.000000Z  /home  []
+1999-12-31T12:00:00.123456Z  /cart  []
+-- want/query_of_a_stream_json.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/query_of_a_stream_json.stdout --
+{"event_time":"1999-12-30T09:00:00.000000Z","page":"/home","tags":["it's"]}
+{"event_time":"1999-12-31T10:00:00.000000Z","page":"/home","tags":["a","b"]}
+{"event_time":"1999-12-31T12:00:00.123456Z","page":"/cart","tags":[]}
+-- want/query_one_row.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/query_one_row.stdout --
+views
+2
+-- want/query_one_row_not_found.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux query: DayViews found no row
+-- want/query_one_row_not_found.stdout --
+-- want/query_repeated_parameter.stderr --
+dynaflux query: invalid value "page=/b" for flag -param: page is already set
+Run 'dynaflux help query' for usage.
+-- want/query_repeated_parameter.stdout --
+-- want/query_unknown.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux query: the deployed catalog of us-east-1 has no query PageStat; did you mean PageStats?
+Run 'dynaflux help query' for usage.
+-- want/query_unknown.stdout --
+-- want/query_unknown_parameter.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux query: -param pge=/home: no parameter pge; did you mean page?
+Run 'dynaflux help query' for usage.
+-- want/query_unknown_parameter.stdout --
+-- want/query_version_activating.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux query: view version not ready: user_pages@v1 is activating in us-east-1
+  hint: a backfill is filling it; follow it with dynaflux backfill user_pages@v1 -watch -region us-east-1 -prefix "", or read it anyway with -allow-partial
+-- want/query_version_activating.stdout --
+-- want/query_version_broken.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux query: view version not ready: user_pages@v1 is broken in us-east-1: event e1: division by zero
+  hint: rebuild it with dynaflux generate -rebuild user_pages, then deploy and backfill the new version
+-- want/query_version_broken.stdout --
+-- want/query_version_not_live.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux query: view version not ready: user_pages@v1 is pending_backfill in us-east-1
+  hint: make it live with dynaflux backfill user_pages@v1 -region us-east-1, or read it anyway with -allow-partial
+-- want/query_version_not_live.stdout --
+-- want/query_version_not_live_allowed.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/query_version_not_live_allowed.stdout --
+user_id  views
+-- want/query_without_rows.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/query_without_rows.stdout --
+day  views  visitors  avg_ms
+-- want/region_from_the_SDK.stderr --
+store shop  prefix (none)  account 123456789012  region us-west-2
+dynaflux query: us-west-2: no catalog is deployed in shop-meta
+  hint: deploy regional.yaml in us-west-2
+-- want/region_from_the_SDK.stdout --
+-- want/region_not_in_regions.stderr --
+dynaflux query: -region eu-west-1 isn't in regions (us-east-1, us-west-2)
+Run 'dynaflux help query' for usage.
+-- want/region_not_in_regions.stdout --
+-- want/remote_endpoint.stderr --
+dynaflux query: -endpoint http://dynamodb.us-east-1.amazonaws.com: dynamodb.us-east-1.amazonaws.com isn't a loopback address
+Run 'dynaflux help query' for usage.
+-- want/remote_endpoint.stdout --

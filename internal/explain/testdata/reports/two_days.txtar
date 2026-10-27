@@ -51,7 +51,7 @@ ORDER BY event_time DESC
 LIMIT 20;
 -- explain page_views --
 stream page_views
-  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000  --uniq-new user_daily=0.3
+  assumptions  -rate 1000  -event-kb 1  -rows page_daily=1000  -uniq-new user_daily=0.3
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 
@@ -90,7 +90,7 @@ monthly                        per region  3 regions
   not modeled: query reads, view and marker storage, backfills, archive compaction, CloudWatch
 -- explain page_daily --
 view page_daily, from stream page_views
-  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
+  assumptions  -rate 1000  -event-kb 1  -rows page_daily=1000
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 
@@ -117,7 +117,7 @@ per event, per region
   monthly      DynamoDB requests $2,116 per region, $6,347 for 3 regions
 -- explain user_daily --
 view user_daily, from stream page_views
-  assumptions  --rate 1000  --event-kb 1  --uniq-new user_daily=0.3
+  assumptions  -rate 1000  -event-kb 1  -uniq-new user_daily=0.3
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 
@@ -144,7 +144,7 @@ per event, per region
   monthly      DynamoDB requests $2,989 per region, $8,968 for 3 regions
 -- explain PageStats --
 query PageStats :many, from view page_daily
-  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
+  assumptions  -rate 1000  -event-kb 1  -rows page_daily=1000
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 
@@ -154,7 +154,7 @@ query PageStats :many, from view page_daily
   read cost    0.603 KB per row, and a Query rounds its total up to 4 KB: ~0.0754 read units per row eventually consistent, ~0.151 with WaitFor, which reads with strong consistency
 -- explain LastPage --
 query LastPage :one, from view user_latest
-  assumptions  --rate 1000  --event-kb 1
+  assumptions  -rate 1000  -event-kb 1
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 
@@ -163,7 +163,7 @@ query LastPage :one, from view user_latest
   read cost    0.163 KB per item, each rounded up to 4 KB: ~0.5 read units per item eventually consistent, ~1 with WaitFor, which reads with strong consistency
 -- explain RecentViews --
 query RecentViews :many, from stream page_views
-  assumptions  --event-kb 1
+  assumptions  -event-kb 1
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 

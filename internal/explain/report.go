@@ -135,7 +135,7 @@ func (e *explainer) section(title string) {
 
 // flags returns the workload flags that est depends on, for views[i] alone when i >= 0.
 func (est *estimate) flags(w Workload, i int) []string {
-	flags := []string{"--rate " + flagValue(w.Rate), "--event-kb " + flagValue(w.EventKB)}
+	flags := []string{"-rate " + flagValue(w.Rate), "-event-kb " + flagValue(w.EventKB)}
 	seen := map[string]bool{}
 	for j, vp := range est.views {
 		if (i >= 0 && j != i) || seen[vp.view] {
@@ -144,22 +144,22 @@ func (est *estimate) flags(w Workload, i int) []string {
 		seen[vp.view] = true
 		m := est.model.Views[j]
 		if m.Shared {
-			flags = append(flags, "--rows "+vp.view+"="+flagValue(m.ActiveRows))
+			flags = append(flags, "-rows "+vp.view+"="+flagValue(m.ActiveRows))
 		}
 		if m.UniqExacts > 0 {
-			flags = append(flags, "--uniq-new "+vp.view+"="+flagValue(m.UniqNew))
+			flags = append(flags, "-uniq-new "+vp.view+"="+flagValue(m.UniqNew))
 		}
 		if vp.version.Where != nil || vp.version.ArrayJoin != nil {
-			flags = append(flags, "--pass "+vp.view+"="+flagValue(m.Pass))
+			flags = append(flags, "-pass "+vp.view+"="+flagValue(m.Pass))
 		}
 	}
 	if est.model.Forever {
-		flags = append(flags, "--horizon "+FormatHorizon(w.Horizon))
+		flags = append(flags, "-horizon "+FormatHorizon(w.Horizon))
 	}
 	return flags
 }
 
-// FormatHorizon formats d as --horizon takes it: in whole days, such as 365d, or as a Go
+// FormatHorizon formats d as -horizon takes it: in whole days, such as 365d, or as a Go
 // duration.
 func FormatHorizon(d time.Duration) string {
 	if d%day == 0 {

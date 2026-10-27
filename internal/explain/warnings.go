@@ -30,7 +30,7 @@ func (est *estimate) streamFindings(w Workload) []finding {
 		fs = append(fs, finding{
 			subject: s.Name,
 			message: fmt.Sprintf("LOG RETENTION FOREVER keeps every event in DynamoDB: at this rate the log gains ~%s partitions a day, "+
-				"so batches shrink and projection costs more every day; this report is for --horizon %s",
+				"so batches shrink and projection costs more every day; this report is for -horizon %s",
 				num(perDay), FormatHorizon(w.Horizon)),
 			hint: "keep a short log (the default is 2 DAY), and use the archive as the permanent record",
 		})

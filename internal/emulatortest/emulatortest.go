@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,10 +22,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/infra"
+	"github.com/lucindo/dynaflux/internal/localstore"
 	"github.com/lucindo/dynaflux/internal/store"
 	"github.com/lucindo/dynaflux/internal/store/dynamo"
 )
@@ -88,10 +87,11 @@ func Tables(tb testing.TB, cfg aws.Config, m *infra.Manifest) catalog.Naming {
 		tb.Fatalf("emulatortest: region %q: DynamoDB Local keeps the suite's tables in %s", cfg.Region, Region)
 	}
 	prefix := uniquePrefix()
-	c := admin(cfg)
-	for _, spec := range slices.Concat(m.Global.Tables, m.Regional.Tables) {
-		create(tb, c, resolve(tb, spec.Name, prefix), spec)
+	ts, err := localstore.Tables(m, prefix)
+	if err != nil {
+		tb.Fatalf("emulatortest: %v", err)
 	}
+	create(tb, cfg, ts)
 	return catalog.Naming{Prefix: prefix, Store: m.Store}
 }
 
@@ -100,10 +100,10 @@ func Tables(tb testing.TB, cfg aws.Config, m *infra.Manifest) catalog.Naming {
 func Table(tb testing.TB, cfg aws.Config) string {
 	tb.Helper()
 	name := uniquePrefix() + "table"
-	create(tb, admin(cfg), name, infra.Table{Keys: []infra.Key{
+	create(tb, cfg, []localstore.Table{{Name: name, Spec: infra.Table{Keys: []infra.Key{
 		{Name: catalog.AttrPK, Type: catalog.KeyAttrType, Key: infra.KeyHash},
 		{Name: catalog.AttrSK, Type: catalog.KeyAttrType, Key: infra.KeyRange},
-	}})
+	}}}})
 	return name
 }
 
@@ -155,76 +155,18 @@ func admin(cfg aws.Config) *dynamodb.Client {
 
 func timedClient() aws.HTTPClient { return awshttp.NewBuildableClient().WithTimeout(attemptTimeout) }
 
-// resolve returns a table name of the manifest with prefix in place of ${prefix}: table
-// names hold no other substitution.
-func resolve(tb testing.TB, name infra.Text, prefix string) string {
+// create creates ts, which are deleted when the test ends.
+func create(tb testing.TB, cfg aws.Config, ts []localstore.Table) {
 	tb.Helper()
-	segs, err := name.Segments()
-	if err != nil {
-		tb.Fatalf("emulatortest: table name: %v", err)
-	}
-	var b strings.Builder
-	for _, seg := range segs {
-		switch {
-		case seg.Placeholder == infra.PlaceholderPrefix:
-			b.WriteString(prefix)
-		case seg.Placeholder == "" && seg.Ref == infra.Ref{}:
-			b.WriteString(seg.Literal)
-		default:
-			tb.Fatalf("emulatortest: table name %q holds a substitution other than ${%s}", name, infra.PlaceholderPrefix)
-		}
-	}
-	return b.String()
-}
-
-// create creates table name as spec describes it.
-func create(tb testing.TB, c *dynamodb.Client, name string, spec infra.Table) {
-	tb.Helper()
-	in := &dynamodb.CreateTableInput{TableName: &name, BillingMode: types.BillingModePayPerRequest}
-	for _, k := range spec.Keys {
-		in.AttributeDefinitions = append(in.AttributeDefinitions, types.AttributeDefinition{
-			AttributeName: new(k.Name), AttributeType: types.ScalarAttributeType(k.Type),
-		})
-		in.KeySchema = append(in.KeySchema, types.KeySchemaElement{AttributeName: new(k.Name), KeyType: keyType(tb, k.Key)})
-	}
-	switch spec.StreamView {
-	case "":
-	case infra.StreamViewNewAndOld:
-		in.StreamSpecification = &types.StreamSpecification{
-			StreamEnabled: new(true), StreamViewType: types.StreamViewTypeNewAndOldImages,
-		}
-	default:
-		tb.Fatalf("emulatortest: table %s: stream view %q", name, spec.StreamView)
-	}
-	if _, err := c.CreateTable(tb.Context(), in); err != nil {
-		tb.Fatalf("emulatortest: create table %s: %v", name, err)
-	}
+	c := admin(cfg)
 	// tb.Context is canceled before cleanups run.
 	ctx := context.WithoutCancel(tb.Context())
 	tb.Cleanup(func() {
-		if _, err := c.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &name}); err != nil {
-			tb.Errorf("emulatortest: delete table %s: %v", name, err)
+		if _, err := localstore.Delete(ctx, c, ts); err != nil {
+			tb.Errorf("emulatortest: %v", err)
 		}
 	})
-	if spec.TTLAttribute != "" {
-		_, err := c.UpdateTimeToLive(tb.Context(), &dynamodb.UpdateTimeToLiveInput{
-			TableName:               &name,
-			TimeToLiveSpecification: &types.TimeToLiveSpecification{AttributeName: &spec.TTLAttribute, Enabled: new(true)},
-		})
-		if err != nil {
-			tb.Fatalf("emulatortest: TTL of table %s: %v", name, err)
-		}
+	if _, err := localstore.Ensure(tb.Context(), c, ts); err != nil {
+		tb.Fatalf("emulatortest: %v", err)
 	}
-}
-
-func keyType(tb testing.TB, r infra.KeyRole) types.KeyType {
-	tb.Helper()
-	switch r {
-	case infra.KeyHash:
-		return types.KeyTypeHash
-	case infra.KeyRange:
-		return types.KeyTypeRange
-	}
-	tb.Fatalf("emulatortest: key role %q", r)
-	return ""
 }

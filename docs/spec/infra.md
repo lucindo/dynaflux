@@ -568,7 +568,93 @@ name, and fails if a role is over the limit. A projector role grows with its str
 Firehose streams and view versions: with `split: store`, 25 streams and 60 view versions
 come to about 11,600 characters. The error names the role and its size, and suggests
 `split: stream`, which gives each stream's projector its own role, or retiring old view
-versions (M5).
+versions ([lifecycle.md §8](lifecycle.md#8-retiring-a-version)).
+
+A managed policy holds 6,144 characters, and IAM attaches at most 10 to a role by default.
+`generate` packs the backfill role's growing statements into as few managed policies as fit,
+measured the same way, and fails when the role would need more than 10: about 600 view
+versions.
+
+### 9.6 Backfill role
+
+Trusts `lambda.amazonaws.com`. The statements in the first table are inline; those of the
+second name every stream and view table, so they go in managed policies attached to the
+role, `RoleBackfillPolicy<n>`, as many as fit 6,144 characters each.
+
+| Statement | Actions | Resources | Condition |
+|-----------|---------|-----------|-----------|
+| `Logs` | `logs:CreateLogStream`, `logs:PutLogEvents` | The function's log group | |
+| `Meta` | `dynamodb:BatchGetItem`, `GetItem`, `PutItem`, `Query` | The meta table: a row that a job writes holds the marks of the units that live projection applied to it, whose items it reads by batch | |
+| `Metrics` | `cloudwatch:GetMetricData` | `*` | |
+| `Staging` | `s3:DeleteObject`, `GetObject`, `PutObject` | `backfill/*` in the bucket | |
+| `StagingList` | `s3:ListBucket` | The bucket | `s3:prefix` starts with `backfill/` |
+
+| Statement | Actions | Resources |
+|-----------|---------|-----------|
+| `StreamScan` | `dynamodb:Scan` | The stream tables in this region |
+| `StreamTables` | `dynamodb:DescribeTable` | The stream tables in every region of `regions`: a job checks every replica's creation time |
+| `Streams` | `dynamodb:DescribeStream` | The streams of the stream tables in this region |
+| `Views` | `dynamodb:BatchGetItem`, `GetItem`, `PutItem` | The table of every current and retained view version |
+
+The function reads the projectors' `IteratorAge` with `GetMetricData`, and pauses while they
+are more than 5 minutes behind. M6 adds the grants to read the archive.
+
+### 9.7 Backfill state machine role
+
+Trusts `states.amazonaws.com` when `aws:SourceAccount` is this account.
+
+| Statement | Actions | Resources |
+|-----------|---------|-----------|
+| `Step` | `lambda:InvokeFunction` | The backfill function, and its versions and aliases (`<ARN>:*`) |
+| `Continue` | `states:StartExecution` | The machine itself, by name: a reference would be a cycle |
+| `Logs` | `logs:CreateLogDelivery`, `DeleteLogDelivery`, `DescribeLogGroups`, `DescribeResourcePolicies`, `GetLogDelivery`, `ListLogDeliveries`, `PutResourcePolicy`, `UpdateLogDelivery` | `*`, as Step Functions' logging needs |
+
+### 9.8 Operators
+
+`generate` writes no policy for the people and pipelines that run the commands that reach
+AWS: `status`, `diff`, `inspect`, `query`, `backfill`, `retire` and `import`. With exact
+ARNs, a managed policy of 6,144 characters names about 50 tables, and IAM attaches at most
+10 managed policies to a user or role by default, so a generated policy wouldn't fit a grown
+store. Write the policy from this table, at the granularity your account needs.
+`{partition}` is `aws` outside China and GovCloud, `{region}` is each region of `regions`,
+and the other placeholders are those of [§3](#3-names-tags-and-logical-ids). Write an ARN
+for each stream and view version, or a wildcard such as `table/{base}-view-*`, which also
+matches the tables of a store named `{store}-view-…`.
+
+| Actions | Resources | Condition | Commands |
+|---------|-----------|-----------|----------|
+| `dynamodb:GetItem` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-meta` | | Every command |
+| `dynamodb:Query` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-meta` | | `status`, `diff`, `inspect`, `query`, `backfill`, `retire` |
+| `dynamodb:BatchGetItem` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-meta` | | `status` |
+| `dynamodb:PutItem` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-meta` | | `backfill`, `retire` |
+| `dynamodb:GetItem` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-view-{view}-v{N}` | | `inspect` |
+| `dynamodb:BatchGetItem` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-view-{view}-v{N}` | | `query` |
+| `dynamodb:Query` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-view-{view}-v{N}`, `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `inspect`, `query` |
+| `dynamodb:Scan` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `backfill` |
+| `dynamodb:PutItem` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `import` |
+| `dynamodb:DescribeTable` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `status`, `backfill` |
+| `dynamodb:DescribeStream` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}/stream/*` | | `status` |
+| `lambda:ListEventSourceMappings`, `cloudwatch:GetMetricData` | `*` | | `status` |
+| `s3:ListBucket` | `arn:{partition}:s3:::{base}-{account}-{region}-an` | `s3:prefix` is `aws/lambda/` | `status` |
+| `s3:GetObject` | `arn:{partition}:s3:::{base}-{account}-{region}-an/aws/lambda/*` | | `status` |
+| `states:StartExecution` | `arn:{partition}:states:{region}:{account}:stateMachine:{base}-backfill` | | `backfill` |
+| `states:DescribeExecution` | `arn:{partition}:states:{region}:{account}:execution:{base}-backfill:*` | | `status`, `backfill` |
+| `states:StopExecution` | `arn:{partition}:states:{region}:{account}:execution:{base}-backfill:*` | | `backfill` |
+
+- `status`, `diff`, `inspect` and `query` only read. `backfill` and `retire` write meta
+  items, `backfill` also scans stream tables and starts and stops executions of the backfill
+  state machine ([§6.5](#65-backfill)), and `import` writes events.
+- `status` reads the delivery units, with `BatchGetItem` and `DescribeStream`, only with
+  `-verbose`. It reads the on-failure records that Lambda wrote under `aws/lambda/`
+  ([§5.2](#52-bucket)), the projectors' and the archive's metrics, and the event source
+  mappings of each stream. `cloudwatch:GetMetricData` and `lambda:ListEventSourceMappings`
+  have no resource type, so they take `*`.
+- `backfill` describes a stream table in every region of `regions`, even with `-region`:
+  before a new job, it checks every replica's age to tell whether the stream is fresh
+  ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)).
+- Every command also calls STS `GetCallerIdentity`, which needs no permission. With
+  `-endpoint`, the commands reach only DynamoDB Local, and need no AWS permission. `init`,
+  `validate`, `explain`, `generate`, `dev` and `version` never call AWS.
 
 ## 10. Alarms and dashboard
 

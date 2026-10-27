@@ -5,13 +5,17 @@
 package cli
 
 import (
+	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"maps"
+	"os"
 	"slices"
 	"strings"
+
+	"golang.org/x/term"
 
 	"github.com/lucindo/dynaflux/internal/diag"
 )
@@ -19,8 +23,8 @@ import (
 // Exit statuses, from docs/spec/sql.md appendix A.1.
 const (
 	exitOK     = 0
-	exitErrors = 1 // errors in the project or in an explain report
-	exitUsage  = 2 // usage and I/O problems
+	exitErrors = 1 // errors in the project, an explain report or a deployed store, and refusals
+	exitUsage  = 2 // usage, I/O and AWS access problems
 )
 
 // command is a subcommand of dynaflux.
@@ -36,44 +40,106 @@ type command struct {
 }
 
 func commands() []command {
-	return []command{validateCommand(), explainCommand(), generateCommand(), versionCommand(), helpCommand()}
-}
-
-// planned maps the commands of later milestones to their milestone, so that the CLI's
-// shape shows already.
-func planned() map[string]string {
-	const m5 = "M5"
-	return map[string]string{
-		"init": m5, "diff": m5, "dev": m5, "status": m5, "backfill": m5, "retire": m5, "import": m5, "inspect": m5,
-		"query": m5,
+	return []command{
+		initCommand(), validateCommand(), explainCommand(), generateCommand(), diffCommand(), devCommand(), statusCommand(),
+		backfillCommand(), retireCommand(), inspectCommand(), queryCommand(), importCommand(), versionCommand(), helpCommand(),
 	}
 }
 
-const plannedHelp = `Planned:
-  init, diff, dev, status, backfill, retire, import, inspect, query  milestone M5
-`
-
-// cli is one run of dynaflux. Commands write to out and errOut, and Run copies them to
-// stdout and stderr, so a failed write is checked in one place.
+// cli is one run of dynaflux.
 type cli struct {
-	workdir     string
-	out, errOut strings.Builder
+	ctx     context.Context
+	workdir string
+	stdin   io.Reader
+	// terminal is whether stdin is a terminal, on which a command asks before a write that
+	// can't be undone.
+	terminal bool
+	// connect reaches AWS, or DynamoDB Local at endpoint, and getenv reads the environment;
+	// tests replace them.
+	connect func(ctx context.Context, endpoint string) (cloud, error)
+	getenv  func(key string) string
+	// Commands write to out and errOut, and flush copies them to stdout and stderr, so a
+	// failed write is checked in one place. A long-running command flushes to stream.
+	out, errOut    strings.Builder
+	stdout, stderr io.Writer
+	outErr, errErr error // the first failed write to each
 }
 
 // Run runs dynaflux with args, the arguments after the program name, in the directory
-// workdir. It returns the exit status: 0 on success, 1 for errors in the project or in an
-// explain report, and 2 for usage and I/O problems.
-func Run(args []string, stdout, stderr io.Writer, workdir string) int {
-	c := &cli{workdir: workdir}
-	status := c.run(args)
-	if _, err := io.WriteString(stdout, c.out.String()); err != nil {
-		fmt.Fprintf(&c.errOut, "dynaflux: write output: %v\n", err)
+// workdir. It returns the exit status: 0 on success; 1 for errors in the project, in an
+// explain report or in a deployed store, and for a refused operation; and 2 for usage, I/O
+// and AWS access problems. Cancelling ctx stops a long-running command; main cancels it on
+// an interrupt. stdin is read only to confirm a write that can't be undone.
+func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, workdir string) int {
+	c := &cli{
+		ctx: ctx, workdir: workdir, stdin: stdin, terminal: isTerminal(stdin), connect: connectAWS, getenv: os.Getenv,
+		stdout: stdout, stderr: stderr,
+	}
+	return c.exit(c.run(args))
+}
+
+// isTerminal reports whether r is a terminal. A character device such as /dev/null, which
+// cron gives a job, isn't one.
+func isTerminal(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
+// flush writes what the command printed since the last flush.
+func (c *cli) flush() {
+	if c.outErr == nil {
+		_, c.outErr = io.WriteString(c.stdout, c.out.String())
+	}
+	if c.errErr == nil {
+		_, c.errErr = io.WriteString(c.stderr, c.errOut.String())
+	}
+	c.out.Reset()
+	c.errOut.Reset()
+}
+
+// exit flushes the output and returns status, or exitUsage when a write failed.
+func (c *cli) exit(status int) int {
+	c.flush()
+	if c.outErr != nil {
+		c.errorf("dynaflux: write output: %v", c.outErr)
+		c.flush()
 		status = exitUsage
 	}
-	if _, err := io.WriteString(stderr, c.errOut.String()); err != nil {
+	if c.errErr != nil {
 		return exitUsage
 	}
 	return status
+}
+
+// confirm asks question on a terminal before a write that can't be undone, and returns
+// exitOK to go on. With yes it doesn't ask; without a terminal it refuses with exitUsage, so
+// a script must pass -yes. A "no", or an interrupt, returns exitErrors.
+func (c *cli) confirm(name, question string, yes bool) int {
+	if yes {
+		return exitOK
+	}
+	if !c.terminal {
+		return c.usageError(name, question+": confirm with -yes when not on a terminal")
+	}
+	fmt.Fprintf(&c.errOut, "%s [y/N] ", question)
+	c.flush()
+	answer := make(chan string, 1)
+	// A read from a terminal can't be cancelled: on an interrupt it ends with the process.
+	go func() {
+		s := bufio.NewScanner(c.stdin)
+		s.Scan()
+		answer <- s.Text()
+	}()
+	select {
+	case a := <-answer:
+		if a = strings.ToLower(strings.TrimSpace(a)); a == "y" || a == "yes" {
+			return exitOK
+		}
+		c.errorf("dynaflux %s: nothing written", name)
+	case <-c.ctx.Done():
+		c.errorf("\ndynaflux %s: interrupted; nothing written", name)
+	}
+	return exitErrors
 }
 
 func (c *cli) run(args []string) int {
@@ -108,11 +174,7 @@ func (c *cli) find(name string) (command, bool) {
 	if i := slices.IndexFunc(cmds, func(cmd command) bool { return name == cmd.name || name == cmd.alias }); i >= 0 {
 		return cmds[i], true
 	}
-	if m, ok := planned()[name]; ok {
-		c.errorf("dynaflux %s: not available yet (milestone %s)", name, m)
-		return command{}, false
-	}
-	names := slices.Collect(maps.Keys(planned()))
+	var names []string
 	for _, cmd := range cmds {
 		names = append(names, cmd.name)
 		if cmd.alias != "" {
@@ -174,7 +236,7 @@ Commands:
 		}
 		fmt.Fprintf(b, "  %-15s %s\n", name, cmd.summary)
 	}
-	b.WriteString("\n" + plannedHelp + "\nRun 'dynaflux help <command>' for more about a command.\n")
+	b.WriteString("\nRun 'dynaflux help <command>' for more about a command.\n")
 }
 
 func (c *cli) commandHelp(cmd command, fs *flag.FlagSet) {

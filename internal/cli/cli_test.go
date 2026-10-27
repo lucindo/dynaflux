@@ -4,6 +4,7 @@
 package cli_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -22,14 +23,20 @@ Usage:
   dynaflux <command> [arguments]
 
 Commands:
+  init            start a project: dynaflux.yaml and an example stream, view and query
   validate        check dynaflux.yaml and the SQL definitions
   explain         show the layout and cost of a stream, view or query
   generate (gen)  write the Go client package and templates, and update dynaflux.lock
+  diff            compare the project with the deployed store
+  dev             run the store on DynamoDB Local for an application under development
+  status          show the state of the deployed store, and what needs an action
+  backfill        fill view versions in the deployed store, so they go live
+  retire          retire a view version that is no longer current
+  inspect         read a stream's events or a view's rows in the deployed store
+  query           run a named query on the deployed store
+  import          load past events from JSON Lines into a stream of the deployed store
   version         show the versions of the CLI, the runtime library and generated code
   help            show help for a command
-
-Planned:
-  init, diff, dev, status, backfill, retire, import, inspect, query  milestone M5
 
 Run 'dynaflux help <command>' for more about a command.
 `
@@ -48,7 +55,7 @@ type result struct {
 
 func run(dir string, args ...string) result {
 	var stdout, stderr strings.Builder
-	status := cli.Run(args, &stdout, &stderr, dir)
+	status := cli.Run(context.Background(), args, strings.NewReader(""), &stdout, &stderr, dir)
 	return result{status, stdout.String(), stderr.String()}
 }
 
@@ -116,7 +123,6 @@ error, and 2 for usage and I/O problems.
 			"help on an unknown command", []string{"help", "explian"},
 			result{2, "", "dynaflux: unknown command \"explian\"; did you mean explain?\nRun 'dynaflux help' for usage.\n"},
 		},
-		{"planned command", []string{"init"}, result{2, "", "dynaflux init: not available yet (milestone M5)\n"}},
 		{
 			"alias with an argument", []string{"gen", "x"},
 			result{2, "", "dynaflux generate: unexpected arguments: x\nRun 'dynaflux help generate' for usage.\n"},
@@ -125,7 +131,6 @@ error, and 2 for usage and I/O problems.
 			"unknown command close to an alias", []string{"gne"},
 			result{2, "", "dynaflux: unknown command \"gne\"; did you mean gen?\nRun 'dynaflux help' for usage.\n"},
 		},
-		{"planned operations command", []string{"backfill", "page_daily"}, result{2, "", "dynaflux backfill: not available yet (milestone M5)\n"}},
 		{
 			"unknown flag", []string{"validate", "--strict"},
 			result{2, "", "dynaflux validate: flag provided but not defined: -strict\nRun 'dynaflux help validate' for usage.\n"},
@@ -232,21 +237,21 @@ func TestExplain(t *testing.T) {
 		{
 			"defaults", "pages", []string{"page_daily"},
 			result{0, "view page_daily, from stream page_views\n" +
-				"  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000  --uniq-new page_daily=0.3\n", ""},
+				"  assumptions  -rate 1000  -event-kb 1  -rows page_daily=1000  -uniq-new page_daily=0.3\n", ""},
 		},
 		{
 			"flags before and after the name", "pages",
-			[]string{"--rate", "2000", "-event-kb=2", "page_daily", "--rows", "page_daily=50", "--uniq-new", "page_daily=0.5"},
+			[]string{"-rate", "2000", "-event-kb=2", "page_daily", "-rows", "page_daily=50", "-uniq-new", "page_daily=0.5"},
 			result{0, "view page_daily, from stream page_views\n" +
-				"  assumptions  --rate 2000  --event-kb 2  --rows page_daily=50  --uniq-new page_daily=0.5\n", ""},
+				"  assumptions  -rate 2000  -event-kb 2  -rows page_daily=50  -uniq-new page_daily=0.5\n", ""},
 		},
 		{
-			"horizon in days", "warning", []string{"page_views", "--horizon", "30d"},
-			result{0, "stream page_views\n  assumptions  --rate 1000  --event-kb 1  --horizon 30d\n", ""},
+			"horizon in days", "warning", []string{"page_views", "-horizon", "30d"},
+			result{0, "stream page_views\n  assumptions  -rate 1000  -event-kb 1  -horizon 30d\n", ""},
 		},
 		{
-			"horizon as a Go duration", "warning", []string{"page_views", "--horizon", "36h"},
-			result{0, "stream page_views\n  assumptions  --rate 1000  --event-kb 1  --horizon 36h0m0s\n", ""},
+			"horizon as a Go duration", "warning", []string{"page_views", "-horizon", "36h"},
+			result{0, "stream page_views\n  assumptions  -rate 1000  -event-kb 1  -horizon 36h0m0s\n", ""},
 		},
 		{"project with errors", "errors", []string{"page_referrer"}, result{1, "", errorsDiagnostics}},
 		{
@@ -262,41 +267,41 @@ func TestExplain(t *testing.T) {
 			result{2, "", "dynaflux explain: name one stream, view or query\nRun 'dynaflux help explain' for usage.\n"},
 		},
 		{
-			"workload out of range", "pages", []string{"page_views", "--rate", "0"},
-			result{2, "", "dynaflux explain: --rate must be over 0 and at most 10,000,000 events per second, not 0\n"},
+			"workload out of range", "pages", []string{"page_views", "-rate", "0"},
+			result{2, "", "dynaflux explain: -rate must be over 0 and at most 10,000,000 events per second, not 0\n"},
 		},
 		{
-			"per-view flag without a view", "pages", []string{"page_views", "--rows", "50"},
+			"per-view flag without a view", "pages", []string{"page_views", "-rows", "50"},
 			result{2, "", "dynaflux explain: invalid value \"50\" for flag -rows: want view=value\n" +
 				"Run 'dynaflux help explain' for usage.\n"},
 		},
 		{
-			"per-view flag that isn't a number", "pages", []string{"page_views", "--pass", "page_daily=most"},
+			"per-view flag that isn't a number", "pages", []string{"page_views", "-pass", "page_daily=most"},
 			result{2, "", "dynaflux explain: invalid value \"page_daily=most\" for flag -pass: \"most\" isn't a number\n" +
 				"Run 'dynaflux help explain' for usage.\n"},
 		},
 		{
-			"per-view flag repeated for a view", "pages", []string{"page_views", "--rows", "page_daily=5", "--rows", "page_daily=6"},
+			"per-view flag repeated for a view", "pages", []string{"page_views", "-rows", "page_daily=5", "-rows", "page_daily=6"},
 			result{2, "", "dynaflux explain: invalid value \"page_daily=6\" for flag -rows: page_daily is already set\n" +
 				"Run 'dynaflux help explain' for usage.\n"},
 		},
 		{
-			"horizon in fractional days", "warning", []string{"page_views", "--horizon", "1.5d"},
+			"horizon in fractional days", "warning", []string{"page_views", "-horizon", "1.5d"},
 			result{2, "", "dynaflux explain: invalid value \"1.5d\" for flag -horizon: want a whole number of days, such as 365d\n" +
 				"Run 'dynaflux help explain' for usage.\n"},
 		},
 		{
-			"horizon past the longest duration", "warning", []string{"page_views", "--horizon", "106752d"},
+			"horizon past the longest duration", "warning", []string{"page_views", "-horizon", "106752d"},
 			result{2, "", "dynaflux explain: invalid value \"106752d\" for flag -horizon: want a whole number of days, such as 365d\n" +
 				"Run 'dynaflux help explain' for usage.\n"},
 		},
 		{
-			"horizon past the shortest duration", "warning", []string{"page_views", "--horizon=-106752d"},
+			"horizon past the shortest duration", "warning", []string{"page_views", "-horizon=-106752d"},
 			result{2, "", "dynaflux explain: invalid value \"-106752d\" for flag -horizon: want a whole number of days, such as 365d\n" +
 				"Run 'dynaflux help explain' for usage.\n"},
 		},
 		{
-			"no days", "warning", []string{"page_views", "--horizon", "0d"},
+			"no days", "warning", []string{"page_views", "-horizon", "0d"},
 			result{2, "", "dynaflux explain: invalid value \"0d\" for flag -horizon: want a whole number of days, such as 365d\n" +
 				"Run 'dynaflux help explain' for usage.\n"},
 		},
@@ -330,7 +335,7 @@ func (failingWriter) Write([]byte) (int, error) {
 
 func TestDiagnosticsWriteFails(t *testing.T) {
 	t.Parallel()
-	if status := cli.Run([]string{"validate"}, io.Discard, failingWriter{}, writeProject(t, "errors")); status != 2 {
+	if status := cli.Run(t.Context(), []string{"validate"}, nil, io.Discard, failingWriter{}, writeProject(t, "errors")); status != 2 {
 		t.Errorf("got status %d, want 2", status)
 	}
 }
@@ -338,7 +343,7 @@ func TestDiagnosticsWriteFails(t *testing.T) {
 func TestOutputWriteFails(t *testing.T) {
 	t.Parallel()
 	var stderr strings.Builder
-	status := cli.Run([]string{"version"}, failingWriter{}, &stderr, t.TempDir())
+	status := cli.Run(t.Context(), []string{"version"}, nil, failingWriter{}, &stderr, t.TempDir())
 	if want := "dynaflux: write output: disk full\n"; status != 2 || stderr.String() != want {
 		t.Errorf("got status %d and stderr %q, want 2 and %q", status, stderr.String(), want)
 	}

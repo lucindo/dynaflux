@@ -1,0 +1,1001 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The store of TestStatus, deployed in us-east-1 and us-west-2, and under want/ what each case
+prints (go test -update rewrites them). Both regions archive both streams with events: all.
+page_counts and plan_counts count, so a table source splits them by time; page_seen is
+idempotent.
+-- dynaflux.yaml --
+store: shop
+regions: [us-east-1, us-west-2]
+archive: {enabled: true, events: all}
+-- dynaflux/shop.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id);
+
+CREATE STREAM signups (user_id String, plan String)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_counts
+ORDER BY (page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+
+CREATE MATERIALIZED VIEW page_seen
+ORDER BY (page)
+AS SELECT page, max(user_id) AS last_user
+FROM page_views
+GROUP BY page;
+
+CREATE MATERIALIZED VIEW plan_counts
+ORDER BY (plan)
+AS SELECT plan, count() AS signups
+FROM signups
+GROUP BY plan;
+-- want/a_gap_record_unreadable.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T00:00:00Z: event e6 failed to evaluate: division by zero
+  hint: fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e6'
+dynaflux status: us-east-1: 1 of Lambda's records under s3://shop-123456789012-us-east-1-an/aws/lambda/ couldn't be read, such as: deployed: read s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-z: invalid character 'o' in literal null (expecting 'u')
+-- want/a_gap_record_unreadable.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    broken
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+-- want/blocked.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7209: the projector of stream page_views fails every batch: page_seen@v1 is live, and the deployed catalog neither defines nor retires it; records are lost from 2000-01-01T23:00:00Z to every view and the archive
+  hint: deploy regional.yaml in us-east-1 from a build whose catalog defines page_seen@v1
+us-east-1: warning DF7205: the projector of stream page_views is 1h0m0s behind
+  hint: read its log with aws logs tail /aws/lambda/shop-projector --since 1h --region us-east-1
+us-east-1: warning DF7205: the projector of stream signups is 1h0m0s behind
+  hint: read its log with aws logs tail /aws/lambda/shop-projector --since 1h --region us-east-1
+-- want/blocked.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 5e89ba4633eb (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 1h0m0s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 1h0m0s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+-- want/broken.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7201: page_counts@v1 broke at 2000-01-01T00:00:00Z: the record of unit shardId-0001 at sequence number 0000000000000000000000000000000000000007, event e1, failed to evaluate: division by zero
+  hint: fix page_counts, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_counts; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e1'
+-- want/broken.stdout --
+version         us-east-1
+page_counts@v1  broken
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+-- want/broken_by_the_time_split.stderr --
+store shop  prefix (none)  account 123456789012  region us-west-2
+us-west-2: error DF7201: plan_counts@v1 broke at 2000-01-01T00:00:00Z: event e2 can't be placed by the time split: the event landed after the split's late bound
+  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml and run dynaflux backfill plan_counts; the event in Athena: SELECT * FROM "shop"."signups_dedup" WHERE "event_id" = 'e2'
+-- want/broken_by_the_time_split.stdout --
+version         us-west-2
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  broken
+
+us-west-2: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+-- want/broken_retained_version.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7201: plan_counts@v1 broke at 2000-01-01T00:00:00Z: event e3 failed to evaluate: division by zero
+  hint: retire it with dynaflux retire plan_counts@v1; the event in Athena: SELECT * FROM "shop"."signups_dedup" WHERE "event_id" = 'e3'
+us-east-1: warning DF7202: plan_counts@v2 needs a backfill
+  hint: dynaflux backfill plan_counts@v2 -region us-east-1
+-- want/broken_retained_version.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  broken
+plan_counts@v2  pending_backfill
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+-- want/cancelled.stderr --
+store shop  prefix (none)  account 123456789012  region us-west-2
+us-west-2: warning DF7202: plan_counts@v2 needs a backfill; its job was cancelled
+  hint: dynaflux backfill plan_counts@v2 -region us-west-2
+-- want/cancelled.stdout --
+version         us-west-2
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  pending_backfill
+
+us-west-2: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  backfill plan_counts@v2: cancelled, attempt 1, phase activate, 0 of 0 records applied; table source, split by time (the stream held events when the job started, or -source table chose it)
+-- want/continuation_missing.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7216: the backfill of plan_counts@v2 is interrupted: its execution arn:aws:states:us-east-1:123456789012:execution:shop-backfill:plan-counts-v2-0a1b2c-a1 ended without finishing
+  hint: resume it with dynaflux backfill plan_counts@v2 -region us-east-1
+-- want/continuation_missing.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  pending_backfill
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the stream held events when the job started, or -source table chose it); interrupted
+-- want/continuing.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/continuing.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  backfill plan_counts@v2: running, attempt 1, phase apply, 1200 of 5000 records applied; rate no limit; table source, split by time at 2000-01-01T00:06:30Z (the stream held events when the job started, or -source table chose it); continuing in plan-counts-v2-0a1b2c-a1-c1
+-- want/delivery_problems.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7208: the event source mapping us-east-1-page_views-shop-projector-page_views of stream page_views reports PROBLEM: Function call failed
+  hint: read why shop-projector-page_views fails with aws logs tail /aws/lambda/shop-projector-page_views --since 1h --region us-east-1
+us-east-1: warning DF7206: function audit also reads stream page_views, with event source mapping us-east-1-page_views-audit; a shard serves at most two readers
+  hint: unless it is needed, aws lambda delete-event-source-mapping --uuid us-east-1-page_views-audit --region us-east-1
+us-east-1: warning DF7205: the projector of stream page_views is 20m0s behind
+  hint: read its log with aws logs tail /aws/lambda/shop-projector-page_views --since 1h --region us-east-1
+us-east-1: warning DF7210: Firehose couldn't write 7 rows of stream page_views to the archive in the last 24 hours
+  hint: the rows are under s3://shop-123456789012-us-east-1-an/errors/firehose/page_views/
+us-east-1: error DF7208: the event source mapping us-east-1-signups-shop-projector of stream signups is Disabled, so nothing applies its events
+  hint: deploy regional.yaml in us-east-1 again
+us-east-1: warning DF7210: the archive of stream signups is 30m0s behind
+  hint: read the log group /aws/kinesisfirehose/shop-archive
+-- want/delivery_problems.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 20m0s; mapping us-east-1-page_views-shop-projector-page_views to shop-projector-page_views enabled, last result PROBLEM: Function call failed; mapping us-east-1-page_views-audit to audit enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector disabled, last result OK; archive 30m0s behind
+-- want/delivery_problems_json.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/delivery_problems_json.stdout --
+{
+  "format": 1,
+  "store": "shop",
+  "prefix": "",
+  "account": "123456789012",
+  "regions": [
+    {
+      "region": "us-east-1",
+      "deployed": true,
+      "catalog": {
+        "hash": "003db85e4f0e955b95138f843b54a45334d900db9cecb5c497118b4538dea5f5",
+        "generator": "v0.5.0",
+        "format": 1,
+        "registered_at": "2000-01-01T00:00:00Z"
+      },
+      "versions": [
+        {
+          "version": "page_counts@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        },
+        {
+          "version": "page_seen@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "none",
+          "activated_at": "2000-01-01T00:00:00Z"
+        },
+        {
+          "version": "plan_counts@v1",
+          "stream": "signups",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        }
+      ],
+      "streams": [
+        {
+          "stream": "page_views",
+          "arn": "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-page_views/stream/2000-01-01T00:00:00.000",
+          "lag_ms": 2000,
+          "mappings": [
+            {
+              "uuid": "us-east-1-page_views-shop-projector",
+              "function": "shop-projector",
+              "state": "Enabled",
+              "last_result": "OK"
+            }
+          ],
+          "archive": "shop-archive-page_views",
+          "archive_freshness_s": 120,
+          "archive_failed_rows": 1
+        },
+        {
+          "stream": "signups",
+          "arn": "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/2000-01-01T00:00:00.000",
+          "archive": "shop-archive-signups",
+          "archive_freshness_s": 120
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "regions": [
+        "us-east-1"
+      ],
+      "code": "DF7210",
+      "severity": "warning",
+      "message": "Firehose couldn't write 1 rows of stream page_views to the archive in the last 24 hours",
+      "hint": "the rows are under s3://shop-123456789012-us-east-1-an/errors/firehose/page_views/"
+    },
+    {
+      "regions": [
+        "us-east-1"
+      ],
+      "code": "DF7208",
+      "severity": "error",
+      "message": "stream signups has no event source mapping to its projector, so nothing applies its events",
+      "hint": "deploy regional.yaml in us-east-1 again"
+    }
+  ]
+}
+-- want/gaps.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T01:00:00Z: event e4 failed to evaluate: division by zero
+  hint: fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e4'
+us-east-1: error DF7203: Lambda discarded 3 records of stream page_views: unit shardId-0001, sequence numbers 100 to 250, which arrived from 2000-01-01T00:29:00Z to 2000-01-01T00:30:00Z; page_counts@v1 miss them
+  hint: run dynaflux generate -rebuild page_counts, deploy regional.yaml in every region, and run dynaflux backfill page_counts; the records are in s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-a
+-- want/gaps.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    broken
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  note: Lambda discarded 3 records of stream page_views in 1 batch from 1999-12-31T22:59:00Z to 1999-12-31T23:00:00Z, which no version misses; the region's archive misses them
+-- want/gaps_unreadable.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T00:00:00Z: event e6 failed to evaluate: division by zero
+  hint: fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e6'
+dynaflux status: us-east-1: the gaps couldn't be read: deployed: list s3://shop-123456789012-us-east-1-an/aws/lambda/: AccessDenied: s3:ListBucket
+-- want/gaps_unreadable.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    broken
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  gaps couldn't be read from s3://shop-123456789012-us-east-1-an/aws/lambda/
+-- want/healthy.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+-- want/healthy.stdout --
+version         us-east-1  us-west-2
+page_counts@v1  live       live
+page_seen@v1    live       live
+plan_counts@v1  live       live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+us-west-2: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+-- want/healthy_json.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+-- want/healthy_json.stdout --
+{
+  "format": 1,
+  "store": "shop",
+  "prefix": "",
+  "account": "123456789012",
+  "regions": [
+    {
+      "region": "us-east-1",
+      "deployed": true,
+      "catalog": {
+        "hash": "003db85e4f0e955b95138f843b54a45334d900db9cecb5c497118b4538dea5f5",
+        "generator": "v0.5.0",
+        "format": 1,
+        "registered_at": "2000-01-01T00:00:00Z"
+      },
+      "versions": [
+        {
+          "version": "page_counts@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        },
+        {
+          "version": "page_seen@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "none",
+          "activated_at": "2000-01-01T00:00:00Z"
+        },
+        {
+          "version": "plan_counts@v1",
+          "stream": "signups",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        }
+      ],
+      "streams": [
+        {
+          "stream": "page_views",
+          "arn": "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-page_views/stream/2000-01-01T00:00:00.000",
+          "lag_ms": 2000,
+          "mappings": [
+            {
+              "uuid": "us-east-1-page_views-shop-projector",
+              "function": "shop-projector",
+              "state": "Enabled",
+              "last_result": "OK"
+            }
+          ],
+          "archive": "shop-archive-page_views",
+          "archive_freshness_s": 120
+        },
+        {
+          "stream": "signups",
+          "arn": "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/2000-01-01T00:00:00.000",
+          "lag_ms": 2000,
+          "mappings": [
+            {
+              "uuid": "us-east-1-signups-shop-projector",
+              "function": "shop-projector",
+              "state": "Enabled",
+              "last_result": "OK"
+            }
+          ],
+          "archive": "shop-archive-signups",
+          "archive_freshness_s": 120
+        }
+      ]
+    },
+    {
+      "region": "us-west-2",
+      "deployed": true,
+      "catalog": {
+        "hash": "003db85e4f0e955b95138f843b54a45334d900db9cecb5c497118b4538dea5f5",
+        "generator": "v0.5.0",
+        "format": 1,
+        "registered_at": "2000-01-01T00:00:00Z"
+      },
+      "versions": [
+        {
+          "version": "page_counts@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        },
+        {
+          "version": "page_seen@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "none",
+          "activated_at": "2000-01-01T00:00:00Z"
+        },
+        {
+          "version": "plan_counts@v1",
+          "stream": "signups",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        }
+      ],
+      "streams": [
+        {
+          "stream": "page_views",
+          "arn": "arn:aws:dynamodb:us-west-2:123456789012:table/shop-stream-page_views/stream/2000-01-01T00:00:00.000",
+          "lag_ms": 2000,
+          "mappings": [
+            {
+              "uuid": "us-west-2-page_views-shop-projector",
+              "function": "shop-projector",
+              "state": "Enabled",
+              "last_result": "OK"
+            }
+          ],
+          "archive": "shop-archive-page_views",
+          "archive_freshness_s": 120
+        },
+        {
+          "stream": "signups",
+          "arn": "arn:aws:dynamodb:us-west-2:123456789012:table/shop-stream-signups/stream/2000-01-01T00:00:00.000",
+          "lag_ms": 2000,
+          "mappings": [
+            {
+              "uuid": "us-west-2-signups-shop-projector",
+              "function": "shop-projector",
+              "state": "Enabled",
+              "last_result": "OK"
+            }
+          ],
+          "archive": "shop-archive-signups",
+          "archive_freshness_s": 120
+        }
+      ]
+    }
+  ],
+  "findings": []
+}
+-- want/interrupted.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7216: the backfill of plan_counts@v2 is interrupted: its execution arn:aws:states:us-east-1:123456789012:execution:shop-backfill:plan-counts-v2-0a1b2c-a1 ended without finishing; its last error, in phase stage at 2000-01-01T00:00:00Z: AccessDenied: s3:PutObject
+  hint: resume it with dynaflux backfill plan_counts@v2 -region us-east-1
+-- want/interrupted.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  pending_backfill
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the stream held events when the job started, or -source table chose it); interrupted; its last error, in phase stage at 2000-01-01T00:00:00Z: AccessDenied: s3:PutObject
+-- want/jobs_gaps_and_units_json.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/jobs_gaps_and_units_json.stdout --
+{
+  "format": 1,
+  "store": "shop",
+  "prefix": "",
+  "account": "123456789012",
+  "regions": [
+    {
+      "region": "us-east-1",
+      "deployed": true,
+      "catalog": {
+        "hash": "6a2c85d900921ffad6a2f5734b50a1b3e36be2ca0b22d8b79fe42f38e1d1b73d",
+        "generator": "v0.6.0",
+        "format": 1,
+        "registered_at": "2000-01-01T00:00:00Z"
+      },
+      "versions": [
+        {
+          "version": "page_counts@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        },
+        {
+          "version": "page_seen@v1",
+          "stream": "page_views",
+          "state": "broken",
+          "split": "none",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "failure": {
+            "cause": "record",
+            "unit": "shardId-0002",
+            "seq": "0000000000000000000000000000000000000009",
+            "error": "division by zero",
+            "at": "2000-01-01T01:00:00Z"
+          }
+        },
+        {
+          "version": "plan_counts@v1",
+          "stream": "signups",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        },
+        {
+          "version": "plan_counts@v2",
+          "stream": "signups",
+          "state": "activating",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        }
+      ],
+      "jobs": [
+        {
+          "version": "plan_counts@v2",
+          "state": "running",
+          "phase": "apply",
+          "attempt": 1,
+          "split": "time",
+          "staged": 5000,
+          "applied": 1200,
+          "skipped": 50,
+          "rate": 0,
+          "paused": false,
+          "updated_at": "2000-01-01T00:00:00Z",
+          "execution": "arn:aws:states:us-east-1:123456789012:execution:shop-backfill:plan-counts-v2-0a1b2c-a1",
+          "running": "arn:aws:states:us-east-1:123456789012:execution:shop-backfill:plan-counts-v2-0a1b2c-a1",
+          "execution_status": "running"
+        }
+      ],
+      "streams": [
+        {
+          "stream": "page_views",
+          "arn": "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-page_views/stream/2000-01-01T00:00:00.000",
+          "lag_ms": 2000,
+          "mappings": [
+            {
+              "uuid": "us-east-1-page_views-shop-projector",
+              "function": "shop-projector",
+              "state": "Enabled",
+              "last_result": "OK"
+            }
+          ],
+          "archive": "shop-archive-page_views",
+          "archive_freshness_s": 120,
+          "gaps": [
+            {
+              "object": "aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-a",
+              "unit": "shardId-0001",
+              "first_seq": "100",
+              "last_seq": "250",
+              "first_arrival": "2000-01-01T00:29:00Z",
+              "last_arrival": "2000-01-01T00:30:00Z",
+              "records": 3,
+              "missing": [
+                "page_counts@v1"
+              ]
+            }
+          ],
+          "units": [
+            {
+              "unit": "shardId-0001"
+            },
+            {
+              "unit": "shardId-0002"
+            }
+          ]
+        },
+        {
+          "stream": "signups",
+          "arn": "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/2000-01-01T00:00:00.000",
+          "lag_ms": 2000,
+          "mappings": [
+            {
+              "uuid": "us-east-1-signups-shop-projector",
+              "function": "shop-projector",
+              "state": "Enabled",
+              "last_result": "OK"
+            }
+          ],
+          "archive": "shop-archive-signups",
+          "archive_freshness_s": 120,
+          "units": [
+            {
+              "unit": "shardId-0003"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "regions": [
+        "us-east-1"
+      ],
+      "code": "DF7201",
+      "severity": "error",
+      "message": "page_seen@v1 broke at 2000-01-01T01:00:00Z: the record of unit shardId-0002 at sequence number 0000000000000000000000000000000000000009 failed to evaluate: division by zero",
+      "hint": "fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM \"shop\".\"page_views\" WHERE \"_shard\" = 'shardId-0002' AND \"_seq\" = '0000000000000000000000000000000000000009'"
+    },
+    {
+      "regions": [
+        "us-east-1"
+      ],
+      "code": "DF7203",
+      "severity": "error",
+      "message": "Lambda discarded 3 records of stream page_views: unit shardId-0001, sequence numbers 100 to 250, which arrived from 2000-01-01T00:29:00Z to 2000-01-01T00:30:00Z; page_counts@v1 miss them",
+      "hint": "run dynaflux generate -rebuild page_counts, deploy regional.yaml in every region, and run dynaflux backfill page_counts; the records are in s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-a"
+    }
+  ]
+}
+-- want/local.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+us-east-1: error DF7201: page_counts@v1 broke at 2000-01-01T00:00:00Z: event e5 failed to evaluate: division by zero
+  hint: fix page_counts, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_counts; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e5'
+-- want/local.stdout --
+version         us-east-1
+page_counts@v1  broken
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  pending_backfill
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  mappings, metrics, gaps and the jobs' executions aren't available locally
+  stream page_views:
+    unit shardId-0001: no progress
+    unit shardId-0002: no progress
+  stream signups:
+    unit shardId-0003: no progress
+  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the stream held events when the job started, or -source table chose it); execution not available locally
+-- want/local_json.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+-- want/local_json.stdout --
+{
+  "format": 1,
+  "store": "shop",
+  "prefix": "",
+  "endpoint": "http://127.0.0.1:8000",
+  "regions": [
+    {
+      "region": "us-east-1",
+      "deployed": true,
+      "catalog": {
+        "hash": "003db85e4f0e955b95138f843b54a45334d900db9cecb5c497118b4538dea5f5",
+        "generator": "v0.5.0",
+        "format": 1,
+        "registered_at": "2000-01-01T00:00:00Z"
+      },
+      "versions": [
+        {
+          "version": "page_counts@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        },
+        {
+          "version": "page_seen@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "none",
+          "activated_at": "2000-01-01T00:00:00Z"
+        },
+        {
+          "version": "plan_counts@v1",
+          "stream": "signups",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        }
+      ],
+      "streams": [
+        {
+          "stream": "page_views",
+          "archive": "shop-archive-page_views"
+        },
+        {
+          "stream": "signups",
+          "archive": "shop-archive-signups"
+        }
+      ]
+    }
+  ],
+  "findings": []
+}
+-- want/mappings_unreadable.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T00:00:00Z: event e6 failed to evaluate: division by zero
+  hint: fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e6'
+dynaflux status: us-east-1: the mappings of stream page_views couldn't be read: deployed: list the event source mappings of arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-page_views/stream/2000-01-01T00:00:00.000: AccessDeniedException: lambda:ListEventSourceMappings
+dynaflux status: us-east-1: the mappings of stream signups couldn't be read: deployed: list the event source mappings of arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/2000-01-01T00:00:00.000: AccessDeniedException: lambda:ListEventSourceMappings
+-- want/mappings_unreadable.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    broken
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mappings couldn't be read; archive 2m0s behind
+  stream signups: lag 2s; mappings couldn't be read; archive 2m0s behind
+-- want/metrics_and_executions_unreadable.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T00:00:00Z: event e6 failed to evaluate: division by zero
+  hint: fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e6'
+dynaflux status: us-east-1: the execution of the backfill of plan_counts@v2 couldn't be read: deployed: describe execution arn:aws:states:us-east-1:123456789012:execution:shop-backfill:plan-counts-v2-0a1b2c-a1: AccessDeniedException: states:DescribeExecution
+dynaflux status: us-east-1: the projectors' lag couldn't be read: awsbackfill: read the projectors' IteratorAge: ThrottlingException: Rate exceeded
+dynaflux status: us-east-1: the archive's metrics couldn't be read: deployed: read metrics: ThrottlingException: Rate exceeded
+-- want/metrics_and_executions_unreadable.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    broken
+plan_counts@v1  live
+plan_counts@v2  pending_backfill
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag couldn't be read; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive couldn't be read
+  stream signups: lag couldn't be read; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive couldn't be read
+  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the stream held events when the job started, or -source table chose it); execution couldn't be read
+-- want/needs_a_backfill.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+us-east-1: warning DF7202: plan_counts@v2 needs a backfill
+  hint: dynaflux backfill plan_counts@v2 -region us-east-1
+us-west-2: warning DF7202: plan_counts@v2 needs a backfill
+  hint: dynaflux backfill plan_counts@v2 -region us-west-2
+-- want/needs_a_backfill.stdout --
+version         us-east-1         us-west-2
+page_counts@v1  live              live
+page_seen@v1    live              live
+plan_counts@v1  live              live
+plan_counts@v2  pending_backfill  pending_backfill
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+us-west-2: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+-- want/newer_catalog_format.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7001: the deployed catalog has format 2; this dynaflux reads formats 1 to 1
+  hint: upgrade dynaflux to the version that generated it, v9.0.0
+-- want/newer_catalog_format.stdout --
+us-east-1: catalog 0b0a51ca69f8 (dynaflux v9.0.0), registered 2000-01-01T00:00:00Z
+-- want/not_deployed.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+-- want/not_deployed.stdout --
+version         us-east-1  us-west-2
+page_counts@v1  live       -
+page_seen@v1    live       -
+plan_counts@v1  live       -
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+us-west-2: not deployed: no catalog in shop-meta
+-- want/older_gaps.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/older_gaps.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  note: 1 on-failure record in s3://shop-123456789012-us-east-1-an/aws/lambda/ predates every version's activation, so no version misses it
+-- want/one_region.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/one_region.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+-- want/partial.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/partial.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  live
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  note: plan_counts@v2 is partial since 1999-12-30T00:00:00Z: it misses the events before then
+-- want/paused.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/paused.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  backfill plan_counts@v2: running, attempt 1, phase apply, 1200 of 5000 records applied; rate no limit; table source, split by time at 2000-01-01T00:06:30Z (the stream held events when the job started, or -source table chose it); paused: the projector is more than 5 minutes behind; execution running
+-- want/region_not_in_regions.stderr --
+dynaflux status: -region eu-west-1 isn't in regions (us-east-1, us-west-2)
+Run 'dynaflux help status' for usage.
+-- want/region_not_in_regions.stdout --
+-- want/running.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/running.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  backfill plan_counts@v2: running, attempt 1, phase apply, 1200 of 5000 records applied; rate 100 records/s, about 37s left; table source, split by time at 2000-01-01T00:06:30Z (the stream held events when the job started, or -source table chose it); execution running
+-- want/timeout_zero.stderr --
+dynaflux status: -timeout 0s: want a duration above 0, such as 5m
+Run 'dynaflux help status' for usage.
+-- want/timeout_zero.stdout --
+-- want/unexpected_argument.stderr --
+dynaflux status: unexpected arguments: page_counts
+Run 'dynaflux help status' for usage.
+-- want/unexpected_argument.stdout --
+-- want/unreachable.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+dynaflux status: us-west-2: read the deployed catalog: meta: read the current catalog: operation error DynamoDB: GetItem, dial tcp 10.0.0.1:443: i/o timeout
+-- want/unreachable.stdout --
+version         us-east-1  us-west-2
+page_counts@v1  live       ?
+page_seen@v1    live       ?
+plan_counts@v1  live       ?
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+us-west-2: couldn't be read
+-- want/verbose.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/verbose.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+    unit shardId-0001: progress 0000000000000000000000000000000000000250 at 2000-01-01T00:00:00Z; fences page_counts@v1 0000000000000000000000000000000000000250
+    unit shardId-0002: no progress
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+    unit shardId-0003: no progress
+-- want/waits.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7217: the backfill of plan_counts@v2 waits for the archive read of a later release: stream signups got an event before the job checked that it had none; plan_counts@v2 stays activating, and queries return ErrViewNotReady
+  hint: to fill the view from the stream table now, run dynaflux generate -rebuild plan_counts, deploy regional.yaml, run dynaflux backfill plan_counts, and once it is live, dynaflux retire plan_counts@v2
+-- want/waits.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  backfill plan_counts@v2: running, attempt 1, phase watermark, 0 of 0 records applied; rate no limit; archive source, split by fences; waits for the archive read of a later release
+-- want/waits_json.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/waits_json.stdout --
+{
+  "format": 1,
+  "store": "shop",
+  "prefix": "",
+  "account": "123456789012",
+  "regions": [
+    {
+      "region": "us-east-1",
+      "deployed": true,
+      "catalog": {
+        "hash": "6a2c85d900921ffad6a2f5734b50a1b3e36be2ca0b22d8b79fe42f38e1d1b73d",
+        "generator": "v0.6.0",
+        "format": 1,
+        "registered_at": "2000-01-01T00:00:00Z"
+      },
+      "versions": [
+        {
+          "version": "page_counts@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        },
+        {
+          "version": "page_seen@v1",
+          "stream": "page_views",
+          "state": "live",
+          "split": "none",
+          "activated_at": "2000-01-01T00:00:00Z"
+        },
+        {
+          "version": "plan_counts@v1",
+          "stream": "signups",
+          "state": "live",
+          "split": "time",
+          "activated_at": "2000-01-01T00:00:00Z",
+          "split_at": "2000-01-01T00:06:30Z"
+        },
+        {
+          "version": "plan_counts@v2",
+          "stream": "signups",
+          "state": "pending_backfill"
+        }
+      ],
+      "jobs": [
+        {
+          "version": "plan_counts@v2",
+          "state": "running",
+          "phase": "watermark",
+          "attempt": 1,
+          "split": "fence",
+          "staged": 0,
+          "applied": 0,
+          "skipped": 0,
+          "rate": 0,
+          "paused": false,
+          "waits": "archive_read",
+          "updated_at": "2000-01-01T00:00:00Z",
+          "execution": "local"
+        }
+      ],
+      "streams": [
+        {
+          "stream": "page_views",
+          "arn": "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-page_views/stream/2000-01-01T00:00:00.000",
+          "lag_ms": 2000,
+          "mappings": [
+            {
+              "uuid": "us-east-1-page_views-shop-projector",
+              "function": "shop-projector",
+              "state": "Enabled",
+              "last_result": "OK"
+            }
+          ],
+          "archive": "shop-archive-page_views",
+          "archive_freshness_s": 120
+        },
+        {
+          "stream": "signups",
+          "arn": "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/2000-01-01T00:00:00.000",
+          "lag_ms": 2000,
+          "mappings": [
+            {
+              "uuid": "us-east-1-signups-shop-projector",
+              "function": "shop-projector",
+              "state": "Enabled",
+              "last_result": "OK"
+            }
+          ],
+          "archive": "shop-archive-signups",
+          "archive_freshness_s": 120
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "regions": [
+        "us-east-1"
+      ],
+      "code": "DF7217",
+      "severity": "warning",
+      "message": "the backfill of plan_counts@v2 waits for the archive read of a later release: stream signups got an event before the job checked that it had none; plan_counts@v2 stays activating, and queries return ErrViewNotReady",
+      "hint": "to fill the view from the stream table now, run dynaflux generate -rebuild plan_counts, deploy regional.yaml, run dynaflux backfill plan_counts, and once it is live, dynaflux retire plan_counts@v2"
+    }
+  ]
+}

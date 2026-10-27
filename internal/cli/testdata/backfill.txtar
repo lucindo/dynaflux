@@ -1,0 +1,353 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The store of TestBackfill, deployed in us-east-1 and us-west-2, and under want/ what each
+case prints (go test -update rewrites them). page_counts counts, so a table source splits it
+by time; page_seen is idempotent; signups has no events.
+-- dynaflux.yaml --
+store: shop
+regions: [us-east-1, us-west-2]
+archive: {enabled: true, events: all}
+-- dynaflux/shop.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id)
+LOG RETENTION 2 DAY;
+
+CREATE STREAM signups (user_id String, plan String)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_counts
+ORDER BY (page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+
+CREATE MATERIALIZED VIEW page_seen
+ORDER BY (page)
+AS SELECT page, max(user_id) AS last_user
+FROM page_views
+GROUP BY page;
+
+CREATE MATERIALIZED VIEW plan_counts
+ORDER BY (plan)
+AS SELECT plan, count() AS signups
+FROM signups
+GROUP BY plan;
+-- want/activating_without_a_job.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/activating_without_a_job.stdout --
+us-east-1:
+  plan_counts@v1  start    table source, split by time, as activated
+us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+-- want/all.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/all.stdout --
+us-east-1:
+  page_seen@v1    start    table source, no split; partial since about 1999-12-30
+  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+us-west-2:
+  page_counts@v1  start    table source, split by time; partial since about 1999-12-30
+  page_seen@v1    start    table source, no split; partial since about 1999-12-30
+  plan_counts@v1  start    table source, split by time; partial since about 1999-12-30
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+us-west-2: page_counts@v1: started in execution page_counts-v1-e6a06b-a1
+us-west-2: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+us-west-2: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+-- want/all_skips_a_cancelled_job.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/all_skips_a_cancelled_job.stdout --
+us-east-1:
+  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+-- want/all_skips_a_job_that_waits.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/all_skips_a_job_that_waits.stdout --
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+-- want/archive_not_fresh.stderr --
+store shop  prefix (none)  account 123456789012  region us-west-2
+us-west-2: error DF7503: the archive source isn't available: stream page_views isn't fresh in us-west-2, and this release reads the archive only of a stream without events
+  hint: fill it with -source table
+-- want/archive_not_fresh.stdout --
+us-west-2:
+  page_counts@v1  refused
+-- want/archive_of_a_fresh_stream.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/archive_of_a_fresh_stream.stdout --
+us-east-1:
+  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+-- want/broken.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+us-west-2: error DF7502: page_seen@v1 is broken in us-west-2
+  hint: rebuild it with dynaflux generate -rebuild page_seen, then deploy and backfill the new version
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/broken.stdout --
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+us-west-2:
+  page_seen@v1  refused
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+-- want/cancel.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7504: plan_counts@v1 has no backfill job in us-east-1
+  hint: nothing to cancel
+-- want/cancel.stdout --
+us-east-1:
+  page_seen@v1    cancel   attempt 1, phase activate, 0 of 0 records applied
+  plan_counts@v1  refused
+us-east-1: page_seen@v1: cancelled
+-- want/cancel_with_rate.stderr --
+dynaflux backfill: -cancel takes no -rate, -source or -watch
+Run 'dynaflux help backfill' for usage.
+-- want/cancel_with_rate.stdout --
+-- want/cancelled_job_named.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/cancelled_job_named.stdout --
+us-east-1:
+  page_seen@v1  resume   cancelled; attempt 2, table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: resumed as attempt 2 in execution page-seen-v1-0a1b2c-a2
+-- want/continuation_missing.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/continuation_missing.stdout --
+us-east-1:
+  page_seen@v1  resume   interrupted; attempt 2, table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: resumed as attempt 2 in execution page-seen-v1-0a1b2c-a2
+-- want/continuation_running.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/continuation_running.stdout --
+us-east-1:
+  page_seen@v1  running  attempt 1, phase activate, 0 of 0 records applied
+-- want/declined.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+start 5 backfill jobs? [y/N] dynaflux backfill: nothing written
+-- want/declined.stdout --
+us-east-1:
+  page_seen@v1    start    table source, no split; partial since about 1999-12-30
+  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+us-west-2:
+  page_counts@v1  start    table source, split by time; partial since about 1999-12-30
+  page_seen@v1    start    table source, no split; partial since about 1999-12-30
+  plan_counts@v1  start    table source, split by time; partial since about 1999-12-30
+-- want/interrupted.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/interrupted.stdout --
+us-east-1:
+  page_seen@v1  resume   interrupted; attempt 2, table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: resumed as attempt 2 in execution page-seen-v1-0a1b2c-a2
+-- want/job_waits.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7505: plan_counts@v1's job in us-east-1 waits for the archive read of a later release
+  hint: wait for that release, or fill a new version from the stream table: dynaflux generate -rebuild plan_counts, deploy regional.yaml, dynaflux backfill plan_counts, then dynaflux retire plan_counts@v1
+-- want/job_waits.stdout --
+us-east-1:
+  plan_counts@v1  refused
+-- want/json_without_watch.stderr --
+dynaflux backfill: -json goes with -watch
+Run 'dynaflux help backfill' for usage.
+-- want/json_without_watch.stdout --
+-- want/live.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/live.stdout --
+us-east-1:
+  page_counts@v1  live
+-- want/named.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/named.stdout --
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30; rate 500 records/s
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+-- want/never_started.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/never_started.stdout --
+us-east-1:
+  page_seen@v1  resume   interrupted; attempt 2, table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: resumed as attempt 2 in execution page-seen-v1-0a1b2c-a2
+-- want/no_lock.stderr --
+dynaflux backfill: there is no dynaflux.lock
+  hint: run dynaflux generate, or name the versions, such as page_daily@v1
+-- want/no_lock.stdout --
+-- want/no_terminal.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+dynaflux backfill: start 5 backfill jobs?: confirm with -yes when not on a terminal
+Run 'dynaflux help backfill' for usage.
+-- want/no_terminal.stdout --
+us-east-1:
+  page_seen@v1    start    table source, no split; partial since about 1999-12-30
+  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+us-west-2:
+  page_counts@v1  start    table source, split by time; partial since about 1999-12-30
+  page_seen@v1    start    table source, no split; partial since about 1999-12-30
+  plan_counts@v1  start    table source, split by time; partial since about 1999-12-30
+-- want/no_versions.stderr --
+dynaflux backfill: name the view versions to fill, or -all
+Run 'dynaflux help backfill' for usage.
+-- want/no_versions.stdout --
+-- want/not_a_version.stderr --
+dynaflux backfill: page_seen@2 isn't a view version; name one such as page_daily@v1
+Run 'dynaflux help backfill' for usage.
+-- want/not_a_version.stdout --
+-- want/not_deployed.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+us-east-1: error DF7501: page_seen@v2 isn't in the deployed catalog of us-east-1
+  hint: deploy regional.yaml in us-east-1 first
+us-west-2: error DF7501: page_seen@v2 isn't in the deployed catalog of us-west-2
+  hint: deploy regional.yaml in us-west-2 first
+-- want/not_deployed.stdout --
+us-east-1:
+  page_seen@v2  refused
+us-west-2:
+  page_seen@v2  refused
+-- want/not_deployed_yet.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+us-east-1: error DF7501: page_seen@v2 isn't in the deployed catalog of us-east-1
+  hint: deploy regional.yaml in us-east-1 first
+us-west-2: error DF7501: page_seen@v2 isn't in the deployed catalog of us-west-2
+  hint: deploy regional.yaml in us-west-2 first
+-- want/not_deployed_yet.stdout --
+us-east-1:
+  page_seen@v2  refused
+us-west-2:
+  page_seen@v2  refused
+-- want/not_in_the_lock.stderr --
+dynaflux backfill: dynaflux.lock has no page_seen@v2; dynaflux status lists the deployed versions
+Run 'dynaflux help backfill' for usage.
+-- want/not_in_the_lock.stdout --
+-- want/nothing_to_cancel.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+-- want/nothing_to_cancel.stdout --
+nothing to cancel
+-- want/region_not_deployed.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+dynaflux backfill: us-west-2: no catalog is deployed in shop-meta
+  hint: deploy regional.yaml in us-west-2
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/region_not_deployed.stdout --
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+-- want/resume_before_activation.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/resume_before_activation.stdout --
+us-east-1:
+  plan_counts@v1  resume   cancelled; attempt 2, table source, split by time; partial since about 1999-12-30
+us-east-1: plan_counts@v1: resumed as attempt 2 in execution plan-counts-v1-0a1b2c-a2
+-- want/running.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/running.stdout --
+us-east-1:
+  page_seen@v1  running  attempt 1, phase activate, 0 of 0 records applied; rate 100 records/s
+us-east-1: page_seen@v1: rate set to 100 records/s
+-- want/source_of_a_running_job.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux backfill: -source archive: the job of page_seen@v1 runs in us-east-1 with the table source
+-- want/source_of_a_running_job.stdout --
+us-east-1:
+  page_seen@v1  refused
+-- want/source_of_an_activating_version.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+dynaflux backfill: -source table: plan_counts@v1 is activating in us-east-1 with the archive source, which can't change
+-- want/source_of_an_activating_version.stdout --
+us-east-1:
+  plan_counts@v1  refused
+-- want/table_of_a_fresh_stream.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/table_of_a_fresh_stream.stdout --
+us-east-1:
+  plan_counts@v1  start    table source, split by time
+us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+-- want/unknown_region.stderr --
+dynaflux backfill: -region eu-west-1 isn't in regions (us-east-1, us-west-2)
+Run 'dynaflux help backfill' for usage.
+-- want/unknown_region.stdout --
+-- want/unknown_source.stderr --
+dynaflux backfill: -source s3: want table or archive
+Run 'dynaflux help backfill' for usage.
+-- want/unknown_source.stdout --
+-- want/unknown_view.stderr --
+dynaflux backfill: page_sen has no current version in dynaflux.lock; name a version, such as page_sen@v1
+Run 'dynaflux help backfill' for usage.
+-- want/unknown_view.stdout --
+-- want/versions_and_all.stderr --
+dynaflux backfill: name the view versions to fill, or -all
+Run 'dynaflux help backfill' for usage.
+-- want/versions_and_all.stdout --
+-- want/watch.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/watch.stdout --
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+us-east-1  page_seen@v1  activate  0/0 applied
+us-east-1  page_seen@v1  apply  1000/3000 applied  200/s  ETA 10s
+us-east-1  page_seen@v1  apply  2000/3000 applied  200/s  ETA 5s
+us-east-1  page_seen@v1  live
+-- want/watch_failed_execution.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/watch_failed_execution.stdout --
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+us-east-1  page_seen@v1  activate  0/0 applied
+us-east-1  page_seen@v1  interrupted: its execution ended; run dynaflux backfill page_seen@v1 again to resume it
+-- want/watch_interrupted.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+dynaflux backfill: stopped watching; the jobs go on
+-- want/watch_interrupted.stdout --
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+us-east-1  page_seen@v1  activate  0/0 applied
+-- want/watch_json.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+-- want/watch_json.stdout --
+{"format":1,"store":"shop","prefix":"","account":"123456789012"}
+{"region":"us-east-1","version":"page_seen@v1","job":{"version":"page_seen@v1","state":"running","phase":"activate","attempt":1,"split":"none","staged":0,"applied":0,"skipped":0,"rate":0,"paused":false,"updated_at":"2000-01-01T00:00:00Z","execution":"arn:aws:states:us-east-1:123456789012:execution:shop-backfill:page_seen-v1-2fd4c9-a1","running":"arn:aws:states:us-east-1:123456789012:execution:shop-backfill:page_seen-v1-2fd4c9-a1","execution_status":"running"}}
+{"region":"us-east-1","version":"page_seen@v1","job":{"version":"page_seen@v1","state":"running","phase":"apply","attempt":1,"split":"none","staged":3000,"applied":1000,"skipped":0,"rate":0,"paused":false,"updated_at":"2000-01-01T00:00:07Z","execution":"arn:aws:states:us-east-1:123456789012:execution:shop-backfill:page_seen-v1-2fd4c9-a1","running":"arn:aws:states:us-east-1:123456789012:execution:shop-backfill:page_seen-v1-2fd4c9-a1","execution_status":"running"},"rate_per_s":200}
+{"region":"us-east-1","version":"page_seen@v1","job":{"version":"page_seen@v1","state":"running","phase":"apply","attempt":1,"split":"none","staged":3000,"applied":2000,"skipped":0,"rate":0,"paused":false,"updated_at":"2000-01-01T00:00:12Z","execution":"arn:aws:states:us-east-1:123456789012:execution:shop-backfill:page_seen-v1-2fd4c9-a1","running":"arn:aws:states:us-east-1:123456789012:execution:shop-backfill:page_seen-v1-2fd4c9-a1","execution_status":"running"},"rate_per_s":200}
+{"region":"us-east-1","version":"page_seen@v1","job":{"version":"page_seen@v1","state":"done","phase":"live","attempt":1,"split":"none","staged":3000,"applied":3000,"skipped":0,"rate":0,"paused":false,"updated_at":"2000-01-01T00:00:17Z","execution":"arn:aws:states:us-east-1:123456789012:execution:shop-backfill:page_seen-v1-2fd4c9-a1"}}
+-- want/watch_through_a_failed_read.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/watch_through_a_failed_read.stdout --
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+us-east-1  page_seen@v1  couldn't be read: deployed: describe execution arn:aws:states:us-east-1:123456789012:execution:shop-backfill:page_seen-v1-2fd4c9-a1: ThrottlingException: Rate exceeded; trying again
+us-east-1  page_seen@v1  activate  0/0 applied
+us-east-1  page_seen@v1  couldn't be read: deployed: describe execution arn:aws:states:us-east-1:123456789012:execution:shop-backfill:page_seen-v1-2fd4c9-a1: ThrottlingException: Rate exceeded; trying again
+us-east-1  page_seen@v1  activate  0/0 applied
+us-east-1  page_seen@v1  live
+-- want/watch_with_a_refusal.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+us-west-2: error DF7502: page_seen@v1 is broken in us-west-2
+  hint: rebuild it with dynaflux generate -rebuild page_seen, then deploy and backfill the new version
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/watch_with_a_refusal.stdout --
+us-east-1:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+us-west-2:
+  page_seen@v1  refused
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+us-east-1  page_seen@v1  activate  0/0 applied
+us-east-1  page_seen@v1  apply  1000/3000 applied  200/s  ETA 10s
+us-east-1  page_seen@v1  apply  2000/3000 applied  200/s  ETA 5s
+us-east-1  page_seen@v1  live

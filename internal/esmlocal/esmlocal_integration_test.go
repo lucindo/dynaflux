@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -341,4 +343,54 @@ func drainFour(t *testing.T, replies []reply) ([]string, error) {
 		}
 	}
 	return got, err
+}
+
+// A shard read while it held no record yields the records written later, after another
+// table's: DynamoDB Local numbers every table's records in one sequence, and fails a read
+// from the first read's iterator once that sequence moved past it.
+func TestNextAfterAnEmptyRead(t *testing.T) {
+	t.Parallel()
+	s, other := newStream(t), newStream(t)
+	r := esmlocal.NewReader(s.st, s.arn)
+	s.read(r, 0)
+	other.puts(1, 1)
+	want := s.puts(2, 1)
+	if g := s.summaries(s.read(r, 2)[s.shard()]); !slices.Equal(g, want) {
+		t.Errorf("records after an empty read: %q, want %q", g, want)
+	}
+}
+
+// afterIterator runs do once, after the first GetShardIterator call returns.
+type afterIterator struct {
+	next dynamodbstreams.HTTPClient
+	once sync.Once
+	do   func()
+}
+
+func (a *afterIterator) Do(req *http.Request) (*http.Response, error) {
+	resp, err := a.next.Do(req)
+	if err == nil && req.Header.Get("X-Amz-Target") == "DynamoDBStreams_20120810.GetShardIterator" {
+		a.once.Do(a.do)
+	}
+	return resp, err
+}
+
+// The shard's first record, landing after another table's between the iterator and the
+// read, fails that read; the reader takes TRIM_HORIZON again on its next call.
+func TestNextWhileTheFirstRecordLands(t *testing.T) {
+	t.Parallel()
+	s, other := newStream(t), newStream(t)
+	var want []string
+	hook := &afterIterator{do: func() {
+		other.puts(1, 1)
+		want = s.puts(1, 1)
+	}}
+	st := dynamodbstreams.NewFromConfig(emulatortest.Config(t, nil), func(o *dynamodbstreams.Options) {
+		hook.next, o.HTTPClient = o.HTTPClient, hook
+	})
+	r := esmlocal.NewReader(st, s.arn)
+	s.read(r, 0)
+	if g := s.summaries(s.read(r, 1)[s.shard()]); !slices.Equal(g, want) {
+		t.Errorf("records after the race: %q, want %q", g, want)
+	}
 }

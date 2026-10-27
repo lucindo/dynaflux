@@ -3,8 +3,8 @@
 
 // Package esmlocal reads a DynamoDB stream on an emulator and renders its records as the
 // tumbling-window events Lambda's event source mapping sends (docs/decisions/0003). Tests
-// call the handler with these events themselves; neither emulator runs mappings. It never
-// runs in production.
+// and dynaflux dev call a handler with these events themselves; neither emulator runs
+// mappings. It runs only locally, never in Lambda.
 package esmlocal
 
 import (
@@ -51,13 +51,24 @@ func (r *Reader) Next(ctx context.Context) (map[string][]json.RawMessage, error)
 	recs := map[string][]json.RawMessage{}
 	iters := map[string]*string{}
 	for _, id := range ids {
-		var shardRecs []json.RawMessage
-		if shardRecs, iters[id], err = r.readShard(ctx, id); err != nil {
-			return nil, fmt.Errorf("esmlocal: shard %s: %w", id, err)
-		}
-		if len(shardRecs) > 0 {
+		_, started := r.iters[id]
+		shardRecs, next, serr := r.readShard(ctx, id)
+		// DynamoDB Local fails a read from an iterator taken while the shard held no record
+		// (TrimmedDataAccessException) once another table's record took the next sequence
+		// number, also when the shard's first record lands between the iterator and the
+		// read: until the shard yields one, each call starts at TRIM_HORIZON.
+		var trimmed *types.TrimmedDataAccessException
+		switch {
+		case !started && errors.As(serr, &trimmed):
+			continue
+		case serr != nil:
+			return nil, fmt.Errorf("esmlocal: shard %s: %w", id, serr)
+		case len(shardRecs) > 0:
 			recs[id] = shardRecs
+		case !started:
+			continue
 		}
+		iters[id] = next
 	}
 	maps.Copy(r.iters, iters)
 	return recs, nil

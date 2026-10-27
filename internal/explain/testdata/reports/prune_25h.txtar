@@ -23,7 +23,7 @@ FROM page_views
 GROUP BY page, day;
 -- explain page_views --
 stream page_views
-  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
+  assumptions  -rate 1000  -event-kb 1  -rows page_daily=1000
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 
@@ -64,7 +64,7 @@ error page_daily: rows reach 590 KB, over DynamoDB's 400 KB item limit: every wr
   hint: shorten LOG RETENTION on page_views (fewer shards), or runtime.prune_window_seconds; SPLIT 2 keeps each item under the limit
 -- explain page_daily --
 view page_daily, from stream page_views
-  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
+  assumptions  -rate 1000  -event-kb 1  -rows page_daily=1000
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 

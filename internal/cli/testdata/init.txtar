@@ -1,0 +1,38 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+The files that dynaflux init -store shop -region eu-west-1 -region us-east-1 writes.
+-- dynaflux.yaml --
+# The Dynaflux store. Every key is described in
+# https://github.com/lucindo/dynaflux/blob/main/docs/spec/config.md
+store: shop
+regions: [eu-west-1, us-east-1]
+sql: ["dynaflux/**/*.sql"]
+-- dynaflux/queries/pages.sql --
+-- name: PageStats :many
+SELECT day, views, visitors, avg_ms
+FROM page_daily
+WHERE page = {page:String}
+  AND day BETWEEN {from:Date} AND {to:Date}
+ORDER BY day;
+-- dynaflux/streams/page_views.sql --
+-- Page views: one event per page a user opens.
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- dynaflux/views/page_daily.sql --
+-- Views and visitors per page and day.
+CREATE MATERIALIZED VIEW page_daily
+ORDER BY (page, day)
+PRIMARY KEY (page)
+AS SELECT
+    page,
+    toStartOfDay(event_time) AS day,
+    count()                  AS views,
+    uniqExact(user_id)       AS visitors,
+    avg(duration_ms)         AS avg_ms
+FROM page_views
+GROUP BY page, day;

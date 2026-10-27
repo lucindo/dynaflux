@@ -81,14 +81,14 @@ ORDER BY event_time
 LIMIT {n:UInt32};
 -- explain orders --
 stream orders
-  assumptions  --rate 1000  --event-kb 1  --rows store_hourly=1000  --pass store_hourly=1  --rows item_daily=1000  --pass item_daily=1  --horizon 365d
+  assumptions  -rate 1000  -event-kb 1  -rows store_hourly=1000  -pass store_hourly=1  -rows item_daily=1000  -pass item_daily=1  -horizon 365d
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in eu-west-1 are higher
 
 layout, in each of 2 regions (us-east-1, eu-west-1)
   table        shop-stream-orders: Global Table, on-demand
   key          pk customer_id and a shard of 4; sk event_time, event_id
-  log          LOG RETENTION FOREVER, evaluated at --horizon 365d: ~34,690 GB in ~3,469 partitions, each a change-stream shard
+  log          LOG RETENTION FOREVER, evaluated at -horizon 365d: ~34,690 GB in ~3,469 partitions, each a change-stream shard
   projector    batching window 1 s, batches of at most 100 events: ~869 invocations/s, 1.15 events each on average
   marks        a view row keeps a shard's high-water mark for 960 s after the shard's progress passes it (runtime.prune_window_seconds)
   archive      Firehose to Iceberg; each region archives the events it accepted
@@ -117,7 +117,7 @@ monthly                        per region  2 regions
   provisioned capacity at a 70% target would cut requests to $28,521 per region (-57%), but costs more than on-demand if it must cover peaks over 2.42 times the average
   not modeled: query reads, view and marker storage, backfills, archive compaction, CloudWatch
 
-warning orders: LOG RETENTION FOREVER keeps every event in DynamoDB: at this rate the log gains ~9.5 partitions a day, so batches shrink and projection costs more every day; this report is for --horizon 365d
+warning orders: LOG RETENTION FOREVER keeps every event in DynamoDB: at this rate the log gains ~9.5 partitions a day, so batches shrink and projection costs more every day; this report is for -horizon 365d
   hint: keep a short log (the default is 2 DAY), and use the archive as the permanent record
 warning orders: batches average 1.15 events over 3,469 shards, so view writes rarely combine: most events cost a row write in every view
   hint: shorten LOG RETENTION, which means fewer shards, or raise runtime.batching_window_seconds
@@ -129,7 +129,7 @@ warning item_daily: rows reach 21.1 KB with ~894 high-water marks, one for each 
   hint: shorten LOG RETENTION on orders (fewer shards), or runtime.prune_window_seconds
 -- explain customer_totals --
 view customer_totals, from stream orders
-  assumptions  --rate 1000  --event-kb 1  --horizon 365d
+  assumptions  -rate 1000  -event-kb 1  -horizon 365d
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in eu-west-1 are higher
 
@@ -155,7 +155,7 @@ per event, per region
   monthly      DynamoDB requests $1,715 per region, $3,430 for 2 regions
 -- explain store_hourly --
 view store_hourly, from stream orders
-  assumptions  --rate 1000  --event-kb 1  --rows store_hourly=1000  --pass store_hourly=1  --horizon 365d
+  assumptions  -rate 1000  -event-kb 1  -rows store_hourly=1000  -pass store_hourly=1  -horizon 365d
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in eu-west-1 are higher
 
@@ -190,7 +190,7 @@ warning store_hourly: rows reach 9.2 KB with ~224 high-water marks, one for each
   hint: shorten LOG RETENTION on orders (fewer shards), or runtime.prune_window_seconds
 -- explain StoreHours --
 query StoreHours :many, from view store_hourly
-  assumptions  --rate 1000  --event-kb 1  --rows store_hourly=1000  --pass store_hourly=1  --horizon 365d
+  assumptions  -rate 1000  -event-kb 1  -rows store_hourly=1000  -pass store_hourly=1  -horizon 365d
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in eu-west-1 are higher
 
@@ -202,7 +202,7 @@ query StoreHours :many, from view store_hourly
   filter       the WHERE terms that bind no key run on the items read: they don't reduce the read or its cost
 -- explain ItemTotals --
 query ItemTotals :many, from view item_daily
-  assumptions  --rate 1000  --event-kb 1  --rows item_daily=1000  --pass item_daily=1  --horizon 365d
+  assumptions  -rate 1000  -event-kb 1  -rows item_daily=1000  -pass item_daily=1  -horizon 365d
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in eu-west-1 are higher
 
@@ -213,7 +213,7 @@ query ItemTotals :many, from view item_daily
   combine      GROUP BY item: sum(n)
 -- explain CustomerTotal --
 query CustomerTotal :one, from view customer_totals
-  assumptions  --rate 1000  --event-kb 1  --horizon 365d
+  assumptions  -rate 1000  -event-kb 1  -horizon 365d
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in eu-west-1 are higher
 
@@ -222,7 +222,7 @@ query CustomerTotal :one, from view customer_totals
   read cost    0.247 KB per item, each rounded up to 4 KB: ~1 read unit per item, strongly consistent as the view is SYNC
 -- explain CustomerOrders --
 query CustomerOrders :many, from stream orders
-  assumptions  --event-kb 1
+  assumptions  -event-kb 1
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in eu-west-1 are higher
 

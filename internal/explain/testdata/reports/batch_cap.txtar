@@ -14,7 +14,7 @@ CREATE STREAM page_views (user_id String, page String)
 PRIMARY KEY (user_id);
 -- explain page_views --
 stream page_views
-  assumptions  --rate 1000  --event-kb 1
+  assumptions  -rate 1000  -event-kb 1
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote
 

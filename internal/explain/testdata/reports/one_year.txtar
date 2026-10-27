@@ -37,7 +37,7 @@ FROM page_views
 GROUP BY user_id, day;
 -- explain page_views --
 stream page_views
-  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000  --uniq-new user_daily=0.3
+  assumptions  -rate 1000  -event-kb 1  -rows page_daily=1000  -uniq-new user_daily=0.3
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 
@@ -83,7 +83,7 @@ warning page_daily: rows reach 2.92 KB with ~119 high-water marks, one for each 
   hint: SPLIT 4 keeps each item at 1 write unit, saving ~$3,613 a month per region; queries then read 4 items per row
 -- explain page_daily --
 view page_daily, from stream page_views
-  assumptions  --rate 1000  --event-kb 1  --rows page_daily=1000
+  assumptions  -rate 1000  -event-kb 1  -rows page_daily=1000
                (traffic isn't in the SQL or dynaflux.yaml; set it with these flags)
   prices       us-east-1 list prices, ±30%: for comparing designs, not a quote; prices in ap-northeast-1 are higher
 

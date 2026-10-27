@@ -131,11 +131,12 @@ func TestAppendDuplicateReturnsStoredKey(t *testing.T) {
 		units  uint64        // the first append has 5
 		later  time.Duration // between the appends
 		region string        // of the second append; "" for the first append's engine
+		same   bool          // SamePayload
 	}{
-		{"another payload", 7, 0, "us-east-1"},
-		{"another writer, later", 5, time.Millisecond, "us-east-1"},
-		{"another region at the same instant", 5, 0, "us-west-2"},
-		{"the caller's earlier call at the same instant", 5, 0, ""},
+		{"another payload", 7, 0, "us-east-1", false},
+		{"another writer, later", 5, time.Millisecond, "us-east-1", true},
+		{"another region at the same instant", 5, 0, "us-west-2", true},
+		{"the caller's earlier call at the same instant", 5, 0, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -154,8 +155,8 @@ func TestAppendDuplicateReturnsStoredKey(t *testing.T) {
 					other = engine.New(b, engine.Options{Region: tt.region})
 				}
 				dup := appendOne(t, other, c, "api_calls", apiCall(1, tt.units, start), engine.AppendMode{})
-				if !errors.Is(dup.Err, engine.ErrDuplicate) || dup.Key != first.Key {
-					t.Fatalf("got %v at %v, want ErrDuplicate at %v", dup.Err, dup.Key, first.Key)
+				if !errors.Is(dup.Err, engine.ErrDuplicate) || dup.Key != first.Key || dup.SamePayload != tt.same {
+					t.Fatalf("got %v at %v with SamePayload %v, want ErrDuplicate at %v with %v", dup.Err, dup.Key, dup.SamePayload, first.Key, tt.same)
 				}
 				rows := readAll(t, other, c, "api_calls", "acme", nil, nil)
 				if len(rows) != 1 || rows[0][2].AsUint() != 5 {
@@ -210,6 +211,33 @@ func TestAppendBatchDuplicateIsNotWritten(t *testing.T) {
 		}
 		if rows := readAll(t, e, c, "api_calls", "acme", nil, nil); len(rows) != 2 {
 			t.Errorf("stored %d events, want 2", len(rows))
+		}
+	})
+}
+
+func TestAppendBatchDuplicateComparesTheStoredPayload(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		c := compile(t, streams)
+		e := newEngine(mem.New())
+		if got := appendOne(t, e, c, "api_calls", apiCall(1, 5, start), engine.AppendMode{}); got.Err != nil {
+			t.Fatal(got.Err)
+		}
+		res, err := e.Append(t.Context(), c, "api_calls", [][]expr.Value{
+			apiCall(1, 7, start), apiCall(1, 5, start), // copies of an event stored before
+			apiCall(2, 6, start), apiCall(2, 6, start), apiCall(2, 8, start), // copies of an event this call stores
+		}, engine.AppendMode{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		type result struct {
+			dup, same bool
+		}
+		want := []result{{true, false}, {true, true}, {false, false}, {true, true}, {true, false}}
+		for i, r := range res {
+			if got := (result{errors.Is(r.Err, engine.ErrDuplicate), r.SamePayload}); got != want[i] || (!got.dup && r.Err != nil) {
+				t.Errorf("event %d: %v with SamePayload %v, want ErrDuplicate %v and SamePayload %v", i, r.Err, r.SamePayload, want[i].dup, want[i].same)
+			}
 		}
 	})
 }

@@ -31,6 +31,9 @@ type Appended struct {
 	// Key is the stored event's key, also with ErrDuplicate: the event stored before.
 	Key store.Key
 	Err error
+	// SamePayload reports, with ErrDuplicate, that the event stored before has this event's
+	// declared values.
+	SamePayload bool
 }
 
 // Append appends events to stream, each with its own conditional write, and returns their
@@ -59,23 +62,24 @@ func (e *Engine) Append(ctx context.Context, cat *Catalog, stream string, events
 	first := make(map[store.Key]int, len(events)) // the index of the event that claims each key
 	for i, vals := range events {
 		items[i], out[i].Key, out[i].Err = e.event(s, vals, now, w)
-		if _, dup := first[out[i].Key]; dup {
-			items[i] = nil
-		} else if out[i].Err == nil {
+		if _, dup := first[out[i].Key]; !dup && out[i].Err == nil {
 			first[out[i].Key] = i
 		}
 	}
 	table := e.table(cat, s)
+	stored := make([]store.Item, len(events)) // the event at each key written, after the write
 	for i, it := range items {
-		if it != nil {
-			out[i].Err = e.put(ctx, table, s, it)
+		if it != nil && first[out[i].Key] == i {
+			stored[i], out[i].Err = e.put(ctx, table, s, it)
 		}
 	}
 	for i := range out {
-		if j, ok := first[out[i].Key]; ok && j != i && out[i].Err == nil {
+		j, ok := first[out[i].Key]
+		if ok && j != i && out[i].Err == nil {
 			// A copy of a stored event is a duplicate; a copy of one that failed fails with it.
 			out[i].Err = cmp.Or(out[j].Err, ErrDuplicate)
 		}
+		out[i].SamePayload = ok && errors.Is(out[i].Err, ErrDuplicate) && s.SamePayload(stored[j], items[i])
 	}
 	return out, nil
 }
@@ -228,21 +232,22 @@ func pick(vals []expr.Value, idx []int) []expr.Value {
 	return out
 }
 
-func (e *Engine) put(ctx context.Context, table string, s *stream, it store.Item) error {
+// put writes it unless an event is stored at its key, and returns the event stored there.
+func (e *Engine) put(ctx context.Context, table string, s *stream, it store.Item) (store.Item, error) {
 	err := e.b.Put(ctx, table, it, store.IfAbsent())
 	var ce *store.ConditionError
 	switch {
 	case err == nil:
-		return nil
+		return it, nil
 	case errors.As(err, &ce):
 		if s.sameEvent(ce.Current, it) {
-			return nil
+			return it, nil
 		}
-		return ErrDuplicate
+		return ce.Current, ErrDuplicate
 	case errors.Is(err, store.ErrTooLarge):
-		return fmt.Errorf("dynaflux: %w: the event is over DynamoDB's 400 KB item limit", ErrInvalidValue)
+		return nil, fmt.Errorf("dynaflux: %w: the event is over DynamoDB's 400 KB item limit", ErrInvalidValue)
 	}
-	return fmt.Errorf("dynaflux: append to %s: %w", s.Def.Name, err)
+	return nil, fmt.Errorf("dynaflux: append to %s: %w", s.Def.Name, err)
 }
 
 // sameEvent reports whether stored holds what sent does: the same origin_region,

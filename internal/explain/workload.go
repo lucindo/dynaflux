@@ -16,33 +16,33 @@ import (
 
 // Defaults of the per-view workload flags, which are costs.py's.
 const (
-	DefaultActiveRows = 1000 // --rows
-	DefaultUniqNew    = 0.3  // --uniq-new
-	DefaultPass       = 1    // --pass
+	DefaultActiveRows = 1000 // -rows
+	DefaultUniqNew    = 0.3  // -uniq-new
+	DefaultPass       = 1    // -pass
 )
 
-// maxRate bounds --rate far above what a DynamoDB table takes, which keeps the counts the
+// maxRate bounds -rate far above what a DynamoDB table takes, which keeps the counts the
 // model derives from it, such as partitions, within int.
 const maxRate = 1e7
 
 // Workload is the traffic that explain assumes, which neither the SQL nor dynaflux.yaml
 // says. Its fields are the flags of dynaflux explain.
 type Workload struct {
-	// Rate is --rate: the average number of events appended per second to the explained
+	// Rate is -rate: the average number of events appended per second to the explained
 	// stream, all regions together.
 	Rate float64
-	// EventKB is --event-kb: the average size of an event item, in KB of 1,024 bytes.
+	// EventKB is -event-kb: the average size of an event item, in KB of 1,024 bytes.
 	EventKB float64
-	// Rows is --rows view=N: how many rows a shared view writes to at a time, such as the
+	// Rows is -rows view=N: how many rows a shared view writes to at a time, such as the
 	// pages visited today for GROUP BY page, day. Views it leaves out get DefaultActiveRows.
 	Rows map[string]float64
-	// UniqNew is --uniq-new view=F: the fraction of source rows that bring a uniqExact
+	// UniqNew is -uniq-new view=F: the fraction of source rows that bring a uniqExact
 	// aggregate of the view a new value. Views it leaves out get DefaultUniqNew.
 	UniqNew map[string]float64
-	// Pass is --pass view=F: the source rows per event, which is the fraction of events that
+	// Pass is -pass view=F: the source rows per event, which is the fraction of events that
 	// WHERE keeps times the ARRAY JOIN fan-out. Views it leaves out get DefaultPass.
 	Pass map[string]float64
-	// Horizon is --horizon: the age at which to evaluate a stream kept FOREVER.
+	// Horizon is -horizon: the age at which to evaluate a stream kept FOREVER.
 	Horizon time.Duration
 }
 
@@ -75,20 +75,20 @@ func valueOr(m map[string]float64, key string, fallback float64) float64 {
 func (w Workload) check(cat *catalog.Catalog) error {
 	switch {
 	case !(w.Rate > 0 && w.Rate <= maxRate):
-		return fmt.Errorf("--rate must be over 0 and at most %s events per second, not %v", grouped(maxRate), w.Rate)
+		return fmt.Errorf("-rate must be over 0 and at most %s events per second, not %v", grouped(maxRate), w.Rate)
 	case !finite(w.EventKB) || w.EventKB <= 0 || w.EventKB > itemLimitKB:
-		return fmt.Errorf("--event-kb must be over 0 and at most %d, the DynamoDB item limit, not %v", itemLimitKB, w.EventKB)
+		return fmt.Errorf("-event-kb must be over 0 and at most %d, the DynamoDB item limit, not %v", itemLimitKB, w.EventKB)
 	case w.Horizon <= 0:
-		return fmt.Errorf("--horizon must be positive, not %v", w.Horizon)
+		return fmt.Errorf("-horizon must be positive, not %v", w.Horizon)
 	}
 	flags := []struct {
 		name   string
 		values map[string]float64
 		check  func(*catalog.Stream, *catalog.ViewVersion, float64) string
 	}{
-		{"--rows", w.Rows, checkRows},
-		{"--uniq-new", w.UniqNew, checkUniqNew},
-		{"--pass", w.Pass, checkPass},
+		{"-rows", w.Rows, checkRows},
+		{"-uniq-new", w.UniqNew, checkUniqNew},
+		{"-pass", w.Pass, checkPass},
 	}
 	for _, f := range flags {
 		for _, name := range slices.Sorted(maps.Keys(f.values)) {
@@ -128,7 +128,7 @@ func checkViewFlag(cat *catalog.Catalog, flag, name string, value float64,
 
 func checkRows(s *catalog.Stream, vv *catalog.ViewVersion, rows float64) string {
 	if !shared(s, vv) {
-		return "the view has a row per entity of " + s.Name + "; --rows is for views whose GROUP BY leaves out the stream's PRIMARY KEY"
+		return "the view has a row per entity of " + s.Name + "; -rows is for views whose GROUP BY leaves out the stream's PRIMARY KEY"
 	}
 	if !finite(rows) || rows < 1 {
 		return "the number of active rows must be at least 1"

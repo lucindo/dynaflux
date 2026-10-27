@@ -46,7 +46,7 @@ func (e *explainer) streamLayout(est *estimate) {
 	e.line("key", "pk "+pk+"; sk "+catalog.ColumnEventTime+", "+catalog.ColumnEventID)
 	log := "LOG RETENTION " + retentionText(s.LogRetention)
 	if est.model.Forever {
-		log += ", evaluated at --horizon " + FormatHorizon(e.w.Horizon)
+		log += ", evaluated at -horizon " + FormatHorizon(e.w.Horizon)
 	}
 	e.line("log", fmt.Sprintf("%s: ~%s GB in ~%s partitions, each a change-stream shard",
 		log, num(c.StoredGB), grouped(int64(c.Partitions))))
