@@ -5,9 +5,9 @@
 // docs/spec/config.md specifies. It finds the file, decodes it strictly, applies the
 // defaults, runs every check that needs no SQL, and expands the sql patterns.
 //
-// Checks that need the SQL definitions (DF6403, DF6407, DF6503, DF6504, and DF6110 for
-// names that include a stream or view) belong to the compiler; the positions they point at
-// are kept here.
+// Checks that need the SQL definitions (DF6403, DF6407, DF6503, DF6504, DF6612, and DF6110
+// for names that include a stream or view) belong to the compiler; the positions they point
+// at are kept here.
 package config
 
 import (
@@ -171,10 +171,45 @@ type ArchiveStream struct {
 
 // HTTP configures the front door of queries annotated -- expose: http.
 type HTTP struct {
+	// Pos is where the http section is, for DF6612; zero without one.
+	Pos         diag.Pos
 	Frontend    Frontend
 	Auth        Auth
 	AllowPublic bool
-	Domain      *Domain // nil when not set
+	// The settings of each auth; nil when not set.
+	JWT        *JWT
+	Authorizer *Authorizer
+	Cognito    *Cognito
+	UsagePlan  *UsagePlan
+	// MaxConcurrency is the query function's reserved concurrency; 0 when not set.
+	MaxConcurrency int
+	Domain         *Domain // nil when not set
+}
+
+// JWT is the JWT authorizer of auth: jwt.
+type JWT struct {
+	Issuer   string
+	Audience []string
+	Scopes   []string // empty: any token for the audience passes
+}
+
+// Authorizer is the Lambda authorizer of auth: lambda.
+type Authorizer struct {
+	Function string // a function of this name in every region
+}
+
+// Cognito is the user pool authorizer of auth: cognito.
+type Cognito struct {
+	UserPoolARN string
+	Scopes      []string // access tokens that carry one of them pass
+	AppClients  []string // ID tokens whose aud is one of them pass
+}
+
+// UsagePlan limits the API keys of auth: api_key. A zero field sets no limit.
+type UsagePlan struct {
+	Rate        int // requests per second
+	Burst       int
+	QuotaPerDay int
 }
 
 // Frontend is an HTTP front door.

@@ -1,0 +1,27 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+Without scopes or app clients, any ID token of the pool passes, from any app client.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+http:
+  frontend: rest_api
+  auth: cognito
+  cognito:
+    user_pool_arn: arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_abc
+-- dynaflux/page_counts.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_counts
+ORDER BY (page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+-- dynaflux/queries.sql --
+-- name: PageCounts :one
+-- expose: http
+SELECT views FROM page_counts WHERE page = {page:String};
+-- want --
+dynaflux.yaml:7:5: warning DF6614

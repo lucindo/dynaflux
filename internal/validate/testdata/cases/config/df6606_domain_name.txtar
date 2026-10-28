@@ -7,6 +7,8 @@ store: analytics
 regions: [us-east-1, us-west-2]
 http:
   frontend: http_api
+  auth: lambda
+  authorizer: {function: flux-authorizer}
   domain:
     name: Flux.Example.com
 -- dynaflux/page_views.sql --
@@ -19,4 +21,4 @@ CREATE STREAM page_views (
 )
 PRIMARY KEY (user_id);
 -- want --
-dynaflux.yaml:6:11: error DF6606
+dynaflux.yaml:8:11: error DF6606

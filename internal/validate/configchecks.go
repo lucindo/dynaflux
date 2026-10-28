@@ -11,6 +11,7 @@ import (
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/config"
 	"github.com/lucindo/dynaflux/internal/diag"
+	"github.com/lucindo/dynaflux/internal/sql"
 )
 
 // checkConfigNames runs the checks that need both dynaflux.yaml and the SQL files. Names
@@ -31,6 +32,27 @@ func (p *project) checkConfigNames() {
 	p.checkInheritedForever()
 	p.checkUnarchived()
 	p.checkArchiveRegions()
+	p.checkExposed()
+}
+
+// checkExposed warns about an http section when no query is annotated -- expose: http, so
+// no front door is generated (DF6612).
+func (p *project) checkExposed() {
+	if p.cfg.HTTP.Pos == (diag.Pos{}) {
+		return
+	}
+	if slices.ContainsFunc(p.decls, func(d *decl) bool { return d.kind == declQuery && d.exposed() }) {
+		return
+	}
+	p.d.add(diag.SeverityWarning, "", p.cfg.HTTP.Pos, "DF6612", "annotate a query with -- expose: http, or remove the http section",
+		"http is set, but no query is annotated -- expose: http, so no front door is generated")
+}
+
+// exposed reports whether d is annotated -- expose: http.
+func (d *decl) exposed() bool {
+	return slices.ContainsFunc(d.node.Header().Annotations, func(a sql.Annotation) bool {
+		return a.Key == sql.AnnotationExpose && !a.Bad
+	})
 }
 
 // checkArchiveRegions reports each archive region that lacks Firehose delivery to Iceberg

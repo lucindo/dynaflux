@@ -1,21 +1,26 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-auth: none, confirmed, is a warning.
+auth: none, confirmed, is a warning, even with its concurrency capped.
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]
 http:
   auth: none
   allow_public: true
--- dynaflux/page_views.sql --
-CREATE STREAM page_views (
-    user_id     String,
-    page        String,
-    referrer    Nullable(String),
-    tags        Array(String),
-    duration_ms UInt32
-)
+  max_concurrency: 50
+-- dynaflux/page_counts.sql --
+CREATE STREAM page_views (user_id String, page String)
 PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_counts
+ORDER BY (page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+-- dynaflux/queries.sql --
+-- name: PageCounts :one
+-- expose: http
+SELECT views FROM page_counts WHERE page = {page:String};
 -- want --
 dynaflux.yaml:4:9: warning DF6603

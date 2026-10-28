@@ -61,8 +61,13 @@ archive:
 
 http:
   frontend: http_api                  # not default (default: function_url)
-  auth: iam                           # allowed values depend on frontend
+  auth: jwt                           # not default (default: iam); allowed values depend on frontend
   allow_public: false
+  jwt:                                # not default (default: none); with auth: jwt
+    issuer: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc
+    audience: [app-client-id]
+    scopes: [dynaflux/query]
+  max_concurrency: 100                # not default (default: none)
   domain:                             # not default (default: none)
     name: flux.example.com
     routing: latency
@@ -70,6 +75,18 @@ http:
 
 // base sets the required keys on lines 1 and 2, so test cases start on line 3.
 const base = "store: analytics\nregions: [us-east-1, us-west-2]\n"
+
+// userPool is a user pool ARN for http.cognito.user_pool_arn.
+const userPool = "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_abc"
+
+// names returns n distinct entries for a flow list: a0, a1 and so on.
+func names(n int) string {
+	var s []string
+	for i := range n {
+		s = append(s, fmt.Sprintf("a%d", i))
+	}
+	return strings.Join(s, ", ")
+}
 
 func load(src string) (*config.Config, []diag.Diagnostic) {
 	return config.Load(fstest.MapFS{config.FileName: {Data: []byte(src)}})
@@ -134,8 +151,8 @@ func TestLoadDiagnostics(t *testing.T) {
 		{"DF6008 null archive.streams entry", base + "archive: {streams: {page_views: }}\n", []string{"3:21 error DF6008"}},
 		{
 			"DF6008 missing domain name",
-			base + "http:\n  frontend: http_api\n  domain: {routing: latency}\n",
-			[]string{"5:11 error DF6008"},
+			base + "http:\n  frontend: http_api\n  auth: lambda\n  authorizer: {function: auth}\n  domain: {routing: latency}\n",
+			[]string{"7:11 error DF6008"},
 		},
 		{
 			"DF6008 missing autoscaling min",
@@ -295,30 +312,120 @@ func TestLoadDiagnostics(t *testing.T) {
 		{"DF6506 S3 Tables", base + "archive:\n  catalog: s3tables\n", []string{"4:12 error DF6506"}},
 		{"DF6601 auth unsupported", base + "http:\n  frontend: http_api\n  auth: none\n", []string{"5:9 error DF6601"}},
 		{"DF6602 none without allow_public", base + "http:\n  auth: none\n", []string{"4:9 error DF6602"}},
-		{"DF6603 public", base + "http:\n  auth: none\n  allow_public: true\n", []string{"4:9 warning DF6603"}},
+		{"DF6603 public", base + "http:\n  auth: none\n  allow_public: true\n  max_concurrency: 10\n", []string{"4:9 warning DF6603"}},
 		{"DF6604 allow_public with iam", base + "http:\n  allow_public: true\n", []string{"4:17 warning DF6604"}},
 		{"DF6605 domain on a function URL", base + "http:\n  domain: {name: flux.example.com}\n", []string{"4:11 error DF6605"}},
 		{
 			"DF6606 uppercase domain",
-			base + "http:\n  frontend: http_api\n  domain: {name: Flux.example.com}\n",
-			[]string{"5:18 error DF6606"},
+			base + "http:\n  frontend: http_api\n  auth: lambda\n  authorizer: {function: auth}\n  domain: {name: Flux.example.com}\n",
+			[]string{"7:18 error DF6606"},
 		},
 		{
 			"DF6606 single label",
-			base + "http:\n  frontend: http_api\n  domain: {name: localhost}\n",
-			[]string{"5:18 error DF6606"},
+			base + "http:\n  frontend: http_api\n  auth: lambda\n  authorizer: {function: auth}\n  domain: {name: localhost}\n",
+			[]string{"7:18 error DF6606"},
 		},
 		{
 			"DF6606 label of 64 characters",
-			base + "http:\n  frontend: http_api\n  domain: {name: " + strings.Repeat("a", 64) + ".com}\n",
-			[]string{"5:18 error DF6606"},
+			base + "http:\n  frontend: http_api\n  auth: lambda\n  authorizer: {function: auth}\n  domain: {name: " + strings.Repeat("a", 64) + ".com}\n",
+			[]string{"7:18 error DF6606"},
 		},
 		{
 			"DF6606 name of 254 characters",
-			base + "http:\n  frontend: http_api\n  domain: {name: " + strings.Repeat("a.", 126) + "ab}\n",
-			[]string{"5:18 error DF6606"},
+			base + "http:\n  frontend: http_api\n  auth: lambda\n  authorizer: {function: auth}\n  domain: {name: " + strings.Repeat("a.", 126) + "ab}\n",
+			[]string{"7:18 error DF6606"},
 		},
 		{"DF6607 api_key", base + "http:\n  frontend: rest_api\n  auth: api_key\n", []string{"5:9 warning DF6607"}},
+		{"DF6008 jwt without its settings", base + "http:\n  frontend: http_api\n  auth: jwt\n", []string{"4:3 error DF6008"}},
+		{
+			"DF6008 jwt without issuer and audience",
+			base + "http:\n  frontend: http_api\n  auth: jwt\n  jwt: {scopes: [q]}\n",
+			[]string{"6:8 error DF6008", "6:8 error DF6008"},
+		},
+		{"DF6008 lambda without a function", base + "http:\n  frontend: http_api\n  auth: lambda\n  authorizer: {}\n", []string{"6:15 error DF6008"}},
+		{
+			"DF6008 cognito without a user pool",
+			base + "http:\n  frontend: rest_api\n  auth: cognito\n  cognito: {scopes: [q]}\n",
+			[]string{"6:12 error DF6008"},
+		},
+		{"DF6608 domain with iam", base + "http:\n  frontend: http_api\n  domain: {name: flux.example.com}\n", []string{"5:11 error DF6608"}},
+		{
+			"DF6609 settings of another auth",
+			base + "http:\n  frontend: http_api\n  auth: lambda\n  authorizer: {function: auth}\n  jwt: {issuer: https://a.example.com}\n",
+			[]string{"7:8 warning DF6609"},
+		},
+		{"DF6609 usage plan without api_key", base + "http:\n  usage_plan: {rate: 1}\n", []string{"4:15 warning DF6609"}},
+		{
+			"DF6610 issuer not https",
+			base + "http:\n  frontend: http_api\n  auth: jwt\n  jwt:\n    issuer: http://a.example.com\n    audience: [x]\n    scopes: [q]\n",
+			[]string{"7:13 error DF6610"},
+		},
+		{
+			"DF6610 audience of 51",
+			base + "http:\n  frontend: http_api\n  auth: jwt\n  jwt:\n    issuer: https://a.example.com\n    audience: [" + names(51) + "]\n    scopes: [q]\n",
+			[]string{"8:15 error DF6610"},
+		},
+		{
+			"DF6610 scopes of 11",
+			base + "http:\n  frontend: http_api\n  auth: jwt\n  jwt:\n    issuer: https://a.example.com\n    audience: [x]\n    scopes: [" + names(11) + "]\n",
+			[]string{"9:13 error DF6610"},
+		},
+		{
+			"DF6011 empty audience",
+			base + "http:\n  frontend: http_api\n  auth: jwt\n  jwt:\n    issuer: https://a.example.com\n    audience: []\n    scopes: [q]\n",
+			[]string{"8:15 error DF6011"},
+		},
+		{
+			"DF6012 repeated scope",
+			base + "http:\n  frontend: http_api\n  auth: jwt\n  jwt:\n    issuer: https://a.example.com\n    audience: [x]\n    scopes: [q, q]\n",
+			[]string{"9:17 error DF6012"},
+		},
+		{
+			"DF6611 authorizer not a function name",
+			base + "http:\n  frontend: http_api\n  auth: lambda\n  authorizer: {function: \"a b\"}\n",
+			[]string{"6:26 error DF6611"},
+		},
+		{
+			"DF6611 not a user pool ARN",
+			base + "http:\n  frontend: rest_api\n  auth: cognito\n  cognito: {user_pool_arn: \"arn:aws:cognito-idp:us-east-1:123:userpool/x\", scopes: [q]}\n",
+			[]string{"6:28 error DF6611"},
+		},
+		{
+			"DF6613 jwt without scopes",
+			base + "http:\n  frontend: http_api\n  auth: jwt\n  jwt:\n    issuer: https://a.example.com\n    audience: [x]\n",
+			[]string{"7:5 warning DF6613"},
+		},
+		{
+			"DF6614 cognito without scopes or app clients",
+			base + "http:\n  frontend: rest_api\n  auth: cognito\n  cognito: {user_pool_arn: \"" + userPool + "\"}\n",
+			[]string{"6:12 warning DF6614"},
+		},
+		{
+			"DF6616 cognito with scopes and app clients",
+			base + "http:\n  frontend: rest_api\n  auth: cognito\n  cognito: {user_pool_arn: \"" + userPool + "\", scopes: [q], app_clients: [c]}\n",
+			[]string{"6:12 warning DF6616"},
+		},
+		{
+			"DF6008 usage plan rate without burst",
+			base + "http:\n  frontend: rest_api\n  auth: api_key\n  usage_plan: {rate: 100}\n",
+			[]string{"5:9 warning DF6607", "6:15 error DF6008"},
+		},
+		{
+			"DF6008 usage plan burst without rate",
+			base + "http:\n  frontend: rest_api\n  auth: api_key\n  usage_plan: {burst: 200, quota_per_day: 1000}\n",
+			[]string{"5:9 warning DF6607", "6:15 error DF6008"},
+		},
+		{
+			"DF6615 public without max_concurrency",
+			base + "http:\n  auth: none\n  allow_public: true\n",
+			[]string{"4:9 warning DF6603", "4:9 warning DF6615"},
+		},
+		{"DF6010 max_concurrency of 0", base + "http:\n  max_concurrency: 0\n", []string{"4:20 error DF6010"}},
+		{
+			"DF6010 usage plan rate of 0",
+			base + "http:\n  frontend: rest_api\n  auth: api_key\n  usage_plan: {rate: 0}\n",
+			[]string{"5:9 warning DF6607", "6:15 error DF6008", "6:22 error DF6010"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -355,11 +462,16 @@ func TestLoadAccepts(t *testing.T) {
 		{"pattern cleaned", base + "sql: [./dynaflux/**/*.sql, \"dynaflux/_drafts/*.sql\"]\n"},
 		{"quoted <<", base + "tables: {'<<': {capacity: on_demand}}\n"},
 		{"auth none confirmed is only a warning", base + "http: {auth: none, allow_public: true}\n"},
+		{
+			"jwt at API Gateway's limits",
+			base + "http:\n  frontend: http_api\n  auth: jwt\n  jwt: {issuer: https://a.example.com/pool, audience: [" + names(50) +
+				"], scopes: [" + names(10) + "]}\n",
+		},
 		{"prune window of 960 with the longest timeout", base + "runtime: {timeout_seconds: 900, prune_window_seconds: 960}\n"},
 		{"prune window of 25 hours", base + "runtime: {prune_window_seconds: 90000}\n"},
 		{
 			"domain name of 253 characters with a label of 63",
-			base + "http: {frontend: http_api, domain: {name: " +
+			base + "http: {frontend: http_api, auth: lambda, authorizer: {function: auth}, domain: {name: " +
 				strings.Repeat(strings.Repeat("a", 63)+".", 3) + strings.Repeat("a", 61) + "}}\n",
 		},
 	}
@@ -425,7 +537,11 @@ func TestLoadHint(t *testing.T) {
 		{"prefix given as a number", base + "prefix: 7\n", "DF6007", "for example prefix: prod-"},
 		{"package given as a boolean", base + "go:\n  package: true\n", "DF6007", "for example package: flux"},
 		{"allowed value given as a number", base + "http:\n  frontend: 5\n", "DF6007", "use function_url, http_api or rest_api"},
-		{"domain given as a list", base + "http:\n  frontend: http_api\n  domain: {name: [a]}\n", "DF6007", "for example name: flux.example.com"},
+		{
+			"domain given as a list",
+			base + "http:\n  frontend: http_api\n  auth: lambda\n  authorizer: {function: auth}\n  domain: {name: [a]}\n",
+			"DF6007", "for example name: flux.example.com",
+		},
 		{"path given as a number", base + "go:\n  out: 2024\n", "DF6007", `quote the value if YAML reads it as another type, as in "123"`},
 		{"null list entry", "store: analytics\nregions: [us-east-1, null]\n", "DF6007", "for example regions: [us-east-1]"},
 		{
@@ -531,14 +647,49 @@ func TestLoadAuth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.frontend+" "+tt.auth, func(t *testing.T) {
 			t.Parallel()
-			src := base + "http:\n  frontend: " + tt.frontend + "\n  auth: " + tt.auth + "\n"
-			if tt.auth == "none" {
-				src += "  allow_public: true\n"
-			}
+			src := base + "http:\n  frontend: " + tt.frontend + "\n  auth: " + tt.auth + "\n" + map[string]string{
+				"none":    "  allow_public: true\n  max_concurrency: 10\n",
+				"jwt":     "  jwt: {issuer: https://a.example.com, audience: [x], scopes: [q]}\n",
+				"lambda":  "  authorizer: {function: auth}\n",
+				"cognito": "  cognito: {user_pool_arn: \"" + userPool + "\", app_clients: [x]}\n",
+			}[tt.auth]
 			if _, ds := load(src); !slices.Equal(render(ds), tt.want) {
 				t.Errorf("diagnostics = %q, want %q\n%v", render(ds), tt.want, ds)
 			}
 		})
+	}
+}
+
+// The settings of lambda and api_key reach the config as written.
+func TestLoadAuthSettings(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		src  string
+		want config.HTTP
+	}{
+		{
+			base + "http: {frontend: http_api, auth: lambda, authorizer: {function: flux-authorizer}}\n",
+			config.HTTP{
+				Pos: pos(3, 7), Frontend: config.FrontendHTTPAPI, Auth: config.AuthLambda,
+				Authorizer: &config.Authorizer{Function: "flux-authorizer"},
+			},
+		},
+		{
+			base + "http: {frontend: rest_api, auth: api_key, usage_plan: {rate: 100, burst: 200, quota_per_day: 100000}}\n",
+			config.HTTP{
+				Pos: pos(3, 7), Frontend: config.FrontendRESTAPI, Auth: config.AuthAPIKey,
+				UsagePlan: &config.UsagePlan{Rate: 100, Burst: 200, QuotaPerDay: 100000},
+			},
+		},
+	}
+	for _, tt := range tests {
+		cfg, ds := load(tt.src)
+		if diag.HasErrors(ds) {
+			t.Fatalf("Load reported errors: %v", ds)
+		}
+		if !reflect.DeepEqual(cfg.HTTP, tt.want) {
+			t.Errorf("HTTP =\n%+v\nwant\n%+v", cfg.HTTP, tt.want)
+		}
 	}
 }
 
@@ -637,8 +788,13 @@ func TestLoadComplete(t *testing.T) {
 			Streams:    []config.ArchiveStream{{Name: "debug_events", Pos: pos(41, 5), Enabled: false, EnabledPos: pos(41, 29)}},
 		},
 		HTTP: config.HTTP{
-			Frontend: config.FrontendHTTPAPI, Auth: config.AuthIAM,
-			Domain: &config.Domain{Name: "flux.example.com", Routing: config.RoutingLatency},
+			Pos: pos(44, 3), Frontend: config.FrontendHTTPAPI, Auth: config.AuthJWT,
+			JWT: &config.JWT{
+				Issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc", Audience: []string{"app-client-id"},
+				Scopes: []string{"dynaflux/query"},
+			},
+			MaxConcurrency: 100,
+			Domain:         &config.Domain{Name: "flux.example.com", Routing: config.RoutingLatency},
 		},
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -660,10 +816,14 @@ defaults:
   log_retention: forever
 tables: {page_views: {capacity: on_demand}}
 archive: {enabled: false, catalog: glue, regions: [us-west-2], events: all, streams: {page_views: {enabled: true}}}
-http: {frontend: rest_api, auth: cognito}
+http:
+  frontend: rest_api
+  auth: cognito
+  cognito: {user_pool_arn: "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_abc", scopes: [q], app_clients: [a, b]}
+  max_concurrency: 1
 `)
-	if len(ds) != 0 {
-		t.Fatalf("diagnostics: %v", ds)
+	if got := render(ds); !slices.Equal(got, []string{"18:12 warning DF6616"}) {
+		t.Fatalf("diagnostics: %v, want only DF6616 for both Cognito settings", ds)
 	}
 	want := &config.Config{
 		Store:      "analytics",
@@ -693,7 +853,14 @@ http: {frontend: rest_api, auth: cognito}
 			Events:    catalog.ArchiveEventsAll,
 			Streams:   []config.ArchiveStream{{Name: "page_views", Pos: pos(14, 87), Enabled: true, EnabledPos: pos(14, 109)}},
 		},
-		HTTP: config.HTTP{Frontend: config.FrontendRESTAPI, Auth: config.AuthCognito},
+		HTTP: config.HTTP{
+			Pos: pos(16, 3), Frontend: config.FrontendRESTAPI, Auth: config.AuthCognito,
+			Cognito: &config.Cognito{
+				UserPoolARN: "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_abc",
+				Scopes:      []string{"q"}, AppClients: []string{"a", "b"},
+			},
+			MaxConcurrency: 1,
+		},
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load =\n%+v\nwant\n%+v", cfg, want)

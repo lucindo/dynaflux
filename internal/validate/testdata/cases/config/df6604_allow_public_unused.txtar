@@ -1,7 +1,8 @@
 Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
-allow_public: true does nothing unless auth is none.
+allow_public: true does nothing unless auth is none. No query is exposed, so the http section
+warns too.
 -- dynaflux.yaml --
 store: analytics
 regions: [us-east-1, us-west-2]
@@ -17,4 +18,5 @@ CREATE STREAM page_views (
 )
 PRIMARY KEY (user_id);
 -- want --
+dynaflux.yaml:4:3: warning DF6612
 dynaflux.yaml:4:17: warning DF6604
