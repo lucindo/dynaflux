@@ -69,6 +69,12 @@ func (r *run) add(in *region, fn appendFn) {
 	if err := fn(r.t.Context(), in.client); err != nil {
 		r.t.Fatalf("append in %s: %v", in.name, err)
 	}
+	r.feed(in, fn)
+}
+
+// feed appends to the oracle of each region that an append in region in reaches.
+func (r *run) feed(in *region, fn appendFn) {
+	r.t.Helper()
 	for _, reg := range r.h.regions {
 		switch {
 		case reg == in:

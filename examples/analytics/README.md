@@ -14,11 +14,12 @@ running anything.
 |------|------------|
 | `dynaflux.yaml` | The store's configuration ([config.md](../../docs/spec/config.md)). |
 | `dynaflux/` | The SQL: three streams, five views and the queries on them. `api_calls` deduplicates appends (`DEDUP BY`); the views use `count`, `uniq`, `uniqExact`, `sum`, `avg` and `argMax`; `quota_usage` is a `SYNC` view. |
+| `app.go` | Application code: `RecordPageView` appends a page view and waits until the page's stats count it. |
 | `dynaflux.lock` | The view versions ([ADR 0002](../../docs/decisions/0002-view-version-lock-file.md)). Generated; commit it. |
 | `internal/flux/` | The typed client. Generated. |
 | `cmd/dynaflux-runtime/main.go` | The Lambda binary that every function runs. Generated. |
 | `infra/dynaflux/` | `global.yaml`, `global.stack-policy.json` and `regional.yaml` ([infra.md](../../docs/spec/infra.md)). Generated. |
-| `*_test.go` | Tests of the client against the in-memory store of `fluxtest`, and, with the `integration` build tag, against DynamoDB Local. |
+| `*_test.go` | Tests of the client and of `app.go` against the in-memory store of `fluxtest`, and, with the `integration` build tag, against DynamoDB Local. |
 | `e2e/` | The end-to-end suite, which runs this store on DynamoDB Local or on AWS ([runbooks/e2e.md](../../docs/runbooks/e2e.md)). |
 
 ## Test and regenerate
@@ -91,8 +92,32 @@ if err != nil {
 client := flux.New(s)
 ```
 
-`awsCfg.Region` is the region the application appends in. Its role needs this policy, with
-your account ID in place of `<account>`:
+`awsCfg.Region` is the region the application appends in.
+
+### Read your own writes
+
+In the region of an append, a query sees the append at once only in a `SYNC` view
+([sql.md §9.7](../../docs/spec/sql.md#97-mode)). `quota_usage` is one, so a charge can
+check the quota it has just used:
+
+```go
+_, err := client.AppendAPICall(ctx, call)
+usage, err := client.QuotaUsed(ctx, flux.QuotaUsedParams{AccountID: call.AccountID, At: call.EventTime})
+```
+
+The other views are `ASYNC`: the projector applies an append about a second later. To
+wait for it, append with `dynaflux.Waitable()` and query with `dynaflux.WaitFor`, as
+`RecordPageView` in `app.go` does:
+
+```go
+tok, err := client.AppendPageView(ctx, view, dynaflux.Waitable())
+stats, err := client.PageStats(ctx, params, dynaflux.WaitFor(tok, 3*time.Second))
+```
+
+### Permissions
+
+The application's role needs this policy, with your account ID in place of `<account>`
+([infra.md §9.9](../../docs/spec/infra.md#99-applications)):
 
 ```json
 {
@@ -108,20 +133,47 @@ your account ID in place of `<account>`:
       "Sid": "Views",
       "Effect": "Allow",
       "Action": ["dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query"],
-      "Resource": [
-        "arn:aws:dynamodb:*:<account>:table/demo-analytics-view-*",
-        "arn:aws:dynamodb:*:<account>:table/demo-analytics-meta"
-      ]
+      "Resource": "arn:aws:dynamodb:*:<account>:table/demo-analytics-view-*"
+    },
+    {
+      "Sid": "ViewStates",
+      "Effect": "Allow",
+      "Action": "dynamodb:Query",
+      "Resource": "arn:aws:dynamodb:*:<account>:table/demo-analytics-meta",
+      "Condition": {"ForAllValues:StringEquals": {"dynamodb:LeadingKeys": ["view"]}}
+    },
+    {
+      "Sid": "SyncViews",
+      "Effect": "Allow",
+      "Action": "dynamodb:PutItem",
+      "Resource": "arn:aws:dynamodb:*:<account>:table/demo-analytics-view-quota_usage-v*",
+      "Condition": {"ForAnyValue:StringEquals": {"dynamodb:EnclosingOperation": ["TransactWriteItems"]}}
+    },
+    {
+      "Sid": "Receipts",
+      "Effect": "Allow",
+      "Action": "dynamodb:BatchGetItem",
+      "Resource": "arn:aws:dynamodb:*:<account>:table/demo-analytics-meta",
+      "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["rcpt#*"]}}
     }
   ]
 }
 ```
 
-`Streams` appends events and reads them back. `Views` reads the view tables and the meta
-table, which holds the views' states. The wildcards cover streams and view versions added
-later. They also match the tables of
-another store whose name starts with `analytics-stream-` or `analytics-view-`, so don't
-deploy one next to this store.
+- `Streams` appends events and reads them back.
+- `Views` reads the view tables. An append to `api_calls` also reads the `quota_usage` row
+  it updates.
+- `ViewStates` reads the views' states in the meta table. Queries over views and appends to
+  `api_calls` check them.
+- `SyncViews` lets an append to `api_calls` write the `quota_usage` row, but only in the
+  transaction that writes the event.
+- `Receipts` lets `WaitFor` read the receipts in the meta table.
+
+The wildcards cover streams and view versions added later: each new version of
+`quota_usage` is a new table. They also match the tables of another store whose name
+starts with `analytics-stream-` or `analytics-view-`, so don't deploy one next to this
+store. Scenarios 34 and 35 of the [end-to-end suite](../../docs/runbooks/e2e.md#8-coded-scenarios)
+run as an application with this policy.
 
 ## Tear down
 

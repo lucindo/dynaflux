@@ -47,7 +47,7 @@ func newEmulator(t *testing.T, p *project) *harness {
 		cfg := emulatortest.Config(t, nil)
 		cfg.Region = name
 		r := &region{
-			name: name, naming: emulatortest.Tables(t, cfg, p.manifest),
+			name: name, cfg: cfg, naming: emulatortest.Tables(t, cfg, p.manifest),
 			ddb: dynamodb.NewFromConfig(cfg), streams: dynamodbstreams.NewFromConfig(cfg),
 		}
 		r.meta = meta.New(dynamo.New(r.ddb), r.naming.MetaTable())

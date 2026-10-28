@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
 
@@ -74,6 +75,8 @@ var scenarios = []struct {
 	{"5_poison", []string{targetEmulator, targetAWS}, testPoison},
 	{"2_dedup", []string{targetAWS}, testDedup},
 	{"8_archive", []string{targetEmulator, targetAWS}, testArchive},
+	{"34_sync", []string{targetEmulator, targetAWS}, testSync},
+	{"35_wait", []string{targetEmulator, targetAWS}, testWait},
 	{"7_least_privilege", []string{targetAWS}, testLeastPrivilege},
 	{"3_replication_pause", []string{targetAWS}, testReplicationPause},
 	{"23_partial_failures", []string{targetAWS}, testPartialFailures},
@@ -115,6 +118,7 @@ type harness struct {
 // region is one region of the e2e store.
 type region struct {
 	name    string
+	cfg     aws.Config // the suite's own, which every client but the application's uses
 	naming  catalog.Naming
 	store   *dynaflux.Store
 	client  *flux.Client // the example's client: it doesn't know e2e_ratio

@@ -93,7 +93,7 @@ func newAWS(t *testing.T, p *project) *harness {
 			t.Fatalf("the AWS credentials are for account %s, not E2E_ACCOUNT=%s", got, account)
 		}
 		r := &region{
-			name: name, naming: catalog.Naming{Prefix: "e2e-" + run + "-", Store: p.def.Store},
+			name: name, cfg: cfg, naming: catalog.Naming{Prefix: "e2e-" + run + "-", Store: p.def.Store},
 			ddb: dynamodb.NewFromConfig(cfg),
 			// Scenario 2 reads a stream beside the mapping, and DynamoDB Streams throttles
 			// a second reader of a Global Table with LimitExceededException, which the

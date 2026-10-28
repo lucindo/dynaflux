@@ -53,6 +53,12 @@ For AWS mode:
   An administrator role in the sandbox covers all of them.
 - For scenario 24 and the lifecycle experiments, a role you can assume that has only the
   grants of [infra.md §9.8](../spec/infra.md#98-operators), to run the `dynaflux` commands.
+- For scenarios 34 and 35, `E2E_APP_ROLE`: the ARN of a role in the sandbox account that
+  your credentials can assume, with at least DynamoDB read and write access to the store's
+  tables, such as `AmazonDynamoDBFullAccess`. The suite assumes it with the application
+  policy of the [example's README](../../examples/analytics/README.md#permissions) as the
+  session policy, with the run's account and prefix, so the two scenarios run with that
+  policy's grants and nothing more. The role serves every run.
 - Lake Formation at its defaults: `IAM_ALLOWED_PRINCIPALS` has `ALL` on new databases and
   tables, so plain IAM access to the Glue Data Catalog works
   ([infra.md §11](../spec/infra.md#11-deploying)). Scenario 18 checks it.
@@ -88,14 +94,15 @@ It starts DynamoDB Local unless it runs, and leaves it running for other work. T
 - Nothing injects faults, so every invocation must succeed the first time, with no failed
   records. The child has the race detector, as the test binary does, and stops at the
   first race.
-- It runs scenarios 1, 4, 5 and 8 ([§8](#8-coded-scenarios)). It doesn't cover
+- It runs scenarios 1, 4, 5, 8, 34 and 35 ([§8](#8-coded-scenarios)). It doesn't cover
   CloudFormation, IAM, the event source mapping, tumbling windows, replication, Firehose,
-  Iceberg, Athena or the alarms.
+  Iceberg, Athena or the alarms. DynamoDB Local never cancels a transaction for a
+  conflict, so scenario 34's appends retry only on failed conditions.
 
 ## 3. AWS mode
 
 ```sh
-make e2e-aws E2E_RUN=<id> E2E_ACCOUNT=<sandbox account ID>
+make e2e-aws E2E_RUN=<id> E2E_ACCOUNT=<sandbox account ID> E2E_APP_ROLE=<role ARN>
 ```
 
 `<id>` is 1 to 8 lowercase letters or digits, new for each run: every resource name starts
@@ -113,15 +120,16 @@ with `e2e-<id>-`. The target first checks both variables and that the credential
    4. deploys `regional.yaml` in `us-east-1` and `us-west-2`;
    5. deploys `fis.yaml` in `us-west-2`.
 2. `go test -tags e2e -timeout 120m -v ./examples/analytics/e2e -target=aws`, with
-   `E2E_RUN` and `E2E_ACCOUNT` set. It first checks the account, and that each region was
-   deployed from the same sources: the projector's `DYNAFLUX_ARCHIVE_SCHEMA` and the view
-   tables. Then it sets the view versions live on the new store, as emulator mode does.
+   `E2E_RUN`, `E2E_ACCOUNT` and `E2E_APP_ROLE` set. It first checks the account, and that
+   each region was deployed from the same sources: the projector's
+   `DYNAFLUX_ARCHIVE_SCHEMA` and the view tables. Then it sets the view versions live on
+   the new store, as emulator mode does.
 3. `scripts/e2e/teardown.sh` ([§5](#5-teardown)).
 
 To run the steps one at a time, for example to rerun one scenario:
 
 ```sh
-export E2E_RUN=a1 E2E_ACCOUNT=<sandbox account ID>
+export E2E_RUN=a1 E2E_ACCOUNT=<sandbox account ID> E2E_APP_ROLE=<role ARN>
 scripts/e2e/deploy.sh
 go test -tags e2e -timeout 120m -v ./examples/analytics/e2e -target=aws -run 'TestE2E/1_appends'
 scripts/e2e/teardown.sh
@@ -142,7 +150,10 @@ to tear down.
 - The dashboards `e2e-<id>-analytics-us-east-1` and `e2e-<id>-analytics-us-west-2`.
 - The FIS console in `us-west-2` during scenario 3.
 - Test output: each scenario is a subtest, `TestE2E/<number>_<name>`, and each failure names
-  the region and what differed. Scenario 2 logs a count to record.
+  the region and what differed. Scenarios 2, 34 and 35 log counts and times to record.
+- In CloudWatch, the `ConsumedWriteCapacityUnits` and `TransactionConflict` metrics of the
+  `quota_usage` table during scenario 34, and the meta table's `ConsumedWriteCapacityUnits`
+  during scenario 35. Record them in [§10](#10-results).
 
 ## 5. Teardown
 
@@ -179,7 +190,7 @@ deployment bucket of SAM's `aws-sam-cli-managed-default` stack.
 | Emulator mode: "the projector exited", with `WARNING: DATA RACE` in its output | A data race in the projector or the runtime. |
 | `deploy.sh`: a stream lookup fails with "deploy `global.yaml` first" | The global stack is missing in that region, or was deployed with another `Prefix`. |
 | The suite stops at once: the projector's `DYNAFLUX_ARCHIVE_SCHEMA` differs, or a view table is missing | The stacks were deployed from another checkout, or without `e2e.sql`. Deploy and test from the same checkout, with `deploy.sh`. |
-| A region's views differ from the oracle after convergence (1, 3, 4, 5, 23) | A projector bug, or records the projector missed. Keep the function logs and the meta table before teardown. |
+| A region's views differ from the oracle after convergence (1, 3, 4, 5, 23, 34, 35) | A projector bug, or records the projector missed. Keep the function logs and the meta table before teardown. |
 | Scenario 4: the views lost an event | The projector applied a `REMOVE` record. |
 | Scenario 5: `e2e_ratio` isn't broken, or another version is | The breaker didn't open, or opened on the wrong view. The meta table's view-state items say which event broke what. |
 | Scenario 5: the `views-broken` alarm never went into `ALARM` | The `BreakerOpened` metric didn't arrive: check the projector's `batch metrics` log line and its embedded metric format. |
@@ -197,6 +208,15 @@ deployment bucket of SAM's `aws-sam-cli-managed-default` stack.
 | Scenario 4 or 8: a copy's `_arrival` is outside the run, its `_seq` isn't digits, or an event has two records in one shard | The projector's archive record is wrong: the arrival's unit, the sequence number, or a copy of a record that isn't the event's `INSERT`. |
 | Scenario 18: Lake Formation's default permissions lack `IAM_ALLOWED_PRINCIPALS`, `glue:GetTable` isn't allowed, or a table is registered with Lake Formation | The account's Lake Formation settings govern the archive ([§1](#1-prerequisites)), or the Firehose role's grants are missing. |
 | Scenario 23: no `rows failed` or `batch failed` line | IAM took longer than the 2-minute windows to apply the deny, or the projector handled the failures without logging them. |
+| Scenario 34 or 35 stops at once: "E2E_APP_ROLE is …" | The variable is unset, or names a role in another account ([§1](#1-prerequisites)). |
+| Scenario 34 or 35: `AccessDenied` from `AssumeRole`, an append or a query | Your credentials can't assume `E2E_APP_ROLE`, the role lacks a grant, or a statement of the README's policy is missing or too narrow. Record the action and the ARN. |
+| Scenario 34: a charge fails 3 times | Every append of the charge ran out of attempts on the hot row. The error names the row, and the log line's cancellation reasons show why. |
+| Scenario 34: `QuotaUsed` misses charges made in its region | A `SYNC` append didn't apply the view in its transaction, or the query didn't read strongly consistently. |
+| Scenario 34: no `AccessDeniedException` for the `PutItem` or the `Query` | The `EnclosingOperation` or `LeadingKeys` condition doesn't limit what [infra.md §9.9](../spec/infra.md#99-applications) says it does. |
+| Scenario 35: `ErrWaitTimeout` | The projector wrote no receipt within 10 seconds: check its log, and that the event has `_rcpt`. |
+| Scenario 36: an `AccessDenied` of the backfill role in CloudTrail, or a job broken with Athena error 234 or 1700 | A statement of the backfill role is missing or too narrow, or Lake Formation governs the archive's catalog ([infra.md §9.6](../spec/infra.md#96-backfill-role)). Record the action and the ARN. |
+| Scenario 36: a job broken because the archive isn't complete | `status` names the rule that failed (DF7204). A gap or a hole the scenario didn't make means a deploy, a projector or Firehose lost records. |
+| Scenario 36: a version reads the table where the archive was complete | `backfill` recorded no origin on the first deploy (DF7217), or a rule failed: `status` shows which. |
 | A `dynaflux` command fails with `AccessDenied` under the operator role | A row of [infra.md §9.8](../spec/infra.md#98-operators) is missing or too narrow. Record the command, the action and the ARN. |
 | `backfill-failed` fires outside scenario 24's deny | A backfill step failed after its retries. `dynaflux status` shows the job interrupted (DF7216), and the backfill function's log has the error. |
 | `teardown.sh` stops on a waiter | Deleting a replica or a stack can take longer than the AWS CLI waits. Run the script again. |
@@ -210,7 +230,9 @@ A few dollars per run. AWS FIS bills per action-minute, about 10 minutes per run
 price page before the first run. The tables are on demand, the Firehose and Athena volumes
 are tiny, and the optimizers run on little data. Experiments 15 and 16 run for hours and
 cost more Lambda time. Scenario 24 and experiments 28 and 30 add the backfill function's
-time at 3,008 MB and a few hundred thousand writes.
+time at 3,008 MB and a few hundred thousand writes. Scenario 36 and experiments 37 to 44
+add Athena's $5 per TB scanned: cents on the e2e archive, and a few dollars for
+experiment 39's synthetic table.
 
 ## 8. Coded scenarios
 
@@ -232,6 +254,8 @@ the projector on purpose.
 | 5 | A poison event (zero divisor) | That event breaks `e2e_ratio`, every other version stays live and exact, and the shard goes on. On AWS, the `views-broken` alarm goes into `ALARM`. In emulator mode, the projector's one `WARN` or `ERROR` line is the `batch metrics` line with `BreakerOpened` 1. | yes | yes |
 | 2 | One dedup key in both regions at once, 10 times each way | With the same payload, the views count it once. With different payloads, each region counts one of them once, and a `DivergentDuplicates` metric line appears. It logs how many `MODIFY` records hold equal payloads (all but `_r`, `_it` and `_ttl`) for the same-payload keys that both regions stored. | — | yes |
 | 8 | Archive contents | Each region's archive (`<stream>_dedup` through Athena; the fake Firehose locally) holds each event of its stream table once, with every column as stored: strings, `Nullable`, `Array`, `UUID`, `UInt32` and the time columns. Every copy has a `_shard`, a `_seq` of 40 digits, one per event in its shard, and an `_arrival` during the run; in emulator mode, each event has one copy. Every `_shard`, and every unit item's ID, is a `ShardId` that `DescribeStream` lists. | yes | yes |
+| 34 | `SYNC` appends to a hot row, as the application | In each region at once, 4 workers charge one account 25 times each with `AppendAPICall`, as the application with the README's policy, and send a charge again after an error. Right after, each region's `QuotaUsed` counts every charge made there (in emulator mode, exactly those), and a charge sent again gets `ErrDuplicate`. On AWS, `PutItem` on a `quota_usage` table outside a transaction, and a `Query` of the meta table's `catalog` partition, get `AccessDeniedException`. The views converge to the oracle. It logs the charges' latencies, how many the application sent again, the `TransactWriteItems` calls and their cancellation reasons by code and by whether each holds `Item`, and on AWS the projector's `rows failed` lines. | yes | yes |
+| 35 | Waits, as the application | In each region, 20 views of a page of its own with `RecordPageView` from the example's `app.go`, which appends each with `Waitable` and runs `PageStats` with `WaitFor` and a 10-second timeout, as the application with the README's policy. Each returns the page's day with every view so far, and the views converge to the oracle. It logs how long each took, against the batching window. | yes | yes |
 | 7 | Least privilege | No `AccessDenied` in any function or Firehose log, other than scenario 23's deny, Athena DDL and optimizer creation included. Both optimizers exist on every archive table, so `iam:PassRole` worked. | — | yes |
 | 3 | Replication pause: FIS `aws:dynamodb:global-table-pause-replication` for 10 minutes | 5.5 minutes after the action starts (replication can go on for 5 minutes), appends in both regions: before the pause ends, each region's views show only its own, and its stream table lacks the other's. After the pause, both converge. | — | yes |
 | 23 | Partial failures and function errors under the 900-second window | With steady appends, a deny of `PutItem` on one view table for 2 minutes (row failures, so partial replies), then of the meta table for 2 minutes (function errors, so retries with bisection). The views end equal to the oracle, and the projector's log has `rows failed` (`WARN`, with `failedSeq`) and `batch failed` (`ERROR`) lines. | — | yes |
@@ -248,6 +272,18 @@ joins the table.
 |---|----------|---------|
 | 1 | Appends in both regions, after the first deploy's `backfill -all` | Every version is `live` in both regions, by the fresh rule where the region archives the stream with `events: all` (the job item says `fresh`); the views equal the oracle in each region. |
 | 24 | Backfill under traffic. While appends go on in both regions: deploy `regional.yaml` again with `testdata/backfill.sql`, which adds an additive and an idempotent view of the e2e stream; `dynaflux backfill -all -yes -rate 20`, so that applying takes minutes; during `apply`, deny the backfill role `dynamodb:PutItem` on one new view table for 1 minute, then again until the execution fails (up to about 16 minutes of retries), then remove the deny and run `backfill` again; `backfill -cancel` during another job's `apply`, then `backfill` to resume it; `backfill -rate 200` on a running job. | Both versions go `live` in both regions from the stream table, the additive one by the time split, about 30 minutes after its activation. The 1-minute deny fails no execution. The long one fails the execution: `backfill-failed` fires, and `status` shows the job interrupted (DF7216) with the command that resumes it. After `-cancel`, the job is `cancelled` and the version `activating`. `status` shows the new rate. The views of both versions equal the oracle in each region. |
+
+M6 adds a scenario that reads the archive ([ADR 0016](../decisions/0016-archive-export-with-athena.md),
+[ADR 0017](../decisions/0017-archive-completeness.md)), not coded yet either. Run every
+`dynaflux` command in it with the operator role of [§1](#1-prerequisites). The backfill
+function, not the operator, calls Athena: Athena then reads the Glue catalog and the archive,
+and writes the export, with the backfill role's credentials, which no grants test sees. So
+turn on CloudTrail data events for the bucket before it, and record every `AccessDenied`
+event of the backfill role ([infra.md §9.6](../spec/infra.md#96-backfill-role)).
+
+| # | Scenario | Asserts |
+|---|----------|---------|
+| 36 | Archive backfill. On a new run, `dynaflux backfill -all -yes` right after the first deploy records each stream's origin in both regions. Append for an hour in both regions, and delete a sample of stream items by hand, as TTL would. Rebuild an additive and an idempotent view of the e2e stream (`dynaflux generate -rebuild`), deploy `regional.yaml`, and run `dynaflux backfill -all -yes` while appends go on. During a slice's export, run `backfill -cancel`, then `backfill` again. Then take `us-west-2` out of `archive.regions`, generate and deploy, put it back, generate and deploy; rebuild a view again, deploy, and run `backfill -all -yes`, then `backfill -source archive <view>` in `us-west-2`. | `status` shows each stream's archive "complete since" its origin in both regions before the hole. Both new versions go `live` in both regions by the archive source, split by fences; their views equal the oracle, the deleted events included. `-cancel` stops the export's query (`StopQueryExecution`), and the job resumes with a new try. `status` shows the bytes each job scanned, about the size of the days it exported, and its job item's `errors.foreign` is 0. CloudTrail has no `AccessDenied` for the backfill role. After the hole, `status` shows `us-west-2`'s archive "not complete" with the deploy's time, the new version fills from the table there and from the archive in `us-east-1`, and `-source archive` in `us-west-2` is refused (DF7503). |
 
 ## 9. Manual experiments
 
@@ -311,6 +347,28 @@ finding for [infra.md §9.8](../spec/infra.md#98-operators).
 | 31 | Replicated landing time | Append events in `us-east-1`, and poll a consistent `GetItem` of each in `us-west-2` until it appears. Read their records in `us-west-2`'s stream with `GetRecords`. | How each record's `ApproximateCreationDateTime` compares with when its item first appeared in `us-west-2`: whether the projector's late check could judge by that attribute instead of its own clock. |
 | 32 | Staged runs gone | Backfill a new version with `-rate 10`. During `apply`, delete the job's objects under `backfill/` in the bucket. | Whether S3 answers the backfill role's `GetObject` with 404 or 403; that the job stages again and the version goes `live`. |
 | 33 | State machine definition | Run `aws stepfunctions test-state` on the backfill state machine's `Route` state with a step's output at 1,000 steps, with a wait above 0, and when done; and on `Continue` with the input of a job that ended. | `Route` goes to `Continue`, `Wait` and `Done`; the continuation's name is `<name>-a<attempt>-c<k+1>`, and its input has all five fields, with `steps` 0. |
+
+### Archive backfill
+
+These check what [ADR 0016](../decisions/0016-archive-export-with-athena.md) assumes of
+Athena, S3 and CloudWatch. Run them after scenario 36, on its store: take each statement
+from the backfill workgroup's query history (`aws athena list-query-executions --work-group
+e2e-<id>-analytics-backfill`), and run it in that workgroup, with your own credentials.
+Only scenario 36 checks the backfill role's grants, since only the deployed backfill
+function runs with them.
+
+| # | Experiment | Steps | Answers |
+|---|------------|-------|---------|
+| 37 | `UNLOAD` value forms | Run the export statement of one slice, and the same with `SELECT *` in place of its projection, each into a new prefix. Read the files and the data manifest. | The JSON text of each type: times with 6 fractional digits, decimals and doubles exact, a `NULL` written or left out, the key names; the manifest's form and place; gzip. Record real files for the adapter tests. |
+| 38 | Partition listing | Run the `"<stream>$partitions"` statement. | The name and form of the day partition, and how its sizes compare with the objects in S3. |
+| 39 | Slice speed | On a synthetic table, export slices of about 10, 50 and 100 GB of Parquet. | Seconds per GB, to set the slice target and see its margin under the 30-minute query timeout. |
+| 40 | Token memory | Start an export with a `ClientRequestToken` used before: after it succeeded, after it failed, a day later, and with another statement. | Whether Athena returns the first query's ID, and for how long; the error for another statement. |
+| 41 | Idle freshness | Stop appending to one stream for an hour, then append one event. Put a record whose value doesn't fit its column straight into its Firehose stream. | Whether `DeliveryToIceberg.DataFreshness` has datapoints while Firehose holds nothing; whether the error object is written before the freshness passes the failed record. |
+| 42 | Error objects | After experiment 41, list `errors/firehose/<stream>/` in the bucket and read the object. | The key layout, the compression, the field names, and whether `rawData` is the bytes sent. |
+| 43 | Cancel an export | Run `aws athena stop-query-execution` while an export runs, and on a query that has finished. | The files a stopped export leaves, whether it writes a manifest, and what stopping a finished query returns. |
+| 44 | Concurrent exports | Start 21 exports at once in one region, with Athena's default quota of 20 queries. | The `TooManyRequestsException` and its `Reason`. |
+| 45 | Rollback order | In the kept project, take `us-west-2` out of `archive.regions`, generate, and deploy `regional.yaml` there; cancel the update (`aws cloudformation cancel-update-stack`) once a projector function is updated. Read the setup function's log, the stream item, and the projector functions' `LastModified`. | Whether CloudFormation rolls back `ArchiveMode` before or after the projector functions, and how far apart: [ADR 0017](../decisions/0017-archive-completeness.md) §3 item 4 waits 16 minutes after the last hole, which covers either order when they are less than a minute apart. |
+| 46 | Writes without records | In an hour with no other write to `api_calls`, run experiment 28's second import again. Read that hour's `ConsumedWriteCapacityUnits` of the stream table by `Source`, `ConditionalCheckFailedRequests`, and `SuccessfulRequestLatency` `SampleCount` by `Operation`; and the same for an hour of scenario 34's `SYNC` appends. | Whether conditional writes that fail consume write capacity, which makes an hour no projector needs to follow look silent to [ADR 0017](../decisions/0017-archive-completeness.md) §4 item 3; and whether DynamoDB reports `TransactWriteItems` per table, which counting writes by successful requests would need. |
 
 ### One-shot checks of the backend and the runtime
 
@@ -377,7 +435,7 @@ The open questions, and what answers each one:
 | Does a regional stack delete finish with the workgroup, and does a new stack adopt the retained bucket and go on with the Glue database? | 22 | | infra.md §12 |
 | Does `sam build` compile the binary once for all functions? | Every run | | [infra.md §6.1](../spec/infra.md#61-functions) |
 | Do the setup role's grants cover the optimizer calls, `iam:PassRole` included? | 7 | | [infra.md §9.2](../spec/infra.md#92-setup-role) |
-| Do the operator grants cover each command? | 24–33 | | [infra.md §9.8](../spec/infra.md#98-operators) |
+| Do the operator grants cover each command? | 24–33, 36 | | [infra.md §9.8](../spec/infra.md#98-operators) |
 | Does a rollback make the old catalog current again, retiring nothing? What does it send `Catalog`? | 26 | | [infra.md §6.4](../spec/infra.md#64-catalog-registration) |
 | Does `StartExecution` with the name and input of an existing execution return it? | 29 | | [ADR 0011](../decisions/0011-backfill-coordinator.md) |
 | How fast does a backfill apply, does a new view table throttle, and what does the scan read? | 30 | | [lifecycle.md §5.4](../spec/lifecycle.md#54-jobs) |
@@ -394,3 +452,18 @@ The open questions, and what answers each one:
 | Does `store.ItemSize` bound DynamoDB's own item size? | B10 | | encoding.md §7.8 |
 | Do the monotonic and wall clocks agree with the deadlines across a freeze? | B11 | | [ADR 0010](../decisions/0010-runtime-entry-point.md) |
 | Does a `BreakerOpened` datapoint arrive with the application log level at `ERROR`? | B12 | | ADR 0010 |
+| How long do `SYNC` appends to a hot row take, how often does DynamoDB cancel them, and does it return `Item` in every cancellation reason? | 34's log lines | | [ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md) |
+| Does the projector's retry in place absorb its conflicts with `SYNC` appends? | 34's count of `rows failed` lines | | ADR 0014 |
+| Does `dynamodb:EnclosingOperation` limit an application's `PutItem` on view tables to its transactions? | 34 | | [infra.md §9.9](../spec/infra.md#99-applications) |
+| How long does a wait take, against the batching window? | 35's log lines | | [ADR 0015](../decisions/0015-wait-tokens-and-receipts.md) |
+| What do `SYNC` appends and receipts cost in write units? | 34, 35 and the metrics of [§4](#4-watch) | | ADR 0014, ADR 0015 |
+| Do the backfill role's grants cover the reads and writes Athena makes for it? | 36 | | [infra.md §9.6](../spec/infra.md#96-backfill-role) |
+| Does a backfill split by fences fill a version exactly from the archive, and does a hole make the next one read the table? | 36 | | [ADR 0016](../decisions/0016-archive-export-with-athena.md), [ADR 0017](../decisions/0017-archive-completeness.md) |
+| What text does `UNLOAD` write for each type, with and without the projection? | 37 | | ADR 0016 |
+| What do `$partitions` rows hold? | 38 | | ADR 0016 |
+| How fast does an export run, and what slice target fits the query timeout? | 39 | | ADR 0016 |
+| How long does Athena remember a `ClientRequestToken`? | 40 | | ADR 0016 |
+| Does `DataFreshness` go silent when Firehose is empty, and does an error object land before the freshness passes its record? | 41 | | ADR 0016 |
+| What does Firehose write under `errors/firehose/`? | 42 | | ADR 0016, [infra.md §9.3](../spec/infra.md#93-firehose-role) |
+| What does a stopped export leave, and what does stopping a finished query return? | 43 | | ADR 0016 |
+| What does Athena return past its query quota? | 44 | | ADR 0016 |
