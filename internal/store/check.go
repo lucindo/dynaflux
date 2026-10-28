@@ -151,6 +151,47 @@ func Stored(it Item, c Cond) (Item, error) {
 	return out, nil
 }
 
+// CheckTransact returns why DynamoDB would reject a transaction of puts:
+// [ErrInvalidRequest] for no puts, more than [MaxTransactItems], two puts on one item (AWS
+// rejects them; DynamoDB Local doesn't), or a put [CheckPut] refuses as invalid;
+// [ErrTooLarge] for a put CheckPut refuses as too large, or puts over [MaxTransactSize]
+// together.
+func CheckTransact(puts []TxPut) error {
+	_, err := StoredTransact(puts)
+	return err
+}
+
+// StoredTransact returns what [Stored] returns for each put, or [CheckTransact]'s error.
+func StoredTransact(puts []TxPut) ([]Item, error) {
+	if len(puts) == 0 || len(puts) > MaxTransactItems {
+		return nil, invalidf("%d puts, want 1 to %d", len(puts), MaxTransactItems)
+	}
+	type target struct {
+		table string
+		key   Key
+	}
+	out := make([]Item, len(puts))
+	seen := make(map[target]int, len(puts))
+	size := 0
+	for i, p := range puts {
+		it, err := Stored(p.Item, p.Cond)
+		if err != nil {
+			return nil, fmt.Errorf("put %d: %w", i, err)
+		}
+		t := target{p.Table, KeyOf(it)}
+		if j, dup := seen[t]; dup {
+			return nil, invalidf("puts %d and %d write one item", j, i)
+		}
+		seen[t] = i
+		out[i] = it
+		size += ItemSize(it)
+	}
+	if size > MaxTransactSize {
+		return nil, fmt.Errorf("%w: puts are up to %d bytes together, over %d", ErrTooLarge, size, MaxTransactSize)
+	}
+	return out, nil
+}
+
 func checkName(name string) error {
 	if name == "" || !utf8.ValidString(name) {
 		return invalidf("attribute name %q is empty or not valid UTF-8", name)

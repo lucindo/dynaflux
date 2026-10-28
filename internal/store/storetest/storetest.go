@@ -67,7 +67,7 @@ func (r retried) Put(ctx context.Context, table string, it store.Item, c store.C
 	if err := r.Backend.Put(ctx, table, it, c); err != nil || c == (store.Cond{}) {
 		return err
 	}
-	cur, err := r.Backend.Get(ctx, table, keyOf(it), true)
+	cur, err := r.Backend.Get(ctx, table, store.KeyOf(it), true)
 	if err != nil {
 		return fmt.Errorf("storetest: read after a retried write: %w", err)
 	}
@@ -123,10 +123,6 @@ func keyed(pk, sk string, attrs store.Item) store.Item {
 	return it
 }
 
-func keyOf(it store.Item) store.Key {
-	return store.Key{PK: it[catalog.AttrPK].Str, SK: it[catalog.AttrSK].Str}
-}
-
 func mustPut(t *testing.T, b store.Backend, it store.Item, c store.Cond) {
 	t.Helper()
 	if err := b.Put(t.Context(), Table, it, c); err != nil {
@@ -146,7 +142,7 @@ func mustGet(t *testing.T, b store.Backend, k store.Key) store.Item {
 // wantStored fails unless the item stored under want's key equals want.
 func wantStored(t *testing.T, b store.Backend, want store.Item) {
 	t.Helper()
-	if got := mustGet(t, b, keyOf(want)); !equalItem(got, want) {
+	if got := mustGet(t, b, store.KeyOf(want)); !equalItem(got, want) {
 		t.Errorf("stored item = %s, want %s", show(got), show(want))
 	}
 }

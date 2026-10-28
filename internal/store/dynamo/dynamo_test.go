@@ -86,27 +86,27 @@ func ops(ctx context.Context, b store.Backend) map[string]error {
 }
 
 // The SDK retries what may pass on a later attempt; the backend sorts what is left. Only a
-// request DynamoDB rejects as malformed is ErrInvalidRequest, and the SDK's error stays
-// reachable.
+// request DynamoDB rejects as malformed is ErrInvalidRequest, only the three throttling
+// exceptions are ErrThrottled, and the SDK's error stays reachable.
 func TestErrorClasses(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		status   int
 		code     string
-		invalid  bool
+		class    []string
 		attempts int32
 	}{
-		{400, "ProvisionedThroughputExceededException", false, 3},
-		{400, "ThrottlingException", false, 3},
-		{400, "RequestLimitExceeded", false, 3},
-		{500, "InternalServerError", false, 3},
-		{503, "ServiceUnavailable", false, 3},
-		{400, "TransactionConflictException", false, 1},
-		{400, "ReplicatedWriteConflictException", false, 1},
-		{400, "AccessDeniedException", false, 1},
-		{400, "UnrecognizedClientException", false, 1},
-		{400, "ValidationException", true, 1},
-		{400, "ResourceNotFoundException", true, 1},
+		{400, "ProvisionedThroughputExceededException", []string{throttles}, 3},
+		{400, "ThrottlingException", []string{throttles}, 3},
+		{400, "RequestLimitExceeded", []string{throttles}, 3},
+		{500, "InternalServerError", nil, 3},
+		{503, "ServiceUnavailable", nil, 3},
+		{400, "TransactionConflictException", []string{conflicts}, 1},
+		{400, "ReplicatedWriteConflictException", nil, 1},
+		{400, "AccessDeniedException", nil, 1},
+		{400, "UnrecognizedClientException", nil, 1},
+		{400, "ValidationException", []string{invalid}, 1},
+		{400, "ResourceNotFoundException", []string{invalid}, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
@@ -118,8 +118,8 @@ func TestErrorClasses(t *testing.T) {
 			}))
 			for op, err := range ops(t.Context(), b) {
 				apiErr, ok := errors.AsType[smithy.APIError](err)
-				if errors.Is(err, store.ErrInvalidRequest) != tt.invalid || !ok || apiErr.ErrorCode() != tt.code {
-					t.Errorf("%s: error %v; want the SDK's %s, ErrInvalidRequest %v", op, err, tt.code, tt.invalid)
+				if !reflect.DeepEqual(classes(err), tt.class) || !ok || apiErr.ErrorCode() != tt.code {
+					t.Errorf("%s: error %v, classes %v; want the SDK's %s, classes %v", op, err, classes(err), tt.code, tt.class)
 				}
 			}
 			if got, want := attempts.Load(), 5*tt.attempts; got != want {

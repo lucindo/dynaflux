@@ -15,7 +15,6 @@ import (
 	"iter"
 	"math/bits"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -168,7 +167,7 @@ func (m *Mem) ScanPage(ctx context.Context, table string, s store.Scan, start *s
 		return out, nil, nil
 	}
 	last := page[len(page)-1]
-	next := store.Key{PK: last[catalog.AttrPK].Str, SK: last[catalog.AttrSK].Str}
+	next := store.KeyOf(last)
 	return out, &next, nil
 }
 
@@ -236,13 +235,43 @@ func (m *Mem) Put(ctx context.Context, table string, it store.Item, c store.Cond
 	if err != nil {
 		return fmt.Errorf("mem: put: %w", err)
 	}
-	k := store.Key{PK: stored[catalog.AttrPK].Str, SK: stored[catalog.AttrSK].Str}
+	k := store.KeyOf(stored)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cur := m.lookup(table, k); !holds(c, cur) {
+	if cur := m.lookup(table, k); !c.Holds(cur) {
 		return &store.ConditionError{Current: cloneItem(cur)}
 	}
 	m.insert(table, k, stored)
+	return nil
+}
+
+// Transact implements [store.Backend]: it checks every condition, then writes every put, all
+// under the lock, and reports every condition that failed.
+func (m *Mem) Transact(ctx context.Context, puts []store.TxPut) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("mem: transact: %w", err)
+	}
+	stored, err := store.StoredTransact(puts)
+	if err != nil {
+		return fmt.Errorf("mem: transact: %w", err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var failed *store.TxError
+	for i, p := range puts {
+		if cur := m.lookup(p.Table, store.KeyOf(stored[i])); !p.Cond.Holds(cur) {
+			if failed == nil {
+				failed = &store.TxError{Conds: make([]*store.ConditionError, len(puts))}
+			}
+			failed.Conds[i] = &store.ConditionError{Current: cloneItem(cur)}
+		}
+	}
+	if failed != nil {
+		return failed
+	}
+	for i, p := range puts {
+		m.insert(p.Table, store.KeyOf(stored[i]), stored[i])
+	}
 	return nil
 }
 
@@ -266,18 +295,6 @@ func (m *Mem) Delete(ctx context.Context, table string, k store.Key) error {
 		delete(p.items, k.SK)
 	}
 	return nil
-}
-
-func holds(c store.Cond, cur store.Item) bool {
-	if c.Absent() {
-		return cur == nil
-	}
-	if want, ok := c.Version(); ok {
-		v, found := cur[catalog.AttrRowVersion]
-		// Stored numbers are in normal form, which for an integer is its decimal text.
-		return found && v.Type == store.N && v.Str == strconv.FormatInt(want, 10)
-	}
-	return true
 }
 
 func (m *Mem) lookup(table string, k store.Key) store.Item {

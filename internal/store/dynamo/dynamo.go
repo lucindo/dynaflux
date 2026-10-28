@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package dynamo is the DynamoDB [store.Backend]. Each operation is one SDK call, except that
-// BatchGet resends unprocessed keys and Query follows pages. store's request checks run
-// before anything is sent, so both backends reject the same requests.
+// BatchGet resends unprocessed keys, Query follows pages, and Transact resends a transaction
+// whose outcome is in doubt. store's request checks run before anything is sent, so both
+// backends reject the same requests.
 package dynamo
 
 import (
@@ -31,6 +32,7 @@ type api interface {
 	Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 	Scan(ctx context.Context, in *dynamodb.ScanInput, opts ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
 	PutItem(ctx context.Context, in *dynamodb.PutItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+	TransactWriteItems(ctx context.Context, in *dynamodb.TransactWriteItemsInput, opts ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
 }
 
 // Backend is a [store.Backend] over a DynamoDB client. It is safe for concurrent use.
@@ -276,17 +278,7 @@ func (b *Backend) Put(ctx context.Context, table string, it store.Item, c store.
 		return fmt.Errorf("dynamo: put to %s: %w", table, err)
 	}
 	in := &dynamodb.PutItemInput{TableName: &table, Item: item}
-	if v, ok := c.Version(); ok {
-		in.ConditionExpression = new("#v = :v")
-		in.ExpressionAttributeNames = map[string]string{"#v": catalog.AttrRowVersion}
-		in.ExpressionAttributeValues = map[string]types.AttributeValue{
-			":v": &types.AttributeValueMemberN{Value: strconv.FormatInt(v, 10)},
-		}
-	}
-	if c.Absent() {
-		in.ConditionExpression = new("attribute_not_exists(#pk)")
-		in.ExpressionAttributeNames = map[string]string{"#pk": catalog.AttrPK}
-	}
+	in.ConditionExpression, in.ExpressionAttributeNames, in.ExpressionAttributeValues = condition(c)
 	if in.ConditionExpression != nil {
 		in.ReturnValuesOnConditionCheckFailure = types.ReturnValuesOnConditionCheckFailureAllOld
 	}
@@ -303,6 +295,19 @@ func (b *Backend) Put(ctx context.Context, table string, it store.Item, c store.
 		return fmt.Errorf("dynamo: put to %s: %w", table, classify(err))
 	}
 	return nil
+}
+
+// condition returns c's expression with its names and values, nil for none. Every name is a
+// placeholder: DynamoDB rejects a bare name that starts with "_".
+func condition(c store.Cond) (*string, map[string]string, map[string]types.AttributeValue) {
+	if v, ok := c.Version(); ok {
+		return new("#v = :v"), map[string]string{"#v": catalog.AttrRowVersion},
+			map[string]types.AttributeValue{":v": &types.AttributeValueMemberN{Value: strconv.FormatInt(v, 10)}}
+	}
+	if c.Absent() {
+		return new("attribute_not_exists(#pk)"), map[string]string{"#pk": catalog.AttrPK}, nil
+	}
+	return nil, nil, nil
 }
 
 func keyAV(k store.Key) map[string]types.AttributeValue {

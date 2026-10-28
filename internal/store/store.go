@@ -9,16 +9,22 @@
 // reference to them.
 //
 // Every backend sorts its errors into the same classes:
-//   - a failed condition is a *[ConditionError], which matches [ErrConditionFailed];
+//   - a failed condition is a *[ConditionError], or a *[TxError] for a transaction, which
+//     match [ErrConditionFailed];
 //   - [ErrTooLarge] comes from size checks made before a write is sent;
 //   - [ErrInvalidRequest] is a request DynamoDB rejects on every attempt: a Dynaflux bug;
-//   - every other error is transient: throttling, server errors, a canceled context.
+//   - every other error is transient: [ErrConflict], [ErrThrottled], server errors, a
+//     canceled context.
 package store
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
+	"strconv"
+
+	"github.com/lucindo/dynaflux/internal/catalog"
 )
 
 // Type is the DynamoDB type of a [Value]. Dynaflux never writes NULL or sets.
@@ -52,13 +58,18 @@ type Item map[string]Value
 // Key is the primary key of an item: every table has the string keys pk and sk.
 type Key struct{ PK, SK string }
 
-// DynamoDB limits, in bytes except for MaxBatchGetKeys and MaxSegments.
+// KeyOf returns the key of it.
+func KeyOf(it Item) Key { return Key{PK: it[catalog.AttrPK].Str, SK: it[catalog.AttrSK].Str} }
+
+// DynamoDB limits, in bytes except for MaxBatchGetKeys, MaxSegments and MaxTransactItems.
 const (
-	MaxItemSize     = 400 << 10 // as [ItemSize] counts it
-	MaxPKLen        = 2048
-	MaxSKLen        = 1024
-	MaxBatchGetKeys = 100
-	MaxSegments     = 1_000_000 // a Scan's TotalSegments
+	MaxItemSize      = 400 << 10 // as [ItemSize] counts it
+	MaxPKLen         = 2048
+	MaxSKLen         = 1024
+	MaxBatchGetKeys  = 100
+	MaxSegments      = 1_000_000 // a Scan's TotalSegments
+	MaxTransactItems = 100
+	MaxTransactSize  = 4 << 20 // the items' sizes as [ItemSize] counts them
 )
 
 // Cond is the condition of a Put. The zero Cond is unconditional.
@@ -86,6 +97,19 @@ func (c Cond) Absent() bool { return c.op == condAbsent }
 
 // Version returns the version of an [IfVersion] condition.
 func (c Cond) Version() (int64, bool) { return c.version, c.op == condVersion }
+
+// Holds reports whether c holds over cur, the stored item or nil, as DynamoDB decides.
+func (c Cond) Holds(cur Item) bool {
+	if c.Absent() {
+		return cur == nil
+	}
+	if want, ok := c.Version(); ok {
+		v, found := cur[catalog.AttrRowVersion]
+		// Stored numbers are in normal form, which for an integer is its decimal text.
+		return found && v.Type == N && v.Str == strconv.FormatInt(want, 10)
+	}
+	return true
+}
 
 // Query reads one partition in sort-key order.
 type Query struct {
@@ -130,11 +154,25 @@ type Backend interface {
 	Put(ctx context.Context, table string, it Item, c Cond) error
 }
 
+// TxPut is one write of a transaction: a whole item, written when its condition holds.
+type TxPut struct {
+	Table string
+	Item  Item
+	Cond  Cond
+}
+
 // Error classes; see the package documentation.
 var (
 	ErrConditionFailed = errors.New("store: condition failed")
 	ErrTooLarge        = errors.New("store: item or key over DynamoDB's size limit")
 	ErrInvalidRequest  = errors.New("store: request DynamoDB rejects")
+	// ErrConflict is a write that lost to a concurrent transaction, or a transaction that
+	// conflicts canceled. The last attempt wrote nothing, but an earlier attempt of the same
+	// call may have been applied: read again before deciding. Transient.
+	ErrConflict = errors.New("store: conflict with a concurrent write")
+	// ErrThrottled is throttling left after the SDK's retries. An earlier attempt of the same
+	// call may have been applied: read again before deciding. Transient.
+	ErrThrottled = errors.New("store: throttled")
 )
 
 // ConditionError is a Put whose condition failed. Current is the stored item, nil when
@@ -146,3 +184,22 @@ type ConditionError struct {
 func (*ConditionError) Error() string { return ErrConditionFailed.Error() }
 
 func (*ConditionError) Unwrap() error { return ErrConditionFailed }
+
+// TxError is a transaction that a failed condition canceled. Conds lines up with the puts:
+// for each put whose condition failed, its stored item (Current nil when absent); nil for
+// the others, which may or may not have held.
+type TxError struct {
+	Conds []*ConditionError
+}
+
+func (e *TxError) Error() string {
+	var failed []int
+	for i, c := range e.Conds {
+		if c != nil {
+			failed = append(failed, i)
+		}
+	}
+	return fmt.Sprintf("%v: transaction puts %v", ErrConditionFailed, failed)
+}
+
+func (*TxError) Unwrap() error { return ErrConditionFailed }

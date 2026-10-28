@@ -145,8 +145,8 @@ func (s suite) checkStaleReads(t *testing.T) {
 	b := StaleReads(s.newBackend(t), s.newBackend(t))
 	it := keyed(part, "a", store.Item{"n": num("1")})
 	mustPut(t, b, it, store.IfAbsent())
-	wantRead(t, b, keyOf(it), true, it)
-	wantRead(t, b, keyOf(it), false, nil)
+	wantRead(t, b, store.KeyOf(it), true, it)
+	wantRead(t, b, store.KeyOf(it), false, nil)
 }
 
 // wantRead fails unless Get and BatchGet of k, a Query of its partition and a scan of the

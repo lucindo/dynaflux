@@ -196,7 +196,7 @@ func (s suite) checkBatchGet(t *testing.T) {
 	bb := keyed(part, "b", store.Item{"n": num("2")})
 	mustPut(t, b, a, store.Cond{})
 	mustPut(t, b, bb, store.Cond{})
-	ks := []store.Key{keyOf(a), {PK: part, SK: "missing"}, keyOf(a), keyOf(bb)}
+	ks := []store.Key{store.KeyOf(a), {PK: part, SK: "missing"}, store.KeyOf(a), store.KeyOf(bb)}
 	got, err := b.BatchGet(t.Context(), Table, ks, true)
 	if err != nil {
 		t.Fatalf("BatchGet: %v", err)

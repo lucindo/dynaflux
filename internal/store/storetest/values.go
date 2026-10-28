@@ -122,10 +122,10 @@ func (s suite) checkDeepCopies(t *testing.T) {
 	mutate(in)
 	wantStored(t, b, original())
 
-	mutate(mustGet(t, b, keyOf(in)))
+	mutate(mustGet(t, b, store.KeyOf(in)))
 	wantStored(t, b, original())
 
-	batch, err := b.BatchGet(t.Context(), Table, []store.Key{keyOf(in)}, true)
+	batch, err := b.BatchGet(t.Context(), Table, []store.Key{store.KeyOf(in)}, true)
 	if err != nil {
 		t.Fatalf("BatchGet: %v", err)
 	}

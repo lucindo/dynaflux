@@ -32,7 +32,7 @@ func putTable(t *testing.T, b store.Backend, n int) []store.Item {
 func onceEach(items []store.Item) map[store.Key]int {
 	m := make(map[store.Key]int, len(items))
 	for _, it := range items {
-		m[keyOf(it)] = 1
+		m[store.KeyOf(it)] = 1
 	}
 	return m
 }
@@ -59,7 +59,7 @@ func scanAll(t *testing.T, b store.Backend, s store.Scan, start *store.Key) ([]s
 // byKey sorts items by key, since a scan's order is the backend's.
 func byKey(items []store.Item) []store.Item {
 	return slices.SortedFunc(slices.Values(items), func(a, b store.Item) int {
-		ka, kb := keyOf(a), keyOf(b)
+		ka, kb := store.KeyOf(a), store.KeyOf(b)
 		return cmp.Or(strings.Compare(ka.PK, kb.PK), strings.Compare(ka.SK, kb.SK))
 	})
 }
@@ -124,7 +124,7 @@ func (s suite) checkScanSegments(t *testing.T) {
 		for i := range n {
 			items, _ := scanAll(t, b, store.Scan{Segment: i, Segments: n, PageSize: 3}, nil)
 			for _, it := range items {
-				seen[keyOf(it)]++
+				seen[store.KeyOf(it)]++
 			}
 		}
 		if !maps.Equal(seen, want) {
