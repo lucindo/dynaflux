@@ -14,8 +14,8 @@ is reproduced by rerunning its seed. The package doc lists the properties a run 
 | Target | What runs | Time |
 |--------|-----------|------|
 | `make test` | The smoke tier with `-race`: one seed of each scenario but `poison`, `long` and `gaps`, two seeds of `late` and `sync` run twice, control C3 at 2 seeds, and the scripted tests | 25 s for `internal/simulation` |
-| `make sim` | The full tier: 300 seeds × 3 regions of each scenario, 100 of `guards-table`, `rollback`, `retire`, `timesplit-late`, `table`, `sync-backfill`, `sync-regions`, `wait` and `gaps`, and four seeds each of `late`, `sync` and `regions` run twice | 25 min |
-| `make sim-controls` | Every negative control: code mutants, environment and configuration controls, baselines and self-checks. Each must be caught | 20 min |
+| `make sim` | The full tier: 300 seeds × 3 regions of each scenario, 100 of `guards-table`, `rollback`, `retire`, `timesplit-late`, `table`, `sync-backfill`, `sync-regions`, `wait` and `gaps`, and four seeds each of `late`, `sync` and `regions` run twice | 34 min |
+| `make sim-controls` | Every negative control: code mutants, environment and configuration controls, baselines and self-checks. Each must be caught | 28 min |
 | `make sim-seed SCENARIO=x SEED=n` | One seed of one scenario, verbose | 1–3 s |
 
 `make sim` and `make sim-seed` leave `-race` off; set `SIM_RACE=-race` to turn it on. The
