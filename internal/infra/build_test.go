@@ -54,6 +54,18 @@ func TestBuildStreamIDs(t *testing.T) {
 	}
 }
 
+// Without a query annotated -- expose: http, no door is built, nor a custom domain, whatever
+// http says.
+func TestBuildQueryWithoutExposed(t *testing.T) {
+	t.Parallel()
+	const apiDoor = "store: analytics\nregions: [us-east-1]\n" +
+		"http: {frontend: http_api, auth: lambda, authorizer: {function: auth}, domain: {name: flux.example.com}}\n"
+	m, err := buildWith(t, apiDoor, "CREATE STREAM page_views (user_id String, page String) PRIMARY KEY (user_id);\n", infra.Options{})
+	if err != nil || len(m.Query.IDs()) != 0 || m.Domain != "" {
+		t.Errorf("query scope %q, domain %q, error %v; want none", m.Query.IDs(), m.Domain, err)
+	}
+}
+
 func TestBuildWithoutStreams(t *testing.T) {
 	t.Parallel()
 	_, err := build(t, "")

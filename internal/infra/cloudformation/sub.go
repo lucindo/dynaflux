@@ -18,12 +18,13 @@ const prefixUnderscore = "PrefixUnderscore"
 
 // resolver turns the texts of one template into CloudFormation values. A reference to a
 // resource of the template becomes !Ref or !GetAtt, so CloudFormation orders the two. A
-// regional template refers across scopes to stream tables, whose names and ARNs derive from
-// their names.
+// regional or query template refers to the tables of the templates deployed before it,
+// whose names and ARNs derive from their names.
 type resolver struct {
 	local       map[string]bool        // IDs of the resources in the template
-	global      map[string]infra.Table // stream tables, by ID, for a regional template
+	remote      map[string]infra.Table // tables of other templates, by ID
 	archiveOnly map[string]bool        // IDs of the archive-only resources
+	refARN      map[string]bool        // IDs of the resources whose !Ref is their ARN
 	// err is the first text that failed to resolve, which fails the template.
 	err error
 }
@@ -57,7 +58,7 @@ func (r *resolver) resolve(t infra.Text) (*yaml.Node, error) {
 		case s.Placeholder != "" && s.Placeholder != infra.PlaceholderPrefixUnderscore:
 			return intrinsic("Ref", str(parameter(s.Placeholder))), nil
 		case s.Ref.ID != "" && r.local[s.Ref.ID]:
-			suffix, attrErr := localAttr(s.Ref)
+			suffix, attrErr := r.localAttr(s.Ref)
 			switch {
 			case attrErr != nil:
 				return nil, attrErr
@@ -110,13 +111,13 @@ func (r *resolver) write(b *strings.Builder, segs []infra.Segment) (bool, bool, 
 			underscore = underscore || s.Placeholder == infra.PlaceholderPrefixUnderscore
 			b.WriteString("${" + parameter(s.Placeholder) + "}")
 		case r.local[s.Ref.ID]:
-			suffix, err := localAttr(s.Ref)
+			suffix, err := r.localAttr(s.Ref)
 			if err != nil {
 				return false, false, err
 			}
 			b.WriteString("${" + s.Ref.ID + suffix + "}")
 		default:
-			u, refErr := r.writeGlobal(b, s.Ref)
+			u, refErr := r.writeRemote(b, s.Ref)
 			if refErr != nil {
 				return false, false, refErr
 			}
@@ -128,28 +129,38 @@ func (r *resolver) write(b *strings.Builder, segs []infra.Segment) (bool, bool, 
 }
 
 // localAttr returns what follows the ID of a resource in the template in !GetAtt or !Sub:
-// nothing for the value of !Ref, which is a name or a mapping's UUID. The custom resources'
-// attributes are those that package setup returns.
-func localAttr(ref infra.Ref) (string, error) {
+// nothing for the value of !Ref, which is a name, a mapping's UUID, an ID that AWS assigned
+// or a certificate's ARN. The custom resources' attributes are those that package setup
+// returns.
+func (r *resolver) localAttr(ref infra.Ref) (string, error) {
 	switch ref.Attr {
-	case infra.AttrName, infra.AttrUUID:
+	case infra.AttrName, infra.AttrUUID, infra.AttrID:
 		return "", nil
 	case infra.AttrARN:
+		if r.refARN[ref.ID] {
+			return "", nil
+		}
 		return ".Arn", nil
+	case infra.AttrRegionalName:
+		return ".RegionalDomainName", nil
+	case infra.AttrRegionalZone:
+		return ".RegionalHostedZoneId", nil
 	case infra.AttrStreamARN:
 		return ".StreamArn", nil
 	case infra.AttrFingerprint:
 		return ".Fingerprint", nil
+	case infra.AttrURL:
+		return ".FunctionUrl", nil
 	}
 	return "", fmt.Errorf("refers to %s.%s, which a resource in the template can't provide", ref.ID, ref.Attr)
 }
 
-// writeGlobal writes a reference to a stream table of the global template, and reports
-// whether it wrote ${prefix_}.
-func (r *resolver) writeGlobal(b *strings.Builder, ref infra.Ref) (bool, error) {
-	t, ok := r.global[ref.ID]
+// writeRemote writes a reference to a table of another template, in the stack's region,
+// and reports whether it wrote ${prefix_}.
+func (r *resolver) writeRemote(b *strings.Builder, ref infra.Ref) (bool, error) {
+	t, ok := r.remote[ref.ID]
 	if !ok {
-		return false, fmt.Errorf("refers to %s, which is neither in the template nor a stream table", ref.ID)
+		return false, fmt.Errorf("refers to %s, which is neither in the template nor a table of another", ref.ID)
 	}
 	name, err := t.Name.Segments()
 	if err != nil {
@@ -160,7 +171,7 @@ func (r *resolver) writeGlobal(b *strings.Builder, ref infra.Ref) (bool, error) 
 	case infra.AttrARN, infra.AttrStreamARNPattern:
 		b.WriteString("arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/")
 	default:
-		return false, fmt.Errorf("refers to %s.%s, which a stream table doesn't provide", ref.ID, ref.Attr)
+		return false, fmt.Errorf("refers to %s.%s, which a table of another template doesn't provide", ref.ID, ref.Attr)
 	}
 	_, underscore, err := (&resolver{}).write(b, name)
 	if ref.Attr == infra.AttrStreamARNPattern {
@@ -181,6 +192,12 @@ func parameter(placeholder string) string {
 		return "AWS::Region"
 	case infra.PlaceholderAccount:
 		return "AWS::AccountId"
+	case infra.PlaceholderURLSuffix:
+		return "AWS::URLSuffix"
+	case infra.PlaceholderDomain:
+		return domainName
+	case infra.PlaceholderHostedZone:
+		return hostedZoneID
 	default: // infra.PlaceholderPartition
 		return "AWS::Partition"
 	}

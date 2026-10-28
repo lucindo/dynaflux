@@ -17,6 +17,7 @@ const maxIDLen = 255
 const (
 	scopeGlobal   = "global"
 	scopeRegional = "regional"
+	scopeQuery    = "query"
 
 	kindTable            = "table"
 	kindBucket           = "bucket"
@@ -25,6 +26,17 @@ const (
 	kindRole             = "role"
 	kindManagedPolicy    = "managed policy"
 	kindFunction         = "function"
+	kindFunctionURL      = "function URL"
+	kindPermission       = "permission"
+	kindAPI              = "REST or HTTP API"
+	kindStage            = "API stage"
+	kindAuthorizer       = "authorizer"
+	kindUsagePlan        = "usage plan"
+	kindCertificate      = "certificate"
+	kindDomain           = "custom domain"
+	kindHealthCheck      = "health check"
+	kindLatencyRecord    = "latency record"
+	kindOutput           = "output"
 	kindStreamLookup     = "stream lookup"
 	kindMapping          = "mapping"
 	kindCatalog          = "catalog registration"
@@ -39,10 +51,11 @@ const (
 // Check verifies the structural invariants that every manifest from [Build] meets. Values
 // that Build fixes are pinned by the template goldens instead.
 //
-//  1. IDs are unique across both scopes and are an uppercase letter followed by at most
-//     254 letters and digits.
-//  2. Every reference names an existing resource and an attribute its kind provides, and
-//     refers across scopes only from a regional resource to a global table.
+//  1. IDs are unique across the scopes and are an uppercase letter followed by at most 254
+//     letters and digits.
+//  2. Every reference, outputs' included, names an existing resource and an attribute its
+//     kind provides, and refers across scopes only to a table: from a regional resource to
+//     a global one, and from a query resource to either.
 //  3. Texts hold only the substitutions that [Text] lists.
 //  4. A required field of a resource that isn't archive-only never refers to one that is:
 //     the field would be missing in the regions that don't archive. Nor do a delivery
@@ -81,8 +94,12 @@ func (m *Manifest) Check() error {
 		}
 	}
 	archives := len(m.ArchiveRegions) > 0
-	errs = append(errs, m.Global.checkArchive(byID, scopeGlobal, archives)...)
-	errs = append(errs, m.Regional.checkArchive(byID, scopeRegional, archives)...)
+	for _, s := range m.scopes() {
+		errs = append(errs, s.Scope.checkArchive(byID, s.name, archives)...)
+		for _, o := range s.Outputs {
+			errs = append(errs, checkText(entry{scope: s.name, kind: kindOutput, id: o.Name}, required("value", o.Value), byID)...)
+		}
+	}
 	for _, d := range slices.Concat(m.Global.Dashboards, m.Regional.Dashboards) {
 		if err := checkDashboardBody(d.Body); err != nil {
 			errs = append(errs, fmt.Errorf("%s body: %w", d.ID, err))
@@ -121,8 +138,23 @@ func required(name string, text Text) field {
 	return field{name: name, text: text, required: true}
 }
 
+// namedScope is a scope of a manifest and its name.
+type namedScope struct {
+	*Scope
+
+	name string
+}
+
+func (m *Manifest) scopes() []namedScope {
+	return []namedScope{{&m.Global, scopeGlobal}, {&m.Regional, scopeRegional}, {&m.Query, scopeQuery}}
+}
+
 func (m *Manifest) entries() []entry {
-	return append(m.Global.entries(scopeGlobal), m.Regional.entries(scopeRegional)...)
+	var es []entry
+	for _, s := range m.scopes() {
+		es = append(es, s.entries(s.name)...)
+	}
+	return es
 }
 
 // IDs returns the IDs of the resources in s.
@@ -208,7 +240,49 @@ func (s *Scope) entries(scope string) []entry {
 	for _, x := range s.Dashboards {
 		add(kindDashboard, x.Common, x.Name, nil, required("name", x.Name))
 	}
-	return append(es, s.managedEntries(scope)...)
+	return slices.Concat(es, s.managedEntries(scope), s.doorEntries(scope))
+}
+
+// doorEntries returns the entries of s's front doors: function URLs, permissions, APIs with
+// their stages and authorizers, usage plans and custom domains.
+func (s *Scope) doorEntries(scope string) []entry {
+	var es []entry
+	add := func(kind string, c Common, name Text, attrs []string, fields ...field) {
+		es = append(es, entry{scope: scope, kind: kind, id: c.ID, archiveOnly: c.ArchiveOnly, name: name, attrs: attrs, fields: fields})
+	}
+	id := []string{AttrID}
+	for _, x := range s.FunctionURLs {
+		add(kindFunctionURL, x.Common, "", []string{AttrURL}, required("function", x.Function))
+	}
+	for _, x := range s.Permissions {
+		add(kindPermission, x.Common, "", nil, required("function", x.Function), required("source ARN", x.SourceARN))
+	}
+	for _, x := range s.APIs {
+		add(kindAPI, x.Common, x.Name, id, required("name", x.Name), required("function", x.Function))
+		add(kindStage, Common{ID: x.Stage.ID, ArchiveOnly: x.ArchiveOnly}, Text(x.Stage.Name), []string{AttrName},
+			required("log group", x.Stage.LogGroup))
+		if a := x.Authorizer; a != nil {
+			add(kindAuthorizer, Common{ID: a.ID, ArchiveOnly: x.ArchiveOnly}, "", id, required("function", a.Function))
+		}
+	}
+	for _, x := range s.UsagePlans {
+		add(kindUsagePlan, x.Common, x.Name, id, required("name", x.Name), required("API", x.API), required("stage", x.Stage))
+	}
+	for _, x := range s.Certificates {
+		add(kindCertificate, x.Common, "", []string{AttrARN}, required("domain", x.Domain), required("hosted zone", x.HostedZone))
+	}
+	for _, x := range s.Domains {
+		add(kindDomain, x.Common, x.Name, []string{AttrRegionalName, AttrRegionalZone}, required("name", x.Name),
+			required("certificate", x.Certificate), required("API", x.API), required("stage", x.Stage))
+	}
+	for _, x := range s.HealthChecks {
+		add(kindHealthCheck, x.Common, "", id, required("host", x.Host))
+	}
+	for _, x := range s.LatencyRecords {
+		add(kindLatencyRecord, x.Common, x.Name, nil, required("name", x.Name), required("hosted zone", x.HostedZone),
+			required("target", x.Target), required("target zone", x.TargetZone), required("health check", x.HealthCheck))
+	}
+	return es
 }
 
 // managedEntries returns the entries of the managed policies of s's roles.
@@ -379,13 +453,26 @@ func checkText(e entry, f field, byID map[string]entry) []error {
 			errs = append(errs, fmt.Errorf("%s %s refers to %s, which doesn't exist", e.id, f.name, r.ID))
 		case !slices.Contains(t.attrs, r.Attr):
 			errs = append(errs, fmt.Errorf("%s %s refers to %s.%s, but a %s has only %s", e.id, f.name, r.ID, r.Attr, t.kind, strings.Join(t.attrs, ", ")))
-		case t.scope != e.scope && (e.scope != scopeRegional || t.kind != kindTable):
-			errs = append(errs, fmt.Errorf("%s %s refers to %s across scopes; only regional resources may refer to global tables", e.id, f.name, r.ID))
+		case t.scope != e.scope && !crossScope(e.scope, t):
+			errs = append(errs, fmt.Errorf("%s %s refers to %s across scopes; only a regional resource may refer to a global "+
+				"table, and a query resource to a global or regional one", e.id, f.name, r.ID))
 		case f.required && !e.archiveOnly && t.archiveOnly:
 			errs = append(errs, fmt.Errorf("%s %s refers to %s, which exists only in archive regions", e.id, f.name, r.ID))
 		}
 	}
 	return errs
+}
+
+// crossScope reports whether a resource of scope may refer to t, of another scope: the
+// regional and query stacks name the tables of the stacks deployed before them.
+func crossScope(scope string, t entry) bool {
+	switch scope {
+	case scopeRegional:
+		return t.kind == kindTable && t.scope == scopeGlobal
+	case scopeQuery:
+		return t.kind == kindTable
+	}
+	return false
 }
 
 func validID(id string) bool {
@@ -403,8 +490,9 @@ func checkDashboardBody(body Text) error {
 	if err != nil {
 		return err
 	}
+	allowed := []string{PlaceholderPrefix, PlaceholderRegion, PlaceholderAccount, PlaceholderPartition}
 	for _, s := range segs {
-		if s.Ref.ID != "" || s.Placeholder == PlaceholderPrefixUnderscore {
+		if s.Ref.ID != "" || s.Placeholder != "" && !slices.Contains(allowed, s.Placeholder) {
 			return fmt.Errorf("has %s, but a dashboard may hold only ${%s}, ${%s}, ${%s} and ${%s}", substitution(s),
 				PlaceholderPrefix, PlaceholderRegion, PlaceholderAccount, PlaceholderPartition)
 		}

@@ -29,7 +29,8 @@ func TestFunctionRole(t *testing.T) {
 
 // IAM's * matches any run of characters, / included, and ? any one; every other character
 // matches itself. A condition holds when the request has its key with one of its values, or
-// one that a StringLike value matches. The statements of the role's managed policies count.
+// one that a StringLike value matches; ForAllValues also holds without the key. The
+// statements of the role's managed policies count.
 func TestAllowing(t *testing.T) {
 	t.Parallel()
 	m, err := buildWith(t, "store: analytics\nregions: [us-east-1]\n", "CREATE STREAM page_views (k String) PRIMARY KEY (k);", infra.Options{})
@@ -52,6 +53,10 @@ func TestAllowing(t *testing.T) {
 			Conditions: []infra.Condition{{Operator: "StringLike", Key: "s3:prefix", Values: []infra.Text{"w/*"}}},
 		},
 		{Sid: "Objects", Actions: []string{"s3:GetObject"}, Resources: []infra.Text{"${ref:Bucket.arn}/*"}},
+		{
+			Sid: "Partition", Actions: []string{"dynamodb:Query"}, Resources: []infra.Text{table + "meta"},
+			Conditions: []infra.Condition{{Operator: "ForAllValues:StringEquals", Key: "dynamodb:LeadingKeys", Values: []infra.Text{"view"}}},
+		},
 	}}
 	d := infra.Deployment{Prefix: "prod-", Partition: "aws", Account: "123456789012", Region: "us-east-1"}
 	const arn = "arn:aws:dynamodb:us-east-1:123456789012:table/prod-"
@@ -76,6 +81,9 @@ func TestAllowing(t *testing.T) {
 		{action: "s3:ListBucket", arn: "arn:aws:s3:::b"},
 		{action: "s3:GetObject", arn: "arn:aws:s3:::prod-analytics-123456789012-us-east-1-an/k", want: []string{"Objects"}},
 		{action: "s3:GetObject", arn: "arn:aws:s3:::dev-analytics-123456789012-us-east-1-an/k"},
+		{action: "dynamodb:Query", arn: arn + "meta", keys: map[string]string{"dynamodb:LeadingKeys": "view"}, want: []string{"Partition"}},
+		{action: "dynamodb:Query", arn: arn + "meta", keys: map[string]string{"dynamodb:LeadingKeys": "unit#s#1"}},
+		{action: "dynamodb:Query", arn: arn + "meta", want: []string{"Partition"}},
 	}
 	for _, tt := range tests {
 		got, aerr := m.Allowing(role, d, tt.action, tt.arn, tt.keys)

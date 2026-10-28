@@ -12,11 +12,12 @@
 // and the catalog, never AWS, and the same inputs give the same manifest: resources are
 // sorted by ID, regions are sorted, and nothing depends on time or on the Dynaflux release.
 //
-// Resources are in two scopes. Global holds what is deployed once for the store, in one
+// Resources are in three scopes. Global holds what is deployed once for the store, in one
 // region of the store: the stream Global Tables. Regional holds what is deployed in every
-// region.
+// region. Query, deployed in every region with the application, holds the query function
+// and its front door when a query is annotated -- expose: http.
 //
-// Every resource has an ID, unique across both scopes: its logical identifier in a
+// Every resource has an ID, unique across the scopes: its logical identifier in a
 // template, which never changes for the life of a store. It is a kind word, such as
 // "Stream", followed by a part derived from the stream or view name alone. No kind word is
 // the start of another, so IDs of different kinds can't collide. Fields that name or point

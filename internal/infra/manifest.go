@@ -21,6 +21,12 @@ type Manifest struct {
 	// Global is deployed once, in any one region of Regions; Regional in each of them.
 	Global   Scope
 	Regional Scope
+	// Query is deployed in each region with the application, after Regional and the
+	// backfill (ADR 0018). It is empty when no query is annotated -- expose: http.
+	Query Scope
+	// Domain is the default of ${domain}, which a deploy can change, since each environment
+	// needs its own. It is empty when the query scope has no custom domain.
+	Domain string
 }
 
 // Prefix is the deployment prefix of every name, chosen at deploy time.
@@ -40,6 +46,14 @@ type Scope struct {
 	LogStreams        []LogStream
 	Roles             []Role
 	Functions         []Function
+	FunctionURLs      []FunctionURL
+	Permissions       []Permission
+	APIs              []API
+	UsagePlans        []UsagePlan
+	Certificates      []Certificate
+	Domains           []Domain
+	HealthChecks      []HealthCheck
+	LatencyRecords    []LatencyRecord
 	StreamLookups     []StreamLookup
 	Mappings          []Mapping
 	Catalogs          []CatalogRegistration
@@ -49,6 +63,8 @@ type Scope struct {
 	DeliveryStreams   []DeliveryStream
 	Alarms            []Alarm
 	Dashboards        []Dashboard
+	// Outputs are the values that the scope's stack returns.
+	Outputs []Output
 }
 
 // Common holds the fields of every resource.
@@ -88,6 +104,7 @@ const (
 	TagKindSetup     = "setup"
 	TagKindArchive   = "archive"
 	TagKindBackfill  = "backfill"
+	TagKindQuery     = "query"
 )
 
 // Table is a DynamoDB table. A stream table is a Global Table with a replica in every
@@ -303,6 +320,9 @@ type Function struct {
 	Arch           string
 	MemoryMB       int
 	TimeoutSeconds int
+	// ReservedConcurrency is both the most concurrent executions the function can have and
+	// what it keeps of the account's; 0 reserves nothing.
+	ReservedConcurrency int
 	// Code is the directory of the binary's main package, relative to infra.out, where the
 	// templates are.
 	Code string
@@ -314,6 +334,191 @@ const (
 	FunctionRuntime = "provided.al2023"
 	FunctionHandler = "bootstrap"
 )
+
+// FunctionURL is a function's HTTPS endpoint, its ID that of the function and "Url". It
+// provides AttrURL, the endpoint's base URL.
+type FunctionURL struct {
+	Common
+
+	Function Text // the function's ARN
+	Auth     URLAuth
+}
+
+// URLAuth is how a function URL authenticates its callers.
+type URLAuth string
+
+// Function URL auth types.
+const (
+	// URLAuthIAM takes SigV4-signed requests from principals allowed lambda:InvokeFunctionUrl
+	// and lambda:InvokeFunction.
+	URLAuthIAM URLAuth = "iam"
+	// URLAuthNone takes any request, given a Permission for each of the two actions.
+	URLAuthNone URLAuth = "none"
+)
+
+// Permission is a statement of a function's resource policy: Principal may call Action on
+// Function. Its ID is "Permission" and what it permits. CloudFormation can't tag it.
+type Permission struct {
+	Common
+
+	Function  Text // the function's name
+	Action    string
+	Principal string
+	// URLAuth, on lambda:InvokeFunctionUrl, limits it to the function's URLs of that auth.
+	URLAuth URLAuth
+	// ViaURL limits lambda:InvokeFunction to invocations through a function URL, so a public
+	// permission doesn't open direct invoke.
+	ViaURL bool
+	// SourceARN limits a service principal to calls for the resources it matches.
+	SourceARN Text
+}
+
+// API is an API Gateway API that sends every request to Function, "Api": an HTTP API, or a
+// REST API with a regional endpoint. It has two routes. POST /queries/{name} takes the
+// callers that Auth admits. GET /health takes anyone, so that Route 53 health checks can
+// call it, and its stage throttles it, so that no one can drain the function's concurrency
+// through it (ADR 0018). It provides AttrID.
+type API struct {
+	Common
+
+	Name     Text
+	Protocol APIProtocol
+	Function Text // the function's ARN
+	Auth     APIAuth
+	// Authorizer, for auth jwt, lambda and cognito, decides who may call the queries route,
+	// and a token must also carry one of Scopes, when there are any.
+	Authorizer *Authorizer
+	Scopes     []string
+	Stage      Stage
+}
+
+// APIProtocol is the kind of an API Gateway API.
+type APIProtocol string
+
+// API kinds.
+const (
+	APIProtocolHTTP APIProtocol = "http"
+	APIProtocolREST APIProtocol = "rest"
+)
+
+// APIAuth is how an API authenticates the callers of its queries route.
+type APIAuth string
+
+// API auth types.
+const (
+	// APIAuthIAM takes SigV4-signed requests from principals allowed execute-api:Invoke.
+	APIAuthIAM APIAuth = "iam"
+	// APIAuthJWT takes the JWTs that a JWT authorizer accepts (HTTP API).
+	APIAuthJWT APIAuth = "jwt"
+	// APIAuthLambda takes what a Lambda authorizer allows.
+	APIAuthLambda APIAuth = "lambda"
+	// APIAuthAPIKey takes the API keys of a usage plan of the API's stage (REST API).
+	APIAuthAPIKey APIAuth = "api_key"
+	// APIAuthCognito takes the tokens that a Cognito authorizer accepts (REST API).
+	APIAuthCognito APIAuth = "cognito"
+)
+
+// Authorizer is an API's authorizer of the Authorization header, "Authorizer", of the kind
+// its API's Auth names. It provides AttrID.
+type Authorizer struct {
+	ID   string
+	Name string
+	// A JWT authorizer accepts a token of Issuer whose aud, or client_id without aud, is in
+	// Audience.
+	Issuer   string
+	Audience []string
+	// A Lambda authorizer asks Function, by its ARN, and keeps each answer TTLSeconds.
+	Function   Text
+	TTLSeconds int
+	// A Cognito authorizer accepts a token of UserPool, by its ARN, and an ID token only when
+	// its aud is in Clients, if any.
+	UserPool string
+	Clients  []string
+}
+
+// Stage is an API's one stage, "Stage", which serves its routes and writes a line per
+// request to LogGroup, by the log group's ARN. A REST API's paths start with its Name. It
+// provides AttrName.
+type Stage struct {
+	ID             string
+	Name           string
+	LogGroup       Text
+	HealthThrottle Throttle
+}
+
+// Throttle limits requests to Rate a second, with bursts of up to Burst. Zero sets no limit.
+type Throttle struct {
+	Rate  int
+	Burst int
+}
+
+// UsagePlan is the usage plan of a REST API's stage that the API keys of auth api_key
+// belong to, "UsagePlan". The keys are made outside the stack, so that no template holds
+// them. API Gateway applies Throttle and QuotaPerDay to each key on a best-effort basis;
+// zero sets no limit. It provides AttrID.
+type UsagePlan struct {
+	Common
+
+	Name        Text
+	API         Text // the API's ID
+	Stage       Text // the stage's name
+	Throttle    Throttle
+	QuotaPerDay int
+}
+
+// Certificate is an ACM certificate of Domain, "Certificate", validated by DNS records that
+// CloudFormation writes into the Route 53 hosted zone HostedZone. It provides AttrARN.
+type Certificate struct {
+	Common
+
+	Domain     Text
+	HostedZone Text
+}
+
+// Domain is a custom domain of an API in the region, "Domain": a regional endpoint that
+// serves Certificate with TLS 1.2 or later, and maps its root to the API's stage. It
+// provides AttrRegionalName and AttrRegionalZone, the endpoint's host and its hosted zone.
+type Domain struct {
+	Common
+
+	Name        Text
+	Certificate Text // the certificate's ARN
+	API         Text // the API's ID
+	Stage       Text // the stage's name
+}
+
+// HealthCheck is a Route 53 health check, "HealthCheck": a GET of Path at Host over HTTPS
+// on port 443, with SNI, which the shared hosts of AWS endpoints need, every
+// IntervalSeconds. FailureThreshold failures in a row make it unhealthy. It provides AttrID.
+type HealthCheck struct {
+	Common
+
+	Host             Text
+	Path             string
+	IntervalSeconds  int
+	FailureThreshold int
+}
+
+// LatencyRecord is the region's Route 53 latency record of Name in the hosted zone
+// HostedZone, "LatencyRecord": an alias of Target, a host in the hosted zone TargetZone,
+// that Route 53 answers with while HealthCheck passes and the region is the nearest. Its
+// set identifier is the region. CloudFormation can't tag it.
+type LatencyRecord struct {
+	Common
+
+	Name        Text
+	HostedZone  Text
+	Target      Text
+	TargetZone  Text
+	HealthCheck Text // the health check's ID
+}
+
+// Output is a value that a scope's stack returns, such as an endpoint.
+type Output struct {
+	Name        string
+	Description string
+	Value       Text
+}
 
 // StreamLookup finds the stream ARN of a stream table's replica in the region where the
 // scope is deployed, which only a request to DynamoDB in that region gives: "Lookup" and

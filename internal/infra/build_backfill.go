@@ -99,7 +99,7 @@ func (b *builder) backfill() function {
 		{Sid: "Streams", Actions: []string{"dynamodb:DescribeStream"}, Resources: streams},
 	}
 	if len(views) > 0 {
-		managed = append(managed, Statement{Sid: "Views", Actions: []string{dynamoBatchGetItem, dynamoGetItem, dynamoPutItem}, Resources: views})
+		managed = append(managed, Statement{Sid: sidViews, Actions: []string{dynamoBatchGetItem, dynamoGetItem, dynamoPutItem}, Resources: views})
 	}
 	return function{
 		id: idBackfill, kind: catalog.ResourceBackfillFunction, name: b.naming.BackfillFunction(), mode: catalog.EnvModeBackfill,

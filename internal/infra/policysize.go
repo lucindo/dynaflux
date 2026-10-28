@@ -49,7 +49,7 @@ func (m *Manifest) checkPolicySizes(w worstCase, projectorPerStream bool) error 
 		fix = "retire old view versions"
 	}
 	w = m.resolving(w)
-	for _, s := range []Scope{m.Global, m.Regional} {
+	for _, s := range m.scopes() {
 		for _, r := range s.Roles {
 			size, err := w.policySize(r.Statements)
 			if err != nil {

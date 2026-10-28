@@ -84,3 +84,12 @@ func tags(t map[string]string) *yaml.Node {
 	}
 	return list
 }
+
+// tagMap returns the map form of tags that SAM and API Gateway v2 take, sorted by key.
+func tagMap(t map[string]string) *yaml.Node {
+	m := mapping()
+	for _, k := range slices.Sorted(maps.Keys(t)) {
+		m.Content = append(m.Content, str(k), str(t[k]))
+	}
+	return m
+}
