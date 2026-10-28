@@ -279,7 +279,9 @@ func parseDecimal(s string, scale int, exp bool) (*big.Int, error) {
 			if err != nil || strings.HasPrefix(body[i+1:], "+-") {
 				return nil, syntax
 			}
-			mantissa, power = body[:i], p
+			// Clamped so that shift below can't overflow; past these bounds it fails either way.
+			limit := len(body) + catalog.MaxDecimalPrecision + 1
+			mantissa, power = body[:i], min(max(p, -limit), limit)
 		}
 	}
 	whole, frac, point := strings.Cut(mantissa, ".")
@@ -297,7 +299,7 @@ func parseDecimal(s string, scale int, exp bool) (*big.Int, error) {
 		return nil, fmt.Errorf("more than %d digits", catalog.MaxDecimalPrecision)
 	case shift >= 0:
 		digits += strings.Repeat("0", shift)
-	case -shift > len(digits) || strings.Trim(digits[len(digits)+shift:], "0") != "":
+	case shift < -len(digits) || strings.Trim(digits[len(digits)+shift:], "0") != "":
 		return nil, fmt.Errorf("more than %d digits after the point", scale)
 	default:
 		digits = digits[:len(digits)+shift]

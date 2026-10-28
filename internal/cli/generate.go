@@ -43,6 +43,10 @@ dynaflux.lock. It prints one line for each version that is new, current again or
 retained, and nothing more when no version changed. main.go imports go.out by the
 module path in the go.mod of the project root or the nearest directory above it.
 
+It writes query.yaml, the query function's template, only when a query is
+annotated -- expose: http. Otherwise it deletes the query.yaml it wrote before, and
+prints a line that says so: the deployed query stacks stay until you delete them.
+
 It leaves unchanged files alone. It won't overwrite a Go file in go.out or
 runtime.out that has no "// Code generated ... DO NOT EDIT." line, or a template
 in infra.out whose first line isn't "# Code generated ... DO NOT EDIT.". It
@@ -134,6 +138,29 @@ func (c *cli) generate(opts infra.Options, rebuild string, args []string) int {
 	for _, ch := range p.lockChanges {
 		fmt.Fprintln(&c.out, ch)
 	}
+	return c.removeQueryTemplate(root, p, outputs)
+}
+
+// removeQueryTemplate deletes the query.yaml that generate wrote before, when outputs have
+// none because no query is exposed. A query.yaml without the generated-file line isn't
+// generate's, and stays.
+func (c *cli) removeQueryTemplate(root *os.Root, p *project, outputs []output) int {
+	name := path.Join(p.cfg.Infra.Out, cloudformation.QueryTemplate)
+	if slices.ContainsFunc(outputs, func(o output) bool { return o.path == name }) {
+		return exitOK
+	}
+	old, err := root.ReadFile(name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist), err == nil && !isGeneratedTemplate(old):
+		return exitOK
+	case err == nil:
+		err = root.Remove(name)
+	}
+	if err != nil {
+		c.errorf("dynaflux generate: %v", err)
+		return exitUsage
+	}
+	fmt.Fprintf(&c.out, "%s: removed, since no query is annotated -- expose: http; delete its stack in every region\n", name)
 	return exitOK
 }
 

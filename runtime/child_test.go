@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 
 	"github.com/lucindo/dynaflux/fluxgen"
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/catalog/catalogtest"
 	"github.com/lucindo/dynaflux/internal/emulatortest"
 	"github.com/lucindo/dynaflux/internal/engine"
@@ -399,6 +400,9 @@ func TestRunRefusesToStart(t *testing.T) {
 			"runtime: AWS_LAMBDA_RUNTIME_API isn't set: the runtime binary runs only on AWS Lambda\n"},
 		{"Lambda Managed Instances", map[string]string{"AWS_LAMBDA_MAX_CONCURRENCY": "2"},
 			"runtime: AWS_LAMBDA_MAX_CONCURRENCY is 2: the projector needs on-demand Lambda, one invocation per process\n"},
+		{"query function of another catalog", map[string]string{"DYNAFLUX_MODE": "query", "DYNAFLUX_CATALOG_HASH": "0a1b"},
+			`runtime: DYNAFLUX_CATALOG_HASH is "0a1b", but the binary's catalog is ` + catalog.Hash(childCatalog(t)) +
+				": deploy query.yaml and the function from the same dynaflux generate\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

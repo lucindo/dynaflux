@@ -66,7 +66,9 @@ move versions through their states. Commands take flags with one dash, such as `
    from which the region's archive of the stream is complete
    ([§5.5](#55-when-the-archive-is-complete)). It can do that only before the stream's
    first event, and within 23 hours of the `global.yaml` deploy.
-4. Deploy the application.
+4. Deploy the application, and `query.yaml` when `generate` wrote one: it holds the query
+   function of the queries annotated `-- expose: http`
+   ([infra.md §6.6](infra.md#66-query-function)).
 
 **A changed view (a new version):**
 
@@ -77,8 +79,8 @@ move versions through their states. Commands take flags with one dash, such as `
    region at once. Start it while `dynaflux status` shows no projector lag
    ([§5.1](#51-how-events-are-split)).
 4. When `dynaflux status` shows the version `live` in every region the application reads
-   from, deploy the application. Until then the old build keeps querying the previous
-   version, which keeps running.
+   from, deploy the application and `query.yaml`. Until then the old build and the deployed
+   query function keep querying the previous version, which keeps running.
 5. Retire the previous version ([§8](#8-retiring-a-version)).
 
 **A new stream:** deploy `global.yaml`, then `regional.yaml` in every region, then run
@@ -463,6 +465,13 @@ A named query over a view reads the state of the version it targets, in the stor
   breaks the version still ends the wait, so the query then returns `ErrViewNotReady`,
   unless `AllowPartial` is set.
 
+Over HTTP, the query function answers a query over a version that isn't `live` with `503`
+`view_not_ready`, and `GET /health` answers `503` until the current version of every view
+that an exposed query reads is `live` in the region ([http.md §6](http.md#6-health)). With
+`http.domain`, a Route 53 health check of each region's `/health` takes the region out of
+the domain about 90 seconds after it turns `503`, and puts it back once it answers `200`.
+When no region is healthy, Route 53 answers with every region.
+
 The application's IAM policy needs `dynamodb:Query` on the meta table for the state read,
 which appends to a stream with a `SYNC` view make too; without it, they fail with an error
 that names the missing permission. [infra.md §9.9](infra.md#99-applications) lists what
@@ -518,8 +527,9 @@ environment:
    - no deployed catalog makes it current, so no deployed query reads it;
    - the view's current version is `live`, unless the retired one is broken;
    - no backfill job of the version is running.
-2. It warns that it can't see application builds older than the deployed catalog, which may
-   still query the version. Deploy the application first.
+2. It warns that it can't see application builds or `query.yaml` stacks older than the
+   deployed catalog, which may still query the version: a query function answers `503` for
+   it once it is retired. Deploy the application and `query.yaml` first.
 3. After confirmation, it sets the version `retired` in each region. Within 30 seconds
    projectors and `SYNC` appends stop applying it, queries return `ErrViewNotReady`, and
    its fences stop holding back any delivery unit.
@@ -571,7 +581,7 @@ CLI knows ("upgrade dynaflux").
 - **A region added later** starts with every version `pending_backfill`. Its versions are
   filled from its table: only the last `LOG RETENTION` of events. Run
   `dynaflux backfill -all -region <region>` after its regional deploy. `status` labels these
-  versions "partial".
+  versions "partial". Deploy its `query.yaml` after that backfill, as on a first deploy.
 - **A re-created regional stack** loses its meta and view tables. Its versions need a
   backfill, which reads the table.
 - **A re-created stream table** starts a new history. Versions filled afterwards don't

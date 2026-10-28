@@ -20,6 +20,7 @@ import (
 	"github.com/lucindo/dynaflux/internal/backfill"
 	"github.com/lucindo/dynaflux/internal/backfill/awsbackfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/queryhttp"
 	"github.com/lucindo/dynaflux/internal/setup/awssetup"
 	"github.com/lucindo/dynaflux/internal/store/dynamo"
 )
@@ -68,6 +69,12 @@ func Run(cat *dynaflux.Catalog) error {
 			return berr
 		}
 		lambda.Start(f)
+	case catalog.EnvModeQuery:
+		h, qerr := queryhttp.New(dynamo.New(ddb), c, queryhttp.Config{Region: e.region, Prefix: e.prefix, Log: log})
+		if qerr != nil {
+			return qerr
+		}
+		lambda.Start(h)
 	default:
 		lambda.Start(newProjector(c, e, dynamo.New(ddb), firehose.SDK{Client: fh.NewFromConfig(cfg)}, log))
 	}

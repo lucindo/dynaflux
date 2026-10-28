@@ -40,9 +40,9 @@ const (
 // topic of the AlarmTopicArn parameter, if it is set.
 func regionalTemplate(m *infra.Manifest, version string) (*resources, *yaml.Node, error) {
 	s := m.Regional
-	r := &resolver{local: map[string]bool{}, global: map[string]infra.Table{}, archiveOnly: map[string]bool{}}
+	r := &resolver{local: map[string]bool{}, remote: map[string]infra.Table{}, archiveOnly: map[string]bool{}}
 	for _, t := range m.Global.Tables {
-		r.global[t.ID] = t
+		r.remote[t.ID] = t
 	}
 	for _, id := range s.IDs() {
 		r.local[id] = true
@@ -379,9 +379,9 @@ func function(r *resolver, f infra.Function) *yaml.Node {
 	for _, k := range slices.Sorted(maps.Keys(f.Env)) {
 		env.Content = append(env.Content, str(k), r.optional(f.Env[k]))
 	}
-	tagMap := mapping()
-	for _, k := range slices.Sorted(maps.Keys(f.Tags)) {
-		tagMap.Content = append(tagMap.Content, str(k), str(f.Tags[k]))
+	var reserved *yaml.Node
+	if f.ReservedConcurrency > 0 {
+		reserved = num(f.ReservedConcurrency)
 	}
 	return resource("AWS::Serverless::Function", mapping(
 		kv("FunctionName", r.value(f.Name)),
@@ -391,10 +391,11 @@ func function(r *resolver, f infra.Function) *yaml.Node {
 		kv("Architectures", seq(str(f.Arch))),
 		kv("MemorySize", num(f.MemoryMB)),
 		kv("Timeout", num(f.TimeoutSeconds)),
+		kv("ReservedConcurrentExecutions", reserved),
 		kv("Role", r.value(f.Role)),
 		kv("LoggingConfig", mapping(kv("LogGroup", r.value(f.LogGroup)), kv("LogFormat", str("JSON")))),
 		kv("Environment", mapping(kv("Variables", env))),
-		kv("Tags", tagMap),
+		kv("Tags", tagMap(f.Tags)),
 	), kv("Metadata", mapping(kv("BuildMethod", str("go1.x")))), dependsOn(f.After...))
 }
 

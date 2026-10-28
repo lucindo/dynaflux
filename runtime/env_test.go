@@ -8,6 +8,7 @@ import (
 	"maps"
 	"testing"
 
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/runtime"
 )
 
@@ -27,6 +28,11 @@ func lambdaEnv() map[string]string {
 func TestReadEnv(t *testing.T) {
 	t.Parallel()
 	cat := compile(t, false).Catalog()
+	data, merr := catalog.Marshal(cat)
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	hash := catalog.Hash(data)
 	prod := runtime.Env{Mode: "projector", Region: region, Prefix: "prod-"}
 	tests := []struct {
 		name string
@@ -41,9 +47,9 @@ func TestReadEnv(t *testing.T) {
 		{"one invocation at a time", map[string]string{"AWS_LAMBDA_MAX_CONCURRENCY": "1"}, prod, ""},
 		{"not on Lambda", map[string]string{"AWS_LAMBDA_RUNTIME_API": ""}, runtime.Env{},
 			"runtime: AWS_LAMBDA_RUNTIME_API isn't set: the runtime binary runs only on AWS Lambda"},
-		{"no mode", map[string]string{"DYNAFLUX_MODE": ""}, runtime.Env{}, `runtime: DYNAFLUX_MODE is ""; want projector, setup or backfill`},
+		{"no mode", map[string]string{"DYNAFLUX_MODE": ""}, runtime.Env{}, `runtime: DYNAFLUX_MODE is ""; want projector, setup, query or backfill`},
 		{"unknown mode", map[string]string{"DYNAFLUX_MODE": "Projector"}, runtime.Env{},
-			`runtime: DYNAFLUX_MODE is "Projector"; want projector, setup or backfill`},
+			`runtime: DYNAFLUX_MODE is "Projector"; want projector, setup, query or backfill`},
 		{"setup", map[string]string{"DYNAFLUX_MODE": "setup"}, runtime.Env{Mode: "setup", Region: region, Prefix: "prod-"}, ""},
 		// Its requests are idempotent and write no view rows, so S9's freeze doesn't bind it.
 		{"setup on Lambda Managed Instances", map[string]string{"DYNAFLUX_MODE": "setup", "AWS_LAMBDA_MAX_CONCURRENCY": "2"},
@@ -51,7 +57,16 @@ func TestReadEnv(t *testing.T) {
 		{"setup of another store", map[string]string{"DYNAFLUX_MODE": "setup", "DYNAFLUX_STORE": "shop"}, runtime.Env{},
 			`runtime: DYNAFLUX_STORE is "shop", but the catalog's store is app: ` +
 				"deploy the templates and the function from the same dynaflux generate"},
-		{"query", map[string]string{"DYNAFLUX_MODE": "query"}, runtime.Env{}, "runtime: DYNAFLUX_MODE=query needs a later Dynaflux release"},
+		// The engine is safe for concurrent use.
+		{"query", map[string]string{"DYNAFLUX_MODE": "query", "DYNAFLUX_CATALOG_HASH": hash, "AWS_LAMBDA_MAX_CONCURRENCY": "8"},
+			runtime.Env{Mode: "query", Region: region, Prefix: "prod-"}, ""},
+		// query.yaml and the binary must come from one generate run.
+		{"query of another catalog", map[string]string{"DYNAFLUX_MODE": "query", "DYNAFLUX_CATALOG_HASH": "0a1b"}, runtime.Env{},
+			`runtime: DYNAFLUX_CATALOG_HASH is "0a1b", but the binary's catalog is ` + hash +
+				": deploy query.yaml and the function from the same dynaflux generate"},
+		{"query without the catalog's hash", map[string]string{"DYNAFLUX_MODE": "query"}, runtime.Env{},
+			`runtime: DYNAFLUX_CATALOG_HASH is "", but the binary's catalog is ` + hash +
+				": deploy query.yaml and the function from the same dynaflux generate"},
 		// A step holds three quarters of the function's memory in staged records.
 		{"backfill", map[string]string{"DYNAFLUX_MODE": "backfill", "AWS_LAMBDA_FUNCTION_MEMORY_SIZE": "3008"},
 			runtime.Env{Mode: "backfill", Region: region, Prefix: "prod-", Memory: 2_365_587_456}, ""},

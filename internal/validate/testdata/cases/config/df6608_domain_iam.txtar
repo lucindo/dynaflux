@@ -1,0 +1,27 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A SigV4 signature names one region, so auth: iam, the default, can't sit behind a domain
+whose latency records pick the region.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+http:
+  frontend: http_api
+  domain:
+    name: flux.example.com
+-- dynaflux/page_counts.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_counts
+ORDER BY (page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+-- dynaflux/queries.sql --
+-- name: PageCounts :one
+-- expose: http
+SELECT views FROM page_counts WHERE page = {page:String};
+-- want --
+dynaflux.yaml:6:5: error DF6608

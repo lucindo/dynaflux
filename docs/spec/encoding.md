@@ -672,7 +672,7 @@ that decides whether a backfill may trust the region's archive of it
 |-----------|-------|
 | `pk` | `stream#`, then the stream name: `stream#page_views`. |
 | `sk` | `!` |
-| `mode` | S: `all`, `local` or `off`, the region's archive mode for the stream as the last deploy set it ([infra.md §6.6](infra.md#66-archive-mode)). `all` exactly when the region archives every `INSERT` of the stream (§8.1). |
+| `mode` | S: `all`, `local` or `off`, the region's archive mode for the stream as the last deploy set it ([infra.md §6.7](infra.md#67-archive-mode)). `all` exactly when the region archives every `INSERT` of the stream (§8.1). |
 | `mode_at` | N: when `mode` was last written. |
 | `origin` | M, once recorded: `at` (N), `hash` (S, the `hash` of `catalog/current` then, §8.4), `registered_at` (N, that catalog's), `born` (N, the earliest `CreationDateTime` of the stream table's replicas then), `arn` (S, the stream's ARN in this region) and `holes` (N, the length of `holes` when the origin was written). |
 | `holes` | L of M, in the order written, never removed. Each has `at` (N, the writer's clock, for display only) and `cause` (S): `update` or `create` when a deploy changed the mode to or from `all`, with `from` and `to` (S, the modes); `lag` when a projector handled a record above its unit's `progress` that arrived at least 23 hours 50 minutes before; `errors` when a backfill job found an object in the error prefix that isn't readable Dynaflux records, named in `object` (S). |

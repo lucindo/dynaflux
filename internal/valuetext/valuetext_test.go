@@ -170,6 +170,10 @@ func TestParseJSONErrors(t *testing.T) {
 		{"Decimal(10, 2)", "1e-3", "invalid Decimal(10, 2): more than 2 digits after the point"},
 		{"Decimal(10, 2)", "1e99999999999999999999", "invalid Decimal(10, 2): want a decimal number, such as -12.50"},
 		{"Decimal(10, 2)", "1e40", "invalid Decimal(10, 2): more than 38 digits"},
+		// Exponents at int's limits, which the scale and the fraction's length would overflow.
+		{"Int64", "1e-9223372036854775808", "invalid Int64: want an integer"},
+		{"Decimal(10, 1)", "1e9223372036854775807", "invalid Decimal(10, 1): more than 38 digits"},
+		{"Decimal(10, 2)", "1.5e-9223372036854775808", "invalid Decimal(10, 2): more than 2 digits after the point"},
 		{"String", "1", "invalid String: want a JSON string"},
 		{"Date", "true", "invalid Date: want a JSON string"},
 		{"Float64", `"1.5"`, "invalid Float64: want a JSON number"},

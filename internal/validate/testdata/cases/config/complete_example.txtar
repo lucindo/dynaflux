@@ -2,7 +2,7 @@ Copyright 2026 The Dynaflux Authors
 SPDX-License-Identifier: Apache-2.0
 
 The complete example of config.md, over SQL that declares the streams page_views and
-debug_events and the view page_daily. Its debug_events entry turns archiving off, which
+debug_events, the view page_daily and a query annotated -- expose: http. Its debug_events entry turns archiving off, which
 the example says is a warning.
 -- dynaflux.yaml --
 store: analytics
@@ -49,8 +49,13 @@ archive:
 
 http:
   frontend: http_api                  # not default (default: function_url)
-  auth: iam                           # allowed values depend on frontend
+  auth: jwt                           # not default (default: iam); allowed values depend on frontend
   allow_public: false
+  jwt:                                # not default (default: none); with auth: jwt
+    issuer: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc
+    audience: [app-client-id]
+    scopes: [dynaflux/query]
+  max_concurrency: 100                # not default (default: none)
   domain:                             # not default (default: none)
     name: flux.example.com
     routing: latency
@@ -75,6 +80,10 @@ AS SELECT
     sum(duration_ms)         AS total_ms
 FROM page_views
 GROUP BY page, day;
+-- dynaflux/queries.sql --
+-- name: PageDays :many
+-- expose: http
+SELECT day, views FROM page_daily WHERE page = {page:String};
 -- dynaflux/debug_events.sql --
 CREATE STREAM debug_events (host String, message String)
 PRIMARY KEY (host);

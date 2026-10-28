@@ -1,0 +1,26 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A public function URL without max_concurrency can take the account's concurrency.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+http:
+  auth: none
+  allow_public: true
+-- dynaflux/page_counts.sql --
+CREATE STREAM page_views (user_id String, page String)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_counts
+ORDER BY (page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+-- dynaflux/queries.sql --
+-- name: PageCounts :one
+-- expose: http
+SELECT views FROM page_counts WHERE page = {page:String};
+-- want --
+dynaflux.yaml:4:9: warning DF6603
+dynaflux.yaml:4:9: warning DF6615

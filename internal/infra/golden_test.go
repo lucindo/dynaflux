@@ -30,40 +30,60 @@ const (
 	renders = 10
 )
 
-// TestGolden builds and renders each archive under testdata/cases:
+// TestGolden builds and renders each archive under testdata/cases and testdata/doors:
 //   - Its files, other than the want/ sections, are a project, which validate loads.
-//   - "-- want/<file> --" holds each rendered file. go test -update rewrites them; review
-//     the diff.
+//   - "-- want/<file> --" holds each rendered file. A case under testdata/doors, one per
+//     front door and auth, holds only query.yaml: its project's other files are the same
+//     for every door. go test -update rewrites them; review the diff.
 //
 // Every render of a case must give the same bytes. The cases are also the corpus that
 // TestCfnLint lints.
 func TestGolden(t *testing.T) {
 	t.Parallel()
-	paths, err := filepath.Glob("testdata/cases/*.txtar")
-	if err != nil || len(paths) == 0 {
-		t.Fatalf("no cases in testdata/cases: %v", err)
+	for _, dir := range []struct {
+		glob string
+		only string // the one file the cases pin, or all of them
+	}{{"testdata/cases/*.txtar", ""}, {"testdata/doors/*.txtar", cloudformation.QueryTemplate}} {
+		paths, err := filepath.Glob(dir.glob)
+		if err != nil || len(paths) == 0 {
+			t.Fatalf("no cases in %s: %v", dir.glob, err)
+		}
+		for _, path := range paths {
+			t.Run(strings.TrimSuffix(filepath.Base(path), ".txtar"), func(t *testing.T) {
+				t.Parallel()
+				golden(t, path, dir.only)
+			})
+		}
 	}
-	for _, path := range paths {
-		t.Run(strings.TrimSuffix(filepath.Base(path), ".txtar"), func(t *testing.T) {
-			t.Parallel()
-			data, readErr := os.ReadFile(path)
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			ar := txtar.Parse(data)
-			files := render(t, ar)
-			for range renders - 1 {
-				if again := render(t, ar); !maps.EqualFunc(files, again, bytes.Equal) {
-					t.Fatal("two renders of the same project differ")
-				}
-			}
-			if *update {
-				writeWant(t, path, ar, files)
-				return
-			}
-			checkWant(t, ar, files)
-		})
+}
+
+// golden checks the case at path, or rewrites its want/ sections with -update. When only is
+// set, the case pins that file alone.
+func golden(t *testing.T, path, only string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
+	ar := txtar.Parse(data)
+	files := render(t, ar)
+	for range renders - 1 {
+		if again := render(t, ar); !maps.EqualFunc(files, again, bytes.Equal) {
+			t.Fatal("two renders of the same project differ")
+		}
+	}
+	if only != "" {
+		pinned, ok := files[only]
+		if !ok {
+			t.Fatalf("rendered no %s", only)
+		}
+		files = map[string][]byte{only: pinned}
+	}
+	if *update {
+		writeWant(t, path, ar, files)
+		return
+	}
+	checkWant(t, ar, files)
 }
 
 // render builds the manifest of the project in ar and renders it.

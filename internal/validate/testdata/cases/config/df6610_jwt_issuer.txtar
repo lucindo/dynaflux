@@ -1,0 +1,25 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+A JWT issuer is an https:// URL.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+http:
+  frontend: http_api
+  auth: jwt
+  jwt:
+    issuer: http://idp.example.com
+    audience: [app-client-id]
+    scopes: [dynaflux/query]
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id     String,
+    page        String,
+    referrer    Nullable(String),
+    tags        Array(String),
+    duration_ms UInt32
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:7:13: error DF6610

@@ -199,9 +199,7 @@ func (q *queryCompiler) catalogQuery() catalog.Query {
 	if a, ok := nameAnnotation(q.d.node); ok && !a.Many {
 		cq.Cardinality = catalog.CardinalityOne
 	}
-	cq.ExposeHTTP = slices.ContainsFunc(q.d.node.Header().Annotations, func(a sql.Annotation) bool {
-		return a.Key == sql.AnnotationExpose && !a.Bad
-	})
+	cq.ExposeHTTP = q.d.exposed()
 	cq.Params = q.params.valid
 	if q.src != nil {
 		cq.Source = catalog.Source{Kind: q.src.kind, Name: q.src.name}

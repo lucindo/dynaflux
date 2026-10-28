@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -171,13 +172,19 @@ func templateResources(t *testing.T, name string, data []byte) *yaml.Node {
 	return value(doc.Content[0], "Resources")
 }
 
-// goldenTemplates returns the want/<file> section of each golden case, by case name.
+// goldenTemplates returns the want/<file> section of each golden case, by case name: those
+// of ../testdata/cases, and of ../testdata/doors, which hold only query.yaml.
 func goldenTemplates(t *testing.T, file string) map[string][]byte {
 	t.Helper()
-	paths, err := filepath.Glob("../testdata/cases/*.txtar")
-	if err != nil || len(paths) == 0 {
+	cases, err := filepath.Glob("../testdata/cases/*.txtar")
+	if err != nil || len(cases) == 0 {
 		t.Fatalf("no cases in ../testdata/cases: %v", err)
 	}
+	doors, err := filepath.Glob("../testdata/doors/*.txtar")
+	if err != nil || len(doors) == 0 {
+		t.Fatalf("no cases in ../testdata/doors: %v", err)
+	}
+	paths := slices.Concat(cases, doors)
 	templates := map[string][]byte{}
 	for _, path := range paths {
 		data, readErr := os.ReadFile(path)

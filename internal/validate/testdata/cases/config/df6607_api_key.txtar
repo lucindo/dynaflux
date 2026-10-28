@@ -20,9 +20,10 @@ CREATE STREAM page_views (
 PRIMARY KEY (user_id);
 -- dynaflux/queries.sql --
 -- name: RecentPageViews :many
+-- expose: http
 SELECT event_time, page
 FROM page_views
 WHERE user_id = {user:String};
 -- want --
 dynaflux.yaml:5:9: warning DF6607
-dynaflux/queries.sql:3:6: warning DF4501
+dynaflux/queries.sql:4:6: warning DF4501

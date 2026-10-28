@@ -88,3 +88,24 @@ func (c *Catalog) View(name string) (*View, bool) {
 	}
 	return &c.Views[i], true
 }
+
+// ExposedViews yields each view that a query annotated -- expose: http reads, once, by name,
+// with its current version, which such a query reads.
+func (c *Catalog) ExposedViews() iter.Seq2[*View, *ViewVersion] {
+	return func(yield func(*View, *ViewVersion) bool) {
+		var names []string
+		for _, q := range c.Queries {
+			if q.ExposeHTTP && q.Source.Kind == SourceView {
+				names = append(names, q.Source.Name)
+			}
+		}
+		slices.Sort(names)
+		for _, name := range slices.Compact(names) {
+			v, _ := c.View(name)
+			vv, _ := v.Current() // a compiled query reads its view's current version
+			if !yield(v, vv) {
+				return
+			}
+		}
+	}
+}

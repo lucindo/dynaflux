@@ -41,6 +41,9 @@ const (
 	// EnvArchiveSchema is the archive schema's fingerprint, which projectors get in the
 	// regions that archive (ADR 0008).
 	EnvArchiveSchema = "DYNAFLUX_ARCHIVE_SCHEMA"
+	// EnvCatalogHash is the hash of the catalog that generated the query function's
+	// template, which the function checks against its binary's at Init (ADR 0018).
+	EnvCatalogHash = "DYNAFLUX_CATALOG_HASH"
 )
 
 // Values of [EnvMode]: the function that the runtime binary serves.
@@ -64,4 +67,6 @@ const (
 	// MetricDivergentDuplicates counts events written twice under one dedup key with
 	// different payloads.
 	MetricDivergentDuplicates = "DivergentDuplicates"
+	// MetricQueryFailures counts the query function's answers with status 500 or 504.
+	MetricQueryFailures = "QueryFailures"
 )

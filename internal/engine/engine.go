@@ -63,6 +63,26 @@ func (e *ArchiveSizeError) Error() string {
 
 func (e *ArchiveSizeError) Unwrap() error { return ErrInvalidValue }
 
+// NotReadyError is a view version that isn't live in the engine's region. It matches
+// [ErrViewNotReady].
+type NotReadyError struct {
+	Version string
+	State   meta.State
+	Region  string
+	// Failure is the record that broke the version; nil unless State is meta.Broken.
+	Failure *meta.Failure
+}
+
+func (e *NotReadyError) Error() string {
+	msg := fmt.Sprintf("%v: %s is %s in %s", ErrViewNotReady, e.Version, e.State, e.Region)
+	if e.Failure != nil {
+		msg += ": event " + e.Failure.EventID + ": " + e.Failure.Error
+	}
+	return msg
+}
+
+func (*NotReadyError) Unwrap() error { return ErrViewNotReady }
+
 func invalid(name string, err error) error {
 	return &ValueError{Name: name, Err: fmt.Errorf("%w: %w", ErrInvalidValue, err)}
 }

@@ -68,6 +68,10 @@ func Build(cfg *config.Config, cat *catalog.Catalog, opts Options) (*Manifest, e
 		return nil, err
 	}
 	m.Regional.Dashboards = []Dashboard{dashboard}
+	m.Query = b.query()
+	if len(m.Query.Domains) > 0 {
+		m.Domain = cfg.HTTP.Domain.Name
+	}
 	m.Prefix = Prefix{Default: cfg.Prefix, MaxLen: b.maxLen}
 	if b.archiveOnly {
 		m.ArchiveRegions = archiveRegions

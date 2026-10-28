@@ -1283,8 +1283,8 @@ func waitControls() []control {
 		{
 			ID:      "C104", // a wait checks readiness with the cached states
 			File:    "internal/engine/query.go",
-			Old:     "e.ready(ctx, cat, q.viewID, waiting)",
-			New:     "e.ready(ctx, cat, q.viewID, false)",
+			Old:     "e.Ready(ctx, cat, q.viewID, waiting)",
+			New:     "e.Ready(ctx, cat, q.viewID, false)",
 			Test:    "TestWaitReadsTheStateAgain",
 			Package: "./internal/engine",
 		},

@@ -41,6 +41,7 @@ func TestResolve(t *testing.T) {
 			text:    "${ref:Setup.arn}",
 			wantErr: "infra: ${ref:Setup.arn}: Resolve resolves references to tables, buckets, delivery streams, archive workgroups and roles only",
 		},
+		{text: "${domain}", wantErr: "infra: ${domain}: a deployment has no value for ${domain}"},
 		{
 			text:    "${ref:FirehosePageViews.stream_arn_pattern}",
 			wantErr: "infra: ${ref:FirehosePageViews.stream_arn_pattern}: a firehose resource doesn't provide stream_arn_pattern",

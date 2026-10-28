@@ -168,6 +168,45 @@ func snapshot(t *testing.T, dir string) map[string][]byte {
 	return files
 }
 
+// generate writes query.yaml while a query is exposed, and deletes its own copy once none is.
+// A query.yaml that generate didn't write stays.
+func TestGenerateQueryTemplate(t *testing.T) {
+	t.Parallel()
+	const query = "infra/dynaflux/query.yaml"
+	dir := writeProject(t, "generate/exposed")
+	if got := run(dir, "generate"); got.status != 0 || got.stdout != "" {
+		t.Fatalf("generate with an exposed query: %+v", got)
+	}
+	if data := snapshot(t, dir)[query]; !strings.HasPrefix(string(data), yamlHeader) {
+		t.Fatalf("%s after generate:\n%s\nwant a generated template", query, data)
+	}
+	sql := filepath.Join(dir, "dynaflux", "queries.sql")
+	data, err := os.ReadFile(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(sql, []byte(strings.Replace(string(data), "-- expose: http\n", "", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const removed = query + ": removed, since no query is annotated -- expose: http; delete its stack in every region\n"
+	if got := run(dir, "generate"); got.status != 0 || got.stdout != removed {
+		t.Errorf("generate without an exposed query: %+v, want stdout %q", got, removed)
+	}
+	if _, ok := snapshot(t, dir)[query]; ok {
+		t.Errorf("%s is still there", query)
+	}
+	own := []byte("AWSTemplateFormatVersion: \"2010-09-09\"\n")
+	if err = os.WriteFile(filepath.Join(dir, filepath.FromSlash(query)), own, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(dir, "generate"); got.status != 0 || got.stdout != "" {
+		t.Errorf("generate beside someone's query.yaml: %+v", got)
+	}
+	if got := snapshot(t, dir)[query]; string(got) != string(own) {
+		t.Errorf("someone's %s became:\n%s", query, got)
+	}
+}
+
 // -rebuild gives the current definition a new version once; the next run keeps it.
 func TestGenerateRebuild(t *testing.T) {
 	t.Parallel()

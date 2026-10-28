@@ -30,7 +30,7 @@ Every other key is optional. SQL files are read from `dynaflux/**/*.sql`.
 
 `store` and `regions` are required. Every other key shows its default unless the comment
 says `not default`. The example assumes the SQL files declare the streams `page_views` and
-`debug_events` and the view `page_daily`.
+`debug_events`, the view `page_daily`, and a query annotated `-- expose: http`.
 
 ```yaml
 store: analytics
@@ -77,8 +77,13 @@ archive:
 
 http:
   frontend: http_api                  # not default (default: function_url)
-  auth: iam                           # allowed values depend on frontend
+  auth: jwt                           # not default (default: iam); allowed values depend on frontend
   allow_public: false
+  jwt:                                # not default (default: none); with auth: jwt
+    issuer: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc
+    audience: [app-client-id]
+    scopes: [dynaflux/query]
+  max_concurrency: 100                # not default (default: none)
   domain:                             # not default (default: none)
     name: flux.example.com
     routing: latency
@@ -154,7 +159,7 @@ The **Used by** column names who reads each value. `validate` checks every key.
 | `explain` | The cost model of `dynaflux explain` (M1). |
 | `catalog` | Resolved into the catalog that the generated code embeds and the runtime reads (M2). |
 | `codegen` | The Go files that `dynaflux generate` writes (M2). |
-| `infra` | The generated CloudFormation/SAM templates ([infra.md](infra.md); HTTP front doors in M6). |
+| `infra` | The generated CloudFormation/SAM templates ([infra.md](infra.md)). |
 | `names` | The [resource names](#resource-names). The operator commands find resources by these names. |
 
 A clause in SQL always wins over a config default: `MODE` over `defaults.view_mode`, and
@@ -322,15 +327,31 @@ How each placement affects backfills is in [lifecycle.md §5.2](lifecycle.md#52-
 
 ### `http`
 
-These settings apply only to named queries annotated `-- expose: http`. Direct Lambda invoke
-with IAM always works, whatever the settings.
+These settings apply only to named queries annotated `-- expose: http`. Without such a query,
+`dynaflux generate` writes no `query.yaml` and an `http` section warns (`DF6612`). Direct
+Lambda invoke of the query function with IAM always works for the exposed queries, whatever
+the settings. [http.md](http.md) is the wire format and what each `auth` asks of a caller.
+
+`auth` decides who can call, not which rows they read: any caller that passes it can read
+every row an exposed query reaches, with any parameters. Expose only queries whose rows
+every caller may see, and serve per-user reads through your own service.
 
 | Key | Type | Default | Rules | Used by |
 |-----|------|---------|-------|---------|
 | `http.frontend` | string | `function_url` | The front door: `function_url` (Lambda function URL), `http_api` (API Gateway HTTP API) or `rest_api` (API Gateway REST API) (`DF6009`). | `infra` |
 | `http.auth` | string | `iam` | A value the front door supports (`DF6009`, `DF6601`; see the table below). `none` needs `allow_public: true` (`DF6602`) and then warns (`DF6603`). `api_key` warns (`DF6607`). | `infra` |
 | `http.allow_public` | boolean | `false` | Confirms `auth: none`. With any other `auth` it has no effect (`DF6604`). | `validate` |
-| `http.domain` | mapping | none | Only with `http_api` or `rest_api` (`DF6605`). | `infra` |
+| `http.jwt` | mapping | none | With `auth: jwt`, required (`DF6008`). Settings for another `auth` warn (`DF6609`), as do those below. | `infra` |
+| `http.jwt.issuer` | string | required (`DF6008`) | The token issuer's `https://` URL (`DF6610`), such as `https://cognito-idp.<region>.amazonaws.com/<pool-id>`. | `infra` |
+| `http.jwt.audience` | list of strings | required (`DF6008`) | 1 to 50 entries (`DF6011`, `DF6610`), no repeats (`DF6012`). A token passes when its `aud`, or `client_id` without `aud`, is one of them. | `infra` |
+| `http.jwt.scopes` | list of strings | none | At most 10 (`DF6610`). A token must carry one of them. Without it, any ID or access token for the audience passes (`DF6613`). | `infra` |
+| `http.authorizer.function` | string | required with `auth: lambda` (`DF6008`) | The name of a Lambda authorizer function, 1 to 64 letters, digits, `-` and `_` (`DF6611`), that exists under this name in every region. | `infra` |
+| `http.cognito.user_pool_arn` | string | required with `auth: cognito` (`DF6008`) | A Cognito user pool ARN (`DF6611`). | `infra` |
+| `http.cognito.scopes` | list of strings | none | Access tokens that carry one of them pass. With `app_clients` too, it warns (`DF6616`). | `infra` |
+| `http.cognito.app_clients` | list of strings | none | ID tokens whose `aud` is one of these app client IDs pass. Without `scopes` and `app_clients`, every user of the pool passes, from any app client (`DF6614`). | `infra` |
+| `http.usage_plan` | mapping | none | With `auth: api_key`: the limits of the usage plan, `rate` (requests a second), `burst` and `quota_per_day`, each a positive integer (`DF6010`) and optional, but `rate` and `burst` go together (`DF6008`): API Gateway reads a missing one as 0, which refuses requests. API Gateway applies them on a best-effort basis. | `infra` |
+| `http.max_concurrency` | integer | none | At least 1 (`DF6010`). The query function's reserved concurrency in each region: it can't take more of the account's concurrent executions, and always has these. A reservation fails the deploy when the account's unreserved concurrency would drop below 100. `auth: none` without it warns (`DF6615`). | `infra` |
+| `http.domain` | mapping | none | Only with `http_api` or `rest_api` (`DF6605`), and not with `auth: iam` (`DF6608`). | `infra` |
 | `http.domain.name` | string | required (`DF6008`) | A lowercase DNS name: at least two labels, each 1 to 63 letters, digits or `-`, not starting or ending with `-`, 253 characters at most (`DF6606`). | `infra` |
 | `http.domain.routing` | string | `latency` | `latency`: Route 53 latency records across the regions, so one hostname serves every region and fails over (`DF6009`). | `infra` |
 
@@ -340,9 +361,13 @@ with IAM always works, whatever the settings.
 | `http_api` | `iam`, `jwt` (Cognito or any OIDC provider), `lambda` (Lambda authorizer) |
 | `rest_api` | `iam`, `api_key` (API keys with usage plans), `lambda`, `cognito` (Cognito user pool) |
 
-The settings that `jwt`, `lambda`, `cognito` and `api_key` need (issuer, authorizer
-function, user pool, usage plan limits), and the custom domain's certificate, are specified
-with the HTTP query endpoints in M6.
+- `auth: iam` can't be combined with `http.domain`: a SigV4 signature names one region,
+  and the domain's latency records can send the request to another (`DF6608`). Use `jwt` or
+  `lambda`, or call each region's own endpoint.
+- The settings of an `auth` are required only when the front door supports it: with
+  `DF6601`, they aren't checked for presence.
+- API keys are created outside the templates ([http.md §8.4](http.md#84-api-keys)).
+- [infra.md §6.6](infra.md#66-query-function) lists what each front door and `auth` deploy.
 
 ## SQL file patterns
 
@@ -407,6 +432,7 @@ length of `store`.
 | Projector function, `split: stream` | `{prefix}{store}-projector-{stream}` | `prod-analytics-projector-page_views` | Lambda function name | P + stream ≤ 53 |
 | Setup function | `{prefix}{store}-setup` | `prod-analytics-setup` | Lambda function name | P ≤ 58 |
 | Query function | `{prefix}{store}-query` | `prod-analytics-query` | Lambda function name | P ≤ 58 |
+| HTTP or REST API, and a REST API's usage plan | `{prefix}{store}-query` | `prod-analytics-query` | HTTP API name: 128 characters | P ≤ 122 |
 | Backfill function | `{prefix}{store}-backfill` | `prod-analytics-backfill` | Lambda function name | P ≤ 55 |
 | Backfill state machine | `{prefix}{store}-backfill` | `prod-analytics-backfill` | Step Functions: 80 characters; only `A-Z a-z 0-9 _ -` for CloudWatch Logs logging | P ≤ 71 |
 | S3 bucket (per region) | `{prefix}{store}-{account}-{region}-an` | `prod-analytics-123456789012-us-east-1-an` | S3 bucket in the account regional namespace: 3 to 63 characters from `a-z 0-9 . -`, and no prefix that S3 reserves (`DF6112`); see the [bucket naming rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html) | P + region ≤ 46, for every region in `regions` |
@@ -496,8 +522,8 @@ dynaflux.yaml:15:14: error DF6010: runtime.memory_mb is 64; it must be between 1
    exists (`DF6002`, `DF6013`). It stops on an error.
 4. Read and check the SQL files ([sql.md](sql.md)), then run the checks that need both:
    `DF6110` for names that include a stream or view, `DF6403`, `DF6407`, `DF6503`,
-   `DF6504`, `DF6505`, and `DF6015`, which also needs the lock. These use every name the
-   SQL defines, even in a statement with errors.
+   `DF6504`, `DF6505`, `DF6612`, and `DF6015`, which also needs the lock. These use every
+   name the SQL defines, even in a statement with errors.
 
 `dynaflux generate` runs the same steps, checks the size of the catalog (`DF6019`), then
 compares its output with the templates it wrote last time: `DF6016` to `DF6018`
@@ -574,6 +600,15 @@ such as `status` and `backfill`, are in [lifecycle.md §12](lifecycle.md#12-diag
 | DF6605 | error | `http.domain` is set with `frontend: function_url`. | Function URLs have no custom domain option. Use `frontend: http_api` for one hostname across regions. |
 | DF6606 | error | `http.domain.name` isn't a valid DNS name. | Use lowercase labels of letters, digits and `-`, such as `flux.example.com`. |
 | DF6607 | warning | `http.auth: api_key`. AWS advises against using API keys for authentication or authorization: they identify clients for usage plans. | Use `iam`, `lambda` or `cognito` to control access. |
+| DF6608 | error | `http.domain` with `http.auth: iam`, the default. A SigV4 signature names one region, and latency routing can send the request to another. | Use another `auth`, such as `jwt` or `lambda`, or remove `http.domain` and call each region's own endpoint. |
+| DF6609 | warning | `http.jwt`, `http.authorizer`, `http.cognito` or `http.usage_plan` is set, but `http.auth` isn't the one it configures (`jwt`, `lambda`, `cognito`, `api_key`). | Remove it. |
+| DF6610 | error | `http.jwt.issuer` isn't an `https://` URL, or `http.jwt.audience` has more than 50 entries, or `http.jwt.scopes` more than 10. | Use the issuer's `https://` URL; list at most 50 audiences and 10 scopes. |
+| DF6611 | error | `http.authorizer.function` isn't a Lambda function name, or `http.cognito.user_pool_arn` isn't a user pool ARN. | Use the name of a function in every region, or the pool's ARN. |
+| DF6612 | warning | An `http` section, but no query is annotated `-- expose: http`, so no front door is generated. Points at `http`. | Annotate a query with `-- expose: http`, or remove the section. |
+| DF6613 | warning | `http.auth: jwt` without `http.jwt.scopes`: any ID or access token for the audience passes, since API Gateway can't tell them apart. | Set `http.jwt.scopes`, and give callers access tokens that carry one. |
+| DF6614 | warning | `http.auth: cognito` with neither `http.cognito.scopes` nor `http.cognito.app_clients`: every user of the pool, from any app client, is authorized. | Set `scopes` or `app_clients`. |
+| DF6615 | warning | `http.auth: none` without `http.max_concurrency`: anyone with the URL can take the account's concurrent executions in the region, which the projectors share. | Set `http.max_concurrency`, such as 50. |
+| DF6616 | warning | `http.auth: cognito` with both `http.cognito.scopes` and `http.cognito.app_clients`: with scopes, API Gateway takes only access tokens, which carry no `aud` for `app_clients` to match, so it may refuse every caller ([infra.md §16](infra.md#16-to-be-confirmed-on-aws)). | Set one of them. The resource server's app client settings already decide which clients get a scope. |
 
 ## Implementation notes
 

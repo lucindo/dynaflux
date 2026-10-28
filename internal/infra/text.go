@@ -15,6 +15,9 @@ import (
 //	${region}         the region the scope is deployed in
 //	${account}        the AWS account ID
 //	${partition}      the AWS partition, such as aws
+//	${url_suffix}     the domain of the partition's endpoints, such as amazonaws.com
+//	${domain}         the custom domain of the query scope, chosen at deploy time
+//	${hosted_zone}    the ID of the Route 53 hosted zone of ${domain}, chosen at deploy time
 //	${ref:ID.ATTR}    attribute ATTR of the resource with ID
 //
 // References are the dependency graph: a renderer creates or updates a referenced
@@ -29,6 +32,9 @@ const (
 	PlaceholderRegion           = "region"
 	PlaceholderAccount          = "account"
 	PlaceholderPartition        = "partition"
+	PlaceholderURLSuffix        = "url_suffix"
+	PlaceholderDomain           = "domain"
+	PlaceholderHostedZone       = "hosted_zone"
 )
 
 // Ref is a reference to attribute Attr of the resource with ID.
@@ -40,7 +46,9 @@ type Ref struct {
 // Attributes that resources provide to references. Every kind with a name provides
 // AttrName, and every kind with an ARN AttrARN. A stream table provides AttrStreamARNPattern,
 // which matches its streams in IAM policies. A stream lookup provides only AttrStreamARN, a
-// mapping only AttrUUID, and an archive schema only AttrFingerprint.
+// mapping only AttrUUID, an archive schema only AttrFingerprint, and a function URL only
+// AttrURL. The resources of API Gateway and Route 53 that AWS identifies by an ID provide
+// AttrID, and a custom domain AttrRegionalName and AttrRegionalZone.
 const (
 	AttrName             = "name"
 	AttrARN              = "arn"
@@ -48,6 +56,10 @@ const (
 	AttrStreamARN        = "stream_arn"
 	AttrUUID             = "uuid"
 	AttrFingerprint      = "fingerprint"
+	AttrURL              = "url"
+	AttrID               = "id"
+	AttrRegionalName     = "regional_name"
+	AttrRegionalZone     = "regional_zone"
 )
 
 // Segment is a part of a [Text]: literal text, a placeholder or a reference. Exactly one
@@ -87,7 +99,8 @@ func (t Text) Segments() ([]Segment, error) {
 
 func segment(inner string) (Segment, error) {
 	switch inner {
-	case PlaceholderPrefix, PlaceholderPrefixUnderscore, PlaceholderRegion, PlaceholderAccount, PlaceholderPartition:
+	case PlaceholderPrefix, PlaceholderPrefixUnderscore, PlaceholderRegion, PlaceholderAccount, PlaceholderPartition,
+		PlaceholderURLSuffix, PlaceholderDomain, PlaceholderHostedZone:
 		return Segment{Placeholder: inner}, nil
 	}
 	target, ok := strings.CutPrefix(inner, "ref:")

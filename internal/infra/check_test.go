@@ -11,8 +11,9 @@ import (
 	"github.com/lucindo/dynaflux/internal/infra"
 )
 
-// validManifest meets every invariant. Table names are its only texts, so they carry the
-// references under test: Meta refers across scopes to the stream table, which is allowed.
+// validManifest meets every invariant. Table names carry most references under test: Meta
+// refers across scopes to the stream table, which is allowed, as the query role's reference
+// to it is.
 func validManifest() *infra.Manifest {
 	return &infra.Manifest{
 		Store:          "analytics",
@@ -79,6 +80,29 @@ func validManifest() *infra.Manifest {
 				Body: `{"widgets":[{"type":"metric","properties":{"region":"${region}","title":"${prefix}analytics"}}]}`,
 			}},
 		},
+		Query: infra.Scope{
+			Roles: []infra.Role{{Common: infra.Common{ID: "RoleQuery"}, Statements: []infra.Statement{
+				{Sid: "Tables", Resources: []infra.Text{"${ref:StreamPageViews.arn}"}},
+			}}},
+			Functions:    []infra.Function{{Common: infra.Common{ID: "Query"}, Name: "query", Role: "${ref:RoleQuery.arn}", LogGroup: "logs"}},
+			FunctionURLs: []infra.FunctionURL{{Common: infra.Common{ID: "QueryUrl"}, Function: "${ref:Query.arn}"}},
+			Permissions: []infra.Permission{{
+				Common: infra.Common{ID: "PermissionUrl"}, Function: "${ref:Query.name}",
+				SourceARN: "arn:${partition}:execute-api:${region}:${account}:${ref:Api.id}/authorizers/${ref:Authorizer.id}",
+			}},
+			APIs: []infra.API{{
+				Common: infra.Common{ID: "Api"}, Name: "api", Function: "${ref:Query.arn}", Authorizer: &infra.Authorizer{ID: "Authorizer"},
+				Stage: infra.Stage{ID: "Stage", Name: "api", LogGroup: "logs"},
+			}},
+			Domains: []infra.Domain{{
+				Common: infra.Common{ID: "Domain"}, Name: "${domain}", Certificate: "certificate", API: "${ref:Api.id}", Stage: "${ref:Stage.name}",
+			}},
+			LatencyRecords: []infra.LatencyRecord{{
+				Common: infra.Common{ID: "LatencyRecord"}, Name: "${domain}", HostedZone: "${hosted_zone}",
+				Target: "${ref:Domain.regional_name}", TargetZone: "${ref:Domain.regional_zone}", HealthCheck: "check",
+			}},
+			Outputs: []infra.Output{{Name: "QueryEndpoint", Value: "${ref:QueryUrl.url}"}},
+		},
 	}
 }
 
@@ -143,6 +167,44 @@ func TestCheck(t *testing.T) {
 		{
 			"global resource refers to a regional one", func(m *infra.Manifest) { m.Global.Tables[0].Name = "${ref:Meta.name}" },
 			"StreamPageViews name refers to Meta across scopes",
+		},
+		{
+			"query role refers to a regional table", func(m *infra.Manifest) { m.Query.Roles[0].Statements[0].Resources[0] = "${ref:Meta.arn}" },
+			"",
+		},
+		{
+			"query role refers to a regional function",
+			func(m *infra.Manifest) { m.Query.Roles[0].Statements[0].Resources[0] = "${ref:Setup.arn}" },
+			"RoleQuery statement Tables refers to Setup across scopes",
+		},
+		{
+			"regional alarm watches the query function",
+			func(m *infra.Manifest) { m.Regional.Alarms[0].Metrics[0].Dimensions[0].Value = "${ref:Query.name}" },
+			"AlarmErrorsSetup dimension FunctionName refers to Query across scopes",
+		},
+		{
+			"output refers to a missing resource", func(m *infra.Manifest) { m.Query.Outputs[0].Value = "${ref:Gateway.url}" },
+			"QueryEndpoint value refers to Gateway, which doesn't exist",
+		},
+		{
+			"output reads an attribute its resource lacks", func(m *infra.Manifest) { m.Query.Outputs[0].Value = "${ref:Query.url}" },
+			"QueryEndpoint value refers to Query.url, but a function has only name, arn",
+		},
+		{
+			"permission for a missing function", func(m *infra.Manifest) { m.Query.Permissions[0].Function = "${ref:Reader.name}" },
+			"PermissionUrl function refers to Reader, which doesn't exist",
+		},
+		{
+			"permission for a missing authorizer", func(m *infra.Manifest) { m.Query.APIs[0].Authorizer = nil },
+			"PermissionUrl source ARN refers to Authorizer, which doesn't exist",
+		},
+		{
+			"API stage with a resource's ID", func(m *infra.Manifest) { m.Query.APIs[0].Stage.ID = "Query" },
+			"ID Query is used twice",
+		},
+		{
+			"latency record targets the API", func(m *infra.Manifest) { m.Query.LatencyRecords[0].Target = "${ref:Api.regional_name}" },
+			"LatencyRecord target refers to Api.regional_name, but a REST or HTTP API has only id",
 		},
 		{
 			"unknown substitution", func(m *infra.Manifest) { m.Global.Tables[0].Name = "${stage}analytics" },
@@ -260,6 +322,11 @@ func TestCheck(t *testing.T) {
 			"dashboard uses ${prefix_}",
 			func(m *infra.Manifest) { m.Regional.Dashboards[0].Body = `{"region":"${prefix_}"}` },
 			"Dashboard body: has ${prefix_}",
+		},
+		{
+			"dashboard uses the deploy-time domain",
+			func(m *infra.Manifest) { m.Regional.Dashboards[0].Body = `{"title":"${domain}"}` },
+			"Dashboard body: has ${domain}",
 		},
 	}
 	for _, tt := range tests {

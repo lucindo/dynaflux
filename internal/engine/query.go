@@ -321,7 +321,7 @@ func (e *Engine) Query(ctx context.Context, cat *Catalog, name string, params []
 		}
 	}
 	if q.view != nil && !o.AllowPartial {
-		if err := e.ready(ctx, cat, q.viewID, waiting); err != nil {
+		if err := e.Ready(ctx, cat, q.viewID, waiting); err != nil {
 			return nil, fmt.Errorf("dynaflux: query %s: %w", name, err)
 		}
 	}
@@ -335,10 +335,10 @@ func (e *Engine) Query(ctx context.Context, cat *Catalog, name string, params []
 	return rows, nil
 }
 
-// ready returns nil when view version id is live in the engine's region, by the cached
-// states or, when fresh is set, states read now, and otherwise an error that matches
-// ErrViewNotReady and names the state, with a broken version's failure.
-func (e *Engine) ready(ctx context.Context, cat *Catalog, id string, fresh bool) error {
+// Ready returns nil when view version id is live in the engine's region, by the cached
+// states that Query reads or, when fresh is set, states read now, and otherwise a
+// *[NotReadyError].
+func (e *Engine) Ready(ctx context.Context, cat *Catalog, id string, fresh bool) error {
 	states, err := e.stateCache(e.naming(cat).MetaTable()).States(ctx, fresh)
 	if err != nil {
 		return err
@@ -347,11 +347,12 @@ func (e *Engine) ready(ctx context.Context, cat *Catalog, id string, fresh bool)
 	if vs.State == meta.Live {
 		return nil
 	}
-	if vs.State == meta.Broken {
-		return fmt.Errorf("%w: %s is broken in %s: event %s: %s", ErrViewNotReady, id, e.region, vs.Failure.EventID, vs.Failure.Error)
-	}
 	// A version without a state item is pending.
-	return fmt.Errorf("%w: %s is %s in %s", ErrViewNotReady, id, cmp.Or(vs.State, meta.PendingBackfill), e.region)
+	nr := &NotReadyError{Version: id, State: cmp.Or(vs.State, meta.PendingBackfill), Region: e.region}
+	if vs.State == meta.Broken {
+		nr.Failure = vs.Failure
+	}
+	return nr
 }
 
 // stateCache returns the cache of the view states in meta table.

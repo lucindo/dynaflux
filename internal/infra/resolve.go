@@ -16,8 +16,8 @@ type Deployment struct {
 
 // Resolve returns t as deployment d reads it, references included, as IAM sees a policy
 // statement. It resolves references to tables, buckets, delivery streams, archive workgroups
-// and roles only, and fails on any other. CloudFormation names a role when it creates it, so
-// a role's ID stands in for its name.
+// and roles only, and fails on any other, and on the placeholders that d has no value for.
+// CloudFormation names a role when it creates it, so a role's ID stands in for its name.
 func (m *Manifest) Resolve(t Text, d Deployment) (string, error) {
 	segs, err := t.Segments()
 	if err != nil {
@@ -27,7 +27,11 @@ func (m *Manifest) Resolve(t Text, d Deployment) (string, error) {
 	for _, s := range segs {
 		switch {
 		case s.Placeholder != "":
-			b.WriteString(d.value(s.Placeholder))
+			v, ok := d.value(s.Placeholder)
+			if !ok {
+				return "", fmt.Errorf("infra: %s: a deployment has no value for ${%s}", t, s.Placeholder)
+			}
+			b.WriteString(v)
 		case s.Ref != Ref{}:
 			v, rerr := m.resolveRef(s.Ref, d)
 			if rerr != nil {
@@ -41,24 +45,26 @@ func (m *Manifest) Resolve(t Text, d Deployment) (string, error) {
 	return b.String(), nil
 }
 
-func (d Deployment) value(placeholder string) string {
+func (d Deployment) value(placeholder string) (string, bool) {
 	switch placeholder {
 	case PlaceholderPrefix:
-		return d.Prefix
+		return d.Prefix, true
 	case PlaceholderPrefixUnderscore:
-		return strings.ReplaceAll(d.Prefix, "-", "_")
+		return strings.ReplaceAll(d.Prefix, "-", "_"), true
 	case PlaceholderRegion:
-		return d.Region
+		return d.Region, true
 	case PlaceholderAccount:
-		return d.Account
+		return d.Account, true
+	case PlaceholderPartition:
+		return d.Partition, true
 	}
-	return d.Partition // Segments accepts no other placeholder
+	return "", false
 }
 
 func (m *Manifest) resolveRef(ref Ref, d Deployment) (string, error) {
 	var name Text
 	var service, resource string
-	for _, s := range []*Scope{&m.Global, &m.Regional} {
+	for _, s := range m.scopes() {
 		if i := slices.IndexFunc(s.Tables, func(t Table) bool { return t.ID == ref.ID }); i >= 0 {
 			name, service, resource = s.Tables[i].Name, "dynamodb", "table/"
 		}

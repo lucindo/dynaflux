@@ -34,6 +34,7 @@ const (
 const (
 	sidLogs            = "Logs"
 	sidMeta            = "Meta"
+	sidViews           = "Views"
 	condStringEquals   = "StringEquals"
 	condStringLike     = "StringLike"
 	s3GetObject        = "s3:GetObject"
@@ -50,6 +51,7 @@ const (
 	dynamoGetItem      = "dynamodb:GetItem"
 	dynamoBatchGetItem = "dynamodb:BatchGetItem"
 	dynamoPutItem      = "dynamodb:PutItem"
+	dynamoQuery        = "dynamodb:Query"
 )
 
 // regional returns the regional scope: the meta table and a table per view version, the
@@ -165,6 +167,8 @@ type function struct {
 	timeoutSeconds int
 	// memoryMB is the function's memory; 0 means runtime.memory_mb.
 	memoryMB int
+	// reserved is the function's reserved concurrency; 0 reserves nothing.
+	reserved int
 	// env holds the environment variables besides those of every function.
 	env map[string]Text
 	// statements are the role's statements besides the one for the log group, and managed
@@ -203,19 +207,20 @@ func (b *builder) addFunction(s *Scope, f function) {
 	s.LogGroups = append(s.LogGroups, logs)
 	s.Roles = append(s.Roles, role)
 	s.Functions = append(s.Functions, Function{
-		Common:         Common{ID: f.id, Tags: f.tags},
-		Name:           name,
-		Mode:           f.mode,
-		Role:           ref(role.ID, AttrARN),
-		LogGroup:       ref(logs.ID, AttrName),
-		Runtime:        FunctionRuntime,
-		Handler:        FunctionHandler,
-		Arch:           string(b.cfg.Runtime.Arch),
-		MemoryMB:       cmp.Or(f.memoryMB, b.cfg.Runtime.MemoryMB),
-		TimeoutSeconds: f.timeoutSeconds,
-		Code:           b.code,
-		Env:            env,
-		After:          f.after,
+		Common:              Common{ID: f.id, Tags: f.tags},
+		Name:                name,
+		Mode:                f.mode,
+		Role:                ref(role.ID, AttrARN),
+		LogGroup:            ref(logs.ID, AttrName),
+		Runtime:             FunctionRuntime,
+		Handler:             FunctionHandler,
+		Arch:                string(b.cfg.Runtime.Arch),
+		MemoryMB:            cmp.Or(f.memoryMB, b.cfg.Runtime.MemoryMB),
+		TimeoutSeconds:      f.timeoutSeconds,
+		ReservedConcurrency: f.reserved,
+		Code:                b.code,
+		Env:                 env,
+		After:               f.after,
 	})
 }
 
@@ -248,7 +253,7 @@ func (b *builder) projector(id, name, owner string, streams ...catalog.Stream) f
 		metaBatchStatement(),
 	}
 	if len(viewARNs) > 0 {
-		statements = append(statements, Statement{Sid: "Views", Actions: []string{dynamoBatchGetItem, dynamoGetItem, dynamoPutItem}, Resources: viewARNs})
+		statements = append(statements, Statement{Sid: sidViews, Actions: []string{dynamoBatchGetItem, dynamoGetItem, dynamoPutItem}, Resources: viewARNs})
 	}
 	if len(archiveARNs) > 0 {
 		statements = append(statements, Statement{Sid: "Archive", ArchiveOnly: b.archiveOnly, Actions: []string{"firehose:PutRecordBatch"}, Resources: archiveARNs})
