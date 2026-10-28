@@ -166,7 +166,7 @@ split can't change.
 ## Consequences
 
 - The first deploy's `dynaflux backfill -all` records origins, and so does the one after a
-  new stream. A stream younger than 23 hours without an origin gets a warning (DF7217), and
+  new stream. A stream younger than 23 hours without an origin gets a warning (DF7218), and
   `dynaflux import` refuses to seed one (DF7406): after its first event, no origin can be
   proven and every later version backfills from the table.
 - `status` reports suspected gaps and incomplete archives (DF7204) with the affected

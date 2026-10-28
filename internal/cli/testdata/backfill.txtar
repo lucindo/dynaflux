@@ -381,7 +381,7 @@ us-east-1  page_seen@v1  apply  2000/3000 applied  200/s  ETA 5s
 us-east-1  page_seen@v1  live
 -- want/young_stream_with_an_event.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
-us-east-1: warning DF7217: the table of stream signups is less than 23 hours old and has no origin in us-east-1, which archives it with events: all; it holds events already, so the archive of it there is never complete
+us-east-1: warning DF7218: the table of stream signups is less than 23 hours old and has no origin in us-east-1, which archives it with events: all; it holds events already, so the archive of it there is never complete
   hint: backfills there read the table; to keep a new stream's whole history, run dynaflux backfill -all after the deploy that adds it, before its first event
 A new job activates its version, which can't be undone: its source and split are fixed for its life.
 -- want/young_stream_with_an_event.stdout --

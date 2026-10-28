@@ -87,7 +87,7 @@ move versions through their states. Commands take flags with one dash, such as `
 `dynaflux backfill -all`, then deploy the application that writes to it. Run `backfill`
 within 23 hours of the `global.yaml` deploy, so that it records the stream's origin in each
 region that archives it with `events: all` ([§5.5](#55-when-the-archive-is-complete)).
-`status` warns until it has (DF7217).
+`status` warns until it has (DF7218).
 
 **A new region:** see [§10](#10-regions-and-environments).
 
@@ -340,7 +340,7 @@ every region; it prints "nothing to fill" when there is none. `-region` limits t
 First, `backfill` records every origin it can ([§5.5](#55-when-the-archive-is-complete)):
 with `-all`, of each stream; otherwise, of the streams of the versions it names. It prints a
 line for each, and with `-all` warns about a stream table less than 23 hours old that still
-has none (DF7217), saying why: a deploy under way, the wait after a deploy's hole, or an
+has none (DF7218), saying why: a deploy under way, the wait after a deploy's hole, or an
 event already in the table. An origin only records a fact, so `backfill` doesn't ask first.
 A read of the archive's history that fails doesn't stop the plan where the job doesn't need
 it: `backfill` reports it and exits 2, and with `-source table` starts the job.
@@ -403,7 +403,7 @@ of its meta table ([encoding.md §8.5](encoding.md#85-stream-item),
   and holds no event. From then on, the region archives every event the stream gets. A
   stream that got its first event before its origin was recorded never gets one, and its
   versions read the table. `status` warns about a stream younger than 23 hours without an
-  origin (DF7217), and `dynaflux import` refuses to write to one that could still record
+  origin (DF7218), and `dynaflux import` refuses to write to one that could still record
   one (DF7406). A stream table, or its replica or stream in the region, re-created voids the
   origin there; a new one can be recorded while the new table is fresh. A region that leaves
   the store doesn't void the others' origins.
@@ -630,7 +630,9 @@ others print `<region>: <severity> <code>: <message>` and a `hint:` line. Severi
 there is an error or an operation was refused, 2 for usage, I/O and AWS access problems, or
 a region that couldn't be read. A part of a region that `status` can't read, such as its
 mappings, metrics, executions, gaps or the completeness of its archive, exits with 2 too,
-and the findings read from the meta table still print. Codes are stable as in [config.md](config.md).
+and the findings read from the meta table still print. Codes are stable as in
+[config.md](config.md): a code that no command reports any more stays in the table as
+`retired`.
 
 | Code | Severity | Meaning |
 |------|----------|---------|
@@ -658,7 +660,8 @@ and the findings read from the meta table still print. Codes are stable as in [c
 | DF7209 | error | `status`: projectors block on a version their catalog doesn't know (guard 2); the hint names the build to deploy and the time records start to be lost. |
 | DF7210 | warning | `status`: the archive is stale, or rows failed. |
 | DF7216 | warning | `status`: a backfill is interrupted (its execution ended without finishing). |
-| DF7217 | warning | `status`, `backfill -all`, `import`: a stream table is less than 23 hours old and has no origin in a region that archives it with `events: all`; run `backfill -all` before its first event, or the region's archive of it is never complete ([§5.5](#55-when-the-archive-is-complete)). `backfill -all` says why it recorded none, and `import` warns of a table that holds an event already, whose archive is never complete. |
+| DF7217 | retired | Was: `status`: a backfill waits for the archive read of a later release. Retired in M6, when backfills read the archive. |
+| DF7218 | warning | `status`, `backfill -all`, `import`: a stream table is less than 23 hours old and has no origin in a region that archives it with `events: all`; run `backfill -all` before its first event, or the region's archive of it is never complete ([§5.5](#55-when-the-archive-is-complete)). `backfill -all` says why it recorded none, and `import` warns of a table that holds an event already, whose archive is never complete. |
 | DF7301 | error | `retire`: the version isn't `retained` or `retired` in the lock. |
 | DF7302 | error | `retire`: a deployed catalog makes the version current. |
 | DF7303 | error | `retire`: the view's current version isn't `live` in a region. |
@@ -673,3 +676,4 @@ and the findings read from the meta table still print. Codes are stable as in [c
 | DF7502 | error | `backfill`: the version is broken or retired. |
 | DF7503 | error | `backfill`: `-source archive`, but the region's archive of the stream isn't complete (the rule that failed, [§5.5](#55-when-the-archive-is-complete)). |
 | DF7504 | error | `backfill -cancel`: the version has no running job to cancel. |
+| DF7505 | retired | Was: `backfill`: the version's job waits for the archive read of a later release. Retired in M6, when backfills read the archive. |

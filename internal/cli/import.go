@@ -363,7 +363,7 @@ func (c *cli) checkClock(d *deployment) int {
 // checkOrigins refuses to import into s while its table is less than 23 hours old and a
 // region that archives it with events: all has no origin of it, and could still record one
 // (DF7406): replication carries an imported event to every region, which ends the time to
-// record one there. A region whose replica holds an event already can't: it gets DF7217. prefix
+// record one there. A region whose replica holds an event already can't: it gets DF7218. prefix
 // is the -prefix flag for the hint. DynamoDB Local has no archive.
 func (c *cli) checkOrigins(d *deployment, s *catalog.Stream, prefix string) int {
 	if d.clients.tables == nil || s.Archive == nil || s.Archive.Events != catalog.ArchiveEventsAll {

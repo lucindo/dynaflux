@@ -512,7 +512,7 @@ func TestImportYoungStreamWithEvents(t *testing.T) {
 			nil, &stdout, &stderr, s.dir, s.env())
 		want := result{0, "3 events: 3 stored, 0 already present, 0 conflicting\n", "store shop  prefix (none)  account 123456789012  region us-east-1\n" +
 			ingestWarning +
-			"us-east-1: warning DF7217: the table of stream page_views is less than 23 hours old and has no origin in us-east-1, which archives it with events: all; " +
+			"us-east-1: warning DF7218: the table of stream page_views is less than 23 hours old and has no origin in us-east-1, which archives it with events: all; " +
 			"it holds events already, so the archive of it there is never complete\n" +
 			"  hint: backfills there read the table; to keep a new stream's whole history, run dynaflux backfill -all after the deploy that adds it, before its first event\n" +
 			viewsPlan}

@@ -358,7 +358,7 @@ func (p *regionPlanner) recordOrigins(targets []string) {
 	}
 }
 
-// missingOrigins adds DF7217 for each stream that the region archives with events: all and
+// missingOrigins adds DF7218 for each stream that the region archives with events: all and
 // whose table is less than 23 hours old, where recordOrigins found no origin and recorded none.
 func (p *regionPlanner) missingOrigins() {
 	for _, s := range p.d.cat.Streams {

@@ -777,7 +777,7 @@ us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:0
   backfill plan_counts@v2: running, attempt 1, phase apply, 0 of 0 records applied; rate no limit; archive source, split by fences; execution running
 -- want/lag_without_an_origin.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
-us-east-1: warning DF7217: the table of stream signups is less than 23 hours old and has no origin in us-east-1, which archives it with events: all
+us-east-1: warning DF7218: the table of stream signups is less than 23 hours old and has no origin in us-east-1, which archives it with events: all
   hint: run dynaflux backfill -all -region us-east-1 before 2000-01-01T22:00:00Z and before the stream's first event; otherwise the archive of it in us-east-1 is never complete
 us-east-1: warning DF7204: a gap is suspected in stream signups: a projector handled a record almost 24 hours old at 2000-01-01T01:00:00Z; plan_counts@v1 may miss its records
   hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts
@@ -1178,7 +1178,7 @@ us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:0
     unit shardId-0003: no progress
 -- want/young_stream_without_an_origin.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
-us-east-1: warning DF7217: the table of stream signups is less than 23 hours old and has no origin in us-east-1, which archives it with events: all
+us-east-1: warning DF7218: the table of stream signups is less than 23 hours old and has no origin in us-east-1, which archives it with events: all
   hint: run dynaflux backfill -all -region us-east-1 before 2000-01-01T22:00:00Z and before the stream's first event; otherwise the archive of it in us-east-1 is never complete
 -- want/young_stream_without_an_origin.stdout --
 version         us-east-1

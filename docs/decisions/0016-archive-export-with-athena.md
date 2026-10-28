@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # ADR 0016: A backfill reads the archive with sliced Athena `UNLOAD`s, after a `DataFreshness` watermark, plus the error prefix
 
 - Status: Accepted. Amends [ADR 0011](0011-backfill-coordinator.md), whose decision
-  stands: the `backfill.Archive` seam is reshaped, and the job item's `stage` gains the
-  archive fields.
+  stands: the `backfill.Archive` seam is reshaped, the job item's `stage` gains the
+  archive fields, and its `waits` goes, since no job waits for a later release.
 - Date: 2026-10-27
 
 ## Context

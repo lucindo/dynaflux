@@ -117,7 +117,7 @@ func prefixFlag(p optionalString) string {
 	return " -prefix " + cmp.Or(p.value, `""`)
 }
 
-// noOrigin is DF7217 for stream, whose table, born at born, is less than 23 hours old and has
+// noOrigin is DF7218 for stream, whose table, born at born, is less than 23 hours old and has
 // no origin in region, which archives it with events: all. st says why backfill -all recorded
 // none, when it tried; prefix is the -prefix flag.
 func noOrigin(region, stream string, born time.Time, st backfill.OriginStatus, prefix string) finding {
@@ -136,11 +136,11 @@ func noOrigin(region, stream string, born time.Time, st backfill.OriginStatus, p
 		hint = fmt.Sprintf("a deploy in %s is under way: %s again once it registered its catalog, %s", region, run, before)
 	case backfill.OriginRecorded, backfill.OriginHeld:
 	}
-	return regionFinding(region, diag.SeverityWarning, "DF7217", msg, hint)
+	return regionFinding(region, diag.SeverityWarning, "DF7218", msg, hint)
 }
 
 // archiveFindings returns what needs an action in the history of stream s in the region:
-// DF7217 when its table is less than 23 hours old and has no origin; DF7204 when its archive
+// DF7218 when its table is less than 23 hours old and has no origin; DF7204 when its archive
 // isn't complete, for the versions activating from it; and DF7204 for each gap suspected in
 // the views applied live, for the versions activated before it that no finding named yet.
 func (r *regionStatus) archiveFindings(s streamStatus, prefix string, now time.Time) []finding {
