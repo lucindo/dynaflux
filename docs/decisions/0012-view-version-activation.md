@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 - Status: Accepted. Amends [ADR 0004](0004-runtime-storage-boundary.md), whose decision stands:
   `retire` no longer deletes fences.
 - Date: 2026-10-26
+- Amended by [ADR 0017](0017-archive-completeness.md): §4's stream origin is recorded in a
+  stream item, with archive holes and gap evidence
 
 ## Context
 

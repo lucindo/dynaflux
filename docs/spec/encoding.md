@@ -57,14 +57,14 @@ Every table has a string partition key `pk` and a string sort key `sk`
 | Stream (Global Table) | events | `PRIMARY KEY` fields (§3.2), plus a shard suffix with `SHARDS` | `event_time` and `event_id` |
 | View version (regional) | rows | `PRIMARY KEY` fields | the remaining `ORDER BY` fields, plus a `SPLIT` suffix; `!` when there are none |
 | | `uniqExact` markers | `!` and a hash (§7.4) | `!` |
-| Meta (regional, one per store) | units, view states, backfill jobs, the deployed catalog (§8); M6 adds others | §8 | §8 |
+| Meta (regional, one per store) | units, view states, backfill jobs, the deployed catalog, stream items and wait receipts (§8) | §8 | §8 |
 
 Attribute names:
 
 - A stream's payload columns and a view's key and aggregate columns are stored under their
   own names. `validate` reserves `pk` and `sk` for them.
 - Every other attribute name starts with `_`. Names used now: `_r`, `_it`, `_ttl`, `_v`,
-  `_hwm`, `_o`. Reserved for later: `_ver` (consistent streams) and `_sync` (`SYNC` views).
+  `_hwm`, `_o`, `_sync` and `_rcpt`. Reserved for later: `_ver` (consistent streams).
 - Requests always pass attribute names through `ExpressionAttributeNames`, so a column named
   after a DynamoDB reserved word works.
 
@@ -309,9 +309,11 @@ DynamoDB's rule about TTL values more than five years in the past never applies.
 |-----------|-------|
 | `pk`, `sk` | §2 and §3: `sk` is `event_time` (`DateTime64(6)`, 27 bytes), `#`, then `event_id` (26 bytes). |
 | one per declared column | The column's value (§5.1), key columns included. |
-| `_r` | S: `origin_region`, such as `us-east-1`. |
+| `_r` | S: `origin_region`, the region of the append that wrote the event, by its canonical name, such as `us-east-1`; never a FIPS pseudo-region such as `fips-us-east-1` ([ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md)). |
 | `_it` | N: `ingest_time` in microseconds. |
 | `_ttl` | `ingest_time` plus `LOG RETENTION` (calendar units clamp to the end of the month), as §5.4. None with `LOG RETENTION FOREVER`. |
+| `_sync` | L of S: the IDs of the `SYNC` view versions that the append's transaction applied with the event, sorted ([sql.md §9.7](sql.md#97-mode)). Absent when there are none. |
+| `_rcpt` | BOOL, true: the append asked for a receipt with `dynaflux.Waitable()` (§8.6). Absent otherwise. |
 
 - `event_time` and `event_id` are read from `sk`.
 - A reader hides an event from `_ttl` − 3600 seconds on (§5.4), and never hides one
@@ -319,7 +321,20 @@ DynamoDB's rule about TTL values more than five years in the past never applies.
 - Attributes that are neither declared columns nor reserved names are ignored (§1).
 - The payload of an event is its declared columns. A `MODIFY` record whose old and new
   payloads decode to different values is a divergent duplicate
-  ([sql.md §8.5](sql.md#85-dedup-by)); `_r` and `_it` are not compared.
+  ([sql.md §8.5](sql.md#85-dedup-by)); `_r`, `_it`, `_ttl`, `_sync` and `_rcpt` are not
+  compared.
+- Only the projector of region `_r` reads `_sync` and `_rcpt`. For an `INSERT` it skips each
+  version that `_sync` names, before its fence and time-split checks, and ignores IDs it
+  doesn't know; it writes the receipt for `_rcpt` (§8.6). Projectors of other regions ignore
+  both: they never ran the transaction. A `_sync` that isn't an L of S breaks every active
+  version of the stream that the record reaches, in region `_r` only, since only the writer
+  knows which versions it applied (§1).
+- `_sync` is reserved for Dynaflux appends. An item that another writer puts with it, such
+  as a copy tool or items put again from an export, makes the projector of region `_r` skip
+  those versions for that event for good: a change record doesn't show whether a
+  transaction wrote the item.
+- The archive carries neither `_sync` nor `_rcpt`
+  ([infra.md §7.3](infra.md#73-tables-and-columns)).
 - The whole item, with attribute names, must fit DynamoDB's 400 KB item limit
   ([item size][itemsize]).
 
@@ -409,10 +424,17 @@ which record introduced it.
   count one value. Fixed widths, no separators:
   - live projection: `L` + unit key (13) + sequence number (40)
   - backfill: `B` + unit key (13) + sequence number (40)
-  - `SYNC` appends (M6): `E` + `event_id` (26)
+  - `SYNC` appends: `E` + `event_id` (26)
 - **Counting:** a record's values are first deduplicated per (record, row, value). Missing
-  markers are written only if absent. A value counts when its marker's owner is the
-  record's owner string, including a marker that the same record wrote in an earlier attempt.
+  markers are written only if absent. Live projection and a backfill count a value when its
+  marker's owner is the record's owner string, including a marker that the same record
+  wrote in an earlier attempt.
+- **Counting in a `SYNC` append:** a value counts only when its marker was absent when the
+  append read it, and the append's transaction writes the marker. A present marker never
+  counts, whatever its owner. An earlier attempt's marker committed with its event, which
+  the event's own condition then finds. A present `E` marker with the append's `event_id`
+  belongs to a `DEDUP BY` event appended again after its item expired, and its value is
+  already counted.
 
 ### 7.5 Sketches
 
@@ -489,6 +511,9 @@ which record introduced it.
   (§8.1) is at or above the entry and whose `progress_at` is more than
   [`runtime.prune_window_seconds`](config.md#runtime) in the past. The `B` entry is never
   removed; it is one entry.
+- A `SYNC` append's transaction writes a row with `_hwm` as it read it, `B` included, and
+  adds no entry: the event and its rows commit together, so the event's presence records
+  that they hold it. The next projector write of the row prunes as usual.
 - An entry costs 13 bytes of name plus about 10 bytes of value and 1 byte of map overhead
   ([item size][itemsize]).
 
@@ -496,7 +521,8 @@ which record introduced it.
 
 - A row's expiry depends only on its key, so its items and markers share one `_ttl`.
 - The projector skips a contribution to a row that has expired by its own clock, so an
-  expired row never comes back.
+  expired row never comes back. A `SYNC` append does the same by its writer's clock, and
+  still names the version in `_sync` (§6).
 
 ### 7.8 Size bound
 
@@ -526,13 +552,14 @@ with an alarm, never the view's breaker, and pruning (§7.6) heals it.
 
 ## 8. Meta items
 
-These are the items of the projector, the backfill and the operator commands. M6 adds
-stream items and wait receipts. Meta items are read-modify-written whole, conditional on
-`_v` (§7.1); a catalog body (§8.4) is written once and never changes. Each kind of item
-has partitions of its own, so the projector's query of the `view` partition never meets
-another kind. Times are N values in Unix microseconds, rounded up to the microsecond, so a
-stored deadline or activation time is never earlier than the real one, and a wait measured
-from it is never short. `_ttl` is the exception: it is in seconds (§5.4).
+These are the items of the projector, the backfill, the operator commands and wait tokens.
+Meta items are read-modify-written whole, conditional on `_v` (§7.1); a catalog body (§8.4)
+is written once and never changes, and a receipt (§8.6) is written without a condition.
+Each kind of item has partitions of its own, so the projector's query of the `view`
+partition never meets another kind. Times are N values in Unix microseconds, rounded up to
+the microsecond, so a stored deadline or activation time is never earlier than the real
+one, and a wait measured from it is never short. `_ttl` is the exception: it is in seconds
+(§5.4).
 
 ### 8.1 Unit item
 
@@ -605,16 +632,15 @@ it stays after the job ends.
 | `read_after` | N, with the table source: the earliest time the scan may start. With the time split it is `split_late` plus the clock margin (60 s), otherwise `activated_at` plus the listing delay (90 s). |
 | `scanned_at` | N, with the table source: when the scan ended. The version holds every event from that time less the stream's `LOG RETENTION` and an hour ([lifecycle.md §5.2](lifecycle.md#52-sources)). |
 | `fresh` | BOOL, once `done`: whether the fresh-stream rule made the version live ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)). |
-| `staging` | S: the staging prefix in the region's bucket, `backfill/<version>/<created_at>/`. |
-| `stage` | M: where staging resumes. With the table source: `segments` (N, the scan's segment count), `next` (M, a segment number → M with the `pk` and `sk` of the last item staged from it), `finished` (L of N, the segments read to their end). The archive source's fields come with the archive read (M6). |
-| `runs` | L of M: the committed runs, each with `name` (S), `records` (N), and `first` and `last` (B, the marks of its first and last records, as §7.6's `B` value). A run in the staging prefix that this list doesn't name is garbage. With the archive source, a staged run's name ends with `-f<n>`: the committed runs hold the export's first n files in full, and staging resumes at file n (until M6 adds the archive's fields to `stage`). |
+| `staging` | S: the staging prefix in the region's bucket, `backfill/<version>/<created_at>/`. With the archive source it also holds the slice plan, `plan-<attempt>-<random>`, and each try of a slice's export, `unload/<plan>/<from>-<to>/<try>/` ([ADR 0016](../decisions/0016-archive-export-with-athena.md)). |
+| `stage` | M: where staging resumes. With the table source: `segments` (N, the scan's segment count), `next` (M, a segment number → M with the `pk` and `sk` of the last item staged from it), `finished` (L of N, the segments read to their end). With the archive source, where a field that is zero, empty or false is absent: `plan_query` (S, the ID of the Athena query that lists the table's partitions, saved before the job waits for it), `plan` (S, the name of the committed plan object), `export` (M, the current try of the slice being staged: `from` and `to`, N in microseconds, `try` N, `failed` N, the slice's failed tries that count against its three, and `id` S, the query ID, saved before the job waits for it and absent until the try starts), `slice` (N, the index in the plan of the slice being staged; the slices before it are staged), `query` (S, that slice's succeeded query, whose manifest lists its files), `file` and `skip` (N, the manifest index of the file being staged and the rows already staged from it), `rows` (N, the rows staged from the slice, for its integrity check), `errors` (M: `after` S, the last object of the error prefix staged; `done` BOOL; `foreign` N, the lines skipped because Dynaflux didn't write them), `scanned` (N, the bytes Athena scanned for the job) and `tries` (N, the tries that failed and the restages, in all, which the token of the partitions' listing counts). |
+| `runs` | L of M: the committed runs, each with `name` (S), `records` (N), and `first` and `last` (B, the marks of its first and last records, as §7.6's `B` value). A run in the staging prefix that this list doesn't name is garbage. A run never spans a commit of `stage`. |
 | `merge` | M, during a merge pass: `inputs` (L of S, the run names), `outputs` (L, as `runs`), `mark` (B, the last mark written). |
 | `staged` | N: records staged. |
 | `mark` | B, as §7.6's `B` value: the cursor, the mark of the last record of the last completed chunk. Absent before the first chunk completes. |
 | `applied`, `skipped`, `chunks` | N: the records applied and skipped, and the chunks completed. |
 | `rate` | N: the most records per second to apply, 0 for no limit. |
 | `paused` | BOOL, true while apply waits for the projector's lag to fall under 2.5 minutes ([lifecycle.md §5.4](lifecycle.md#54-jobs)). Absent otherwise. |
-| `waits` | S, with the archive source at `watermark`: `archive_read` when the job waits for the archive read of a later release, which a stream that got an event before the fresh check needs ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)); no step runs it until then, and a claim of the job removes it. Absent otherwise. |
 | `error` | M, the last failure: `phase` (S), `message` (S, cut to at most 1,024 bytes), `at` (N). |
 | `_v` | N, as §7.1. |
 | `_ttl` | 400 days after the job became `done` or `broken`, as §5.4. None while `running` or `cancelled`. |
@@ -634,6 +660,63 @@ A reader gets `current`, then the body, with consistent `GetItem`s, decompresses
 16 MiB, checks the hash and decodes the catalog. `generate` refuses a catalog whose gzip
 passes 350,000 bytes (DF6019 in [config.md](config.md#codes)), so a body fits DynamoDB's
 400 KB item limit.
+
+### 8.5 Stream item
+
+One per stream, in each region: the region's archive mode for the stream, and the history
+that decides whether a backfill may trust the region's archive of it
+([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete),
+[ADR 0017](../decisions/0017-archive-completeness.md)).
+
+| Attribute | Value |
+|-----------|-------|
+| `pk` | `stream#`, then the stream name: `stream#page_views`. |
+| `sk` | `!` |
+| `mode` | S: `all`, `local` or `off`, the region's archive mode for the stream as the last deploy set it ([infra.md §6.6](infra.md#66-archive-mode)). `all` exactly when the region archives every `INSERT` of the stream (§8.1). |
+| `mode_at` | N: when `mode` was last written. |
+| `origin` | M, once recorded: `at` (N), `hash` (S, the `hash` of `catalog/current` then, §8.4), `registered_at` (N, that catalog's), `born` (N, the earliest `CreationDateTime` of the stream table's replicas then), `arn` (S, the stream's ARN in this region) and `holes` (N, the length of `holes` when the origin was written). |
+| `holes` | L of M, in the order written, never removed. Each has `at` (N, the writer's clock, for display only) and `cause` (S): `update` or `create` when a deploy changed the mode to or from `all`, with `from` and `to` (S, the modes); `lag` when a projector handled a record above its unit's `progress` that arrived at least 23 hours 50 minutes before; `errors` when a backfill job found an object in the error prefix that isn't readable Dynaflux records, named in `object` (S). |
+| `checked_through` | N, once set: how far the last passing check of projector activity reached. |
+| `unchecked_before` | N, once set: the hours since the origin before it went unchecked, since CloudWatch kept no hourly data that old when a passing check started. |
+| `_v` | N, as §7.1. |
+
+- There is no `_ttl`. The item is written whole, conditional on `_v`, so the order of
+  `holes` is the order of the writes.
+- An origin counts only the holes at an index at or after its own `holes`. No rule compares
+  `origin.at` with a hole's `at`: they come from the clocks of different hosts.
+- A deploy writes `mode` and its hole in one write, before any function changes. A stream
+  without a stream item gets one with its mode and no hole. A projector or a job adds a
+  `lag` or `errors` hole only to an item that exists, and only when none of its cause
+  counts against the origin yet: without an item, there is no origin for it to count
+  against.
+- An origin is written when there is none, or when the one there is void: its `arn` is no
+  longer the stream's ARN in this region, as when the table, its replica here or its stream
+  was re-created. A change of `born` alone, as when the oldest replica's region leaves,
+  doesn't void it. The holes of a void origin stay, at indexes before the new one's.
+
+### 8.6 Receipt
+
+One per event appended with `dynaflux.Waitable()`, in the append's region, written by that
+region's projector once it has handled the event's record
+([sql.md §9.7](sql.md#97-mode), [ADR 0015](../decisions/0015-wait-tokens-and-receipts.md)).
+
+| `pk` | `sk` | Attributes |
+|------|------|------------|
+| `rcpt#<stream>#<event_id>#<_it>` | `!` | `_ttl` (N): the write time plus 25 hours, in Unix seconds. |
+
+- `<_it>` is the stored event's `_it`, in microseconds. It ties the receipt to one stored
+  record: a `DEDUP BY` event appended again after its item expired has the same
+  `event_id`, and the older receipt, which TTL may delete late, would otherwise answer for
+  the new record.
+- The projector writes it for each `INSERT` with `_rcpt` whose `_r` is its own region,
+  once it has raised `progress` past the record: for records below the batch's lowest
+  failed record, and for those at or below `progress` that a redelivery holds. A record
+  that reaches no version, a fenced one or one whose versions `_sync` names, gets one
+  too: a receipt means the record was handled. A receipt that fails to write fails its
+  record, and the redelivery writes it.
+- Its 25 hours outlive every change record, which DynamoDB keeps for 24 hours, so a
+  missing receipt always means "not yet".
+- `WaitFor` reads receipts with consistent `BatchGetItem`s. The projector never reads them.
 
 ## 9. Determinism rules
 

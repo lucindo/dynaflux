@@ -11,6 +11,9 @@ SPDX-License-Identifier: Apache-2.0
   sending a reserve before the context's deadline
 - Amended by [ADR 0012](0012-view-version-activation.md): `retire` deletes no fence; the
   catalog's list of retired versions settles them
+- Amended by [ADR 0014](0014-sync-views-in-the-append-transaction.md): `Transact`,
+  `ErrConflict` and `ErrThrottled`; the DynamoDB backend sets a transaction's token and
+  resends it while the outcome is unknown
 
 ## Context
 

@@ -62,7 +62,10 @@ move versions through their states. Commands take flags with one dash, such as `
 3. Run `dynaflux backfill -all -yes`. On a store that has no events yet, every version
    becomes `live` in about two minutes in a region that archives the stream with
    `archive.events: all` (the default), and in about 30 minutes in other regions
-   ([§4.3](#43-fresh-streams)).
+   ([§4.3](#43-fresh-streams)). In those regions it also records each stream's origin,
+   from which the region's archive of the stream is complete
+   ([§5.5](#55-when-the-archive-is-complete)). It can do that only before the stream's
+   first event, and within 23 hours of the `global.yaml` deploy.
 4. Deploy the application.
 
 **A changed view (a new version):**
@@ -79,7 +82,10 @@ move versions through their states. Commands take flags with one dash, such as `
 5. Retire the previous version ([§8](#8-retiring-a-version)).
 
 **A new stream:** deploy `global.yaml`, then `regional.yaml` in every region, then run
-`dynaflux backfill -all`, then deploy the application that writes to it.
+`dynaflux backfill -all`, then deploy the application that writes to it. Run `backfill`
+within 23 hours of the `global.yaml` deploy, so that it records the stream's origin in each
+region that archives it with `events: all` ([§5.5](#55-when-the-archive-is-complete)).
+`status` warns until it has (DF7217).
 
 **A new region:** see [§10](#10-regions-and-environments).
 
@@ -90,12 +96,20 @@ AWS but with bounds for one host: an idempotent version is `live` in about a sec
 additive one about 7 seconds after its activation. It runs what `dynaflux generate` wrote
 and refuses to start while `generate` would change `dynaflux.lock`. A projector about 6
 seconds behind during an activation breaks the version ([§5.1](#51-how-events-are-split)).
+It uses the first region of `regions`, applies `SYNC` views and writes wait receipts as on
+AWS, and refuses an event appended in another region: give the application that region.
 
 **Rolling back:** don't roll a regional stack back past a version that is `activating` or
 `live` in that region. The older build can't apply the version, so the version's stream
 stops in that region until a build that defines it is deployed again
 ([§4.1](#41-guards)). A rollback doesn't undo a retire: a version that a deploy retired
 stays `retired` ([§8](#8-retiring-a-version)).
+
+**`SYNC` views and older builds:** builds before M6 don't skip the versions that an
+append's transaction applied, so they would apply those events a second time
+([§4.4](#44-sync-views)). Deploy `regional.yaml` before an application that appends to a
+stream with a `SYNC` view, as above, and don't roll a regional stack back to such a build
+while that application runs.
 
 ## 3. View-version states
 
@@ -176,9 +190,10 @@ end.
 
 A stream that has never held an event has nothing to backfill. When `dynaflux backfill`
 finds a stream table empty and less than 23 hours old, and the region archives the stream
-with `archive.events: all`, the job of an additive version uses the archive source, and
-makes its version `live` right after fencing, without reading the archive, when all of these
-hold:
+with `archive.events: all`, it records the stream's origin in the region
+([§5.5](#55-when-the-archive-is-complete)), and the job uses the archive source. The job
+makes its version `live` right after fencing, without reading the archive, when all of
+these hold:
 
 - every fence it wrote or found is zero: no delivery unit had recorded progress;
 - the stream table is less than 23 hours old when the check ends, counting from the
@@ -189,17 +204,29 @@ Every event is kept for at least one day after it was written, so a table younge
 23 hours has lost none. An empty replica then proves that no event has ever passed through
 the region's change stream, and every later event is applied live. This takes about two
 minutes, most of it the 90-second wait. If the application wrote an event before the job's
-check, the job must read the archive, which comes in a later release *(M6)*. Until then the
-job waits: its execution ends without the `backfill-failed` alarm, the version stays
-`activating`, `status` reports DF7217, and `backfill` refuses to resume the job (DF7505). To
-fill the view sooner, rebuild it ([§7.3](#73-rebuilding-a-version)): the new version reads
-the table. An idempotent version reads the table of a fresh stream too, unless
-`-source archive` asks: it goes live as soon from an empty table, and needs no archive when
-an event comes first.
+check, the job reads the archive instead ([§5.3](#53-staging)), which takes minutes more.
 
-Other regions, and streams that aren't fresh, use the table source. A scan of an empty
-table finds nothing, but with the time split ([§5.1](#51-how-events-are-split)) the job
-still waits about 28 minutes before that scan.
+A region whose archive of the stream isn't complete uses the table source. A scan of an
+empty table finds nothing, but with the time split ([§5.1](#51-how-events-are-split)) the
+job still waits about 28 minutes before that scan.
+
+### 4.4 `SYNC` views
+
+An append to a stream with a `SYNC` view applies, in its transaction, the view's versions
+that it reads as `live`, and records them on the event. The projector of the append's
+region skips exactly those versions for that event; other regions apply it as usual
+([sql.md §9.7](sql.md#97-mode),
+[ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md)).
+
+- A backfill job makes a version `live` only after it applied its whole part. So an event
+  that an append applied came after the job: above every fence and after every table
+  scan. The job never meets it, and the archive needs no record of it.
+- An append whose states are older than the version's `live` (they can be 30 seconds old),
+  an append whose build defines the view as `ASYNC`, and an import leave the version to
+  the projector, as for an `ASYNC` view.
+- `retire` stops appends from applying a version within 30 seconds, as it stops projectors
+  ([§8](#8-retiring-a-version)).
+- Builds before M6 don't skip what appends applied: see [§2](#2-deploying-changes).
 
 ## 5. Backfill
 
@@ -245,19 +272,25 @@ version is activated and kept for its life:
 
 | Source | Holds | Used when |
 |--------|-------|-----------|
-| The region's **archive** | Every event since the region's archive began | An additive version, or one that `-source archive` names, of a stream that is fresh and that the region archives with `archive.events: all` ([§4.3](#43-fresh-streams)). Reading the archive of a stream that has events *(M6)*. |
+| The region's **archive** | Every event since the region's archive began | The region's archive of the stream is complete ([§5.5](#55-when-the-archive-is-complete)), unless `-source table` asks for the table. |
 | The region's **stream table** replica | Events inside the stream's `LOG RETENTION` | Otherwise |
 
 `-source table|archive` chooses for a new job; `backfill` refuses `archive` when the
-conditions above fail, and says which. A version that is already `activating` keeps the
-source it was activated with, and `-source` can't change it, nor that of a running job. A
-job resumed before its version was activated takes the source that the region serves then.
+archive isn't complete, and names the rule that failed (DF7503). With `-source table` on a
+complete archive, it notes that the table covers only the stream's `LOG RETENTION`. A
+version that is already `activating` keeps the source it was activated with, and `-source`
+can't change it, nor that of a running job. A job resumed before its version was activated
+takes the source that the region serves then.
 
 A table source holds only the events inside the stream's log window. Events older than
 that are gone from the table, and the version never counts them. `status` labels such a
 version "partial since <date>", the time its history starts, and queries serve it like any
 `live` version. Regions whose tables differ in age can then answer the same
 query differently.
+
+A region reads only its own archive and its own table. A region that doesn't archive a
+stream with `events: all` fills its versions from its table, even when another region
+archives every event.
 
 ### 5.3 Staging
 
@@ -267,21 +300,50 @@ a chunk at a time. The bucket deletes staged files 30 days after they were writt
 their older versions after one day. A job that finds a staged file gone stages again; this
 is safe, only slower.
 
-*(M6)* From the archive, the job reads the region's Iceberg table with Athena, plus the
-records Firehose couldn't deliver (under `errors/firehose/<stream>/` in the bucket), once
-Firehose has delivered every record written before the cut, the time the last fence was
-written.
+From the archive, the job first waits until Firehose has delivered every record it took
+before the cut, the time the last fence was written. The data freshness of the stream's
+Firehose stream, in CloudWatch, shows when, with a minute to spare for clocks. When
+Firehose holds nothing, the job waits until 2 hours 30 minutes after the cut instead, which
+covers Firehose's retries. CloudWatch forgets the metric of a stream that had no records
+for 14 days, and without it the job can't tell that Firehose is empty: append one event, or
+use `-source table`. `status` says why a job waits. Then the job
+([ADR 0016](../decisions/0016-archive-export-with-athena.md)):
+
+1. Reads the records that Firehose couldn't deliver, under `errors/firehose/<stream>/` in
+   the bucket. An object there that doesn't hold Dynaflux records, such as the file list of
+   an Iceberg commit that failed, makes the region's archive of the stream incomplete for
+   good ([§5.5](#55-when-the-archive-is-complete)). The job fails, naming the object, and
+   the version needs a rebuild from the table ([§7.3](#73-rebuilding-a-version)), since
+   its split can't change.
+2. Lists the days of the region's Iceberg table with Athena, and plans slices of days of up
+   to about 25 GB of Parquet each.
+3. Exports one slice at a time with Athena's `UNLOAD` into its staging prefix, and stages
+   each slice as it succeeds. A slice that times out is halved, down to one hour. Each try
+   of a slice writes to a new prefix, and the job reads only the files that the succeeded
+   query lists.
+
+Athena reads every column of the days it exports, at $5 per TB of Parquet: about $25 per
+region and job for a year at 1,000 events per second. `status` shows the bytes a job
+scanned. After its last read of the archive, and again before it makes the version `live`,
+the job checks that the archive is still complete, and fails as above when it isn't.
 
 ### 5.4 Jobs
 
 `dynaflux backfill <view>[@v<N>]` starts one job per region, in parallel. Without `@v<N>`
 it fills the version `dynaflux.lock` makes current; a region whose deployed catalog doesn't
 have it yet is refused with a hint to deploy `regional.yaml` there. `-all` starts a job for
-every version that isn't `live`, `broken` or `retired` and whose job wasn't cancelled and
-doesn't wait ([§4.3](#43-fresh-streams)), in every region; it prints "nothing to fill" when
-there is none. `-region` limits the regions.
+every version that isn't `live`, `broken` or `retired` and whose job wasn't cancelled, in
+every region; it prints "nothing to fill" when there is none. `-region` limits the regions.
 
-Before it writes anything, `backfill` prints what it will do in each region: start, resume
+First, `backfill` records every origin it can ([§5.5](#55-when-the-archive-is-complete)):
+with `-all`, of each stream; otherwise, of the streams of the versions it names. It prints a
+line for each, and with `-all` warns about a stream table less than 23 hours old that still
+has none (DF7217), saying why: a deploy under way, the wait after a deploy's hole, or an
+event already in the table. An origin only records a fact, so `backfill` doesn't ask first.
+A read of the archive's history that fails doesn't stop the plan where the job doesn't need
+it: `backfill` reports it and exits 2, and with `-source table` starts the job.
+
+Before it changes any job, `backfill` prints what it will do in each region: start, resume
 or leave a job, with its source and split. Starting a job can't be undone: the version
 never returns to `pending_backfill`, and its source and split are fixed for its life. So
 `backfill` asks before it starts a job; `-yes` answers for it, which a script needs.
@@ -289,16 +351,17 @@ Resuming, cancelling and changing the rate don't ask.
 
 | Option | Effect |
 |--------|--------|
-| `-watch` | Follow the jobs: phase, records applied, rate, estimated time left, and why a job pauses or waits. It ends when every job has ended, with exit status 0 when all versions are `live` and 1 when any broke, its job failed or waits, or a version was refused. It follows the jobs started elsewhere when one region refuses. Stopping the command doesn't stop the jobs, and exits with 1. A read that fails is reported in place and tried again. With `-json` it prints a JSON line with `"format": 1`, then one for each change of a job, with the fields of a job in `status -json`; the plan goes to stderr. |
+| `-watch` | Follow the jobs: phase, records applied, rate, estimated time left, and why a job pauses or waits. It ends when every job has ended, with exit status 0 when all versions are `live` and 1 when any broke, its job failed, or a version was refused. It follows the jobs started elsewhere when one region refuses. Stopping the command doesn't stop the jobs, and exits with 1. A read that fails is reported in place and tried again. With `-json` it prints a JSON line with `"format": 1`, then one for each change of a job, with the fields of a job in `status -json`; the plan goes to stderr. |
 | `-rate n` | Apply at most `n` records per second per region. On a running job it changes the rate at its next chunk. |
-| `-cancel` | Stop the jobs. The version stays `activating`: live projection keeps applying its part, and queries still return `ErrViewNotReady`. `-all` leaves a cancelled job alone; name the version to resume it. A version without a running job is refused (DF7504). |
+| `-cancel` | Stop the jobs, and the Athena query a job's read of the archive runs, as the cancelled job item names it: the listing of the partitions or a slice's export. The version stays `activating`: live projection keeps applying its part, and queries still return `ErrViewNotReady`. `-all` leaves a cancelled job alone; name the version to resume it. A version without a running job is refused (DF7504). |
 | `-source table\|archive` | Choose the source of a new job ([§5.2](#52-sources)). |
 | `-yes` | Don't ask before starting jobs. |
 
 - **Resuming:** run the same `backfill` command again. A failed job continues from the last
   chunk it finished. Running a job twice at once is never wrong, only wasted work, and the
   job item prevents it.
-- **Failing:** an event that fails to evaluate breaks the version, which ends the job. Any
+- **Failing:** an event that fails to evaluate breaks the version, which ends the job. An
+  archive found incomplete fails the job ([§5.5](#55-when-the-archive-is-complete)). Any
   other error is retried; after the retries the job shows as interrupted in `status`, which
   prints the command that resumes it.
 - **Load:** a job pauses while the region's projector is more than 5 minutes behind, and
@@ -315,12 +378,67 @@ Cost, at us-east-1 on-demand list prices ([DynamoDB pricing](https://aws.amazon.
 |------|------|
 | Each row the job writes | One consistent read and one write: one read unit per 4 KB and one write unit per 1 KB of the row; about $0.75 per million rows of up to 1 KB, so about $150 for the example above |
 | The table scan | One read unit per 4 KB of the table: about $3.3 per 100 GB |
+| The archive export | Athena's $5 per TB of Parquet read ([§5.3](#53-staging)) |
 | Staging | The records read, compressed, kept in S3 for the job's duration plus a day, written again by each merge |
 | Lambda and Step Functions | The function at 3,008 MB for the job's duration, and about 10 state transitions per 14-minute step |
 
 The state machine `{prefix}{store}-backfill` drives the job in each region by calling the
 function `{prefix}{store}-backfill` one step at a time ([infra.md](infra.md)). Its alarm
 `{prefix}{store}-backfill-failed` fires when an execution fails.
+
+### 5.5 When the archive is complete
+
+A region's archive of a stream is complete when it holds every event that the region's
+change stream ever carried. Only then can a backfill split by fences and read it. Nothing in
+the archive itself shows that, so Dynaflux trusts it from a recorded **origin**, as long as
+no **hole** and no **gap** came after it. Each region keeps this history in a stream item
+of its meta table ([encoding.md §8.5](encoding.md#85-stream-item),
+[ADR 0017](../decisions/0017-archive-completeness.md)).
+
+- **Origin.** `dynaflux backfill -all`, and `backfill <view>` for its view's stream,
+  records the origin of a stream in a region that archives it with `events: all`, when the
+  stream is fresh there ([§4.3](#43-fresh-streams)): its table is less than 23 hours old
+  and holds no event. From then on, the region archives every event the stream gets. A
+  stream that got its first event before its origin was recorded never gets one, and its
+  versions read the table. `status` warns about a stream younger than 23 hours without an
+  origin (DF7217), and `dynaflux import` refuses to write to one that could still record
+  one (DF7406). A stream table, or its replica or stream in the region, re-created voids the
+  origin there; a new one can be recorded while the new table is fresh. A region that leaves
+  the store doesn't void the others' origins.
+- **Holes.** A deploy that starts or stops archiving a stream in a region with
+  `events: all` (`archive.regions`, `archive.events`, `archive.streams`) records a hole
+  there before any function changes: the events in between may be missing (DF7107). A
+  rollback records another hole, and nothing removes one. While archiving is off, no origin
+  can be recorded, and once a deploy recorded a hole, none is recorded until 16 minutes after
+  its last hole and its catalog's registration.
+- **Gaps.** Any of these counts as a gap since the origin:
+  - a batch that Lambda discarded to `aws/lambda/` in the bucket ([§7.2](#72-gaps));
+  - a projector that got a record almost 24 hours old: it records this first, before
+    anything that can fail the batch, so a projector that fails until DynamoDB trims the
+    records still records it;
+  - an hour with writes to the stream table and no successful invocation of its projector in
+    that hour or the next 22, from CloudWatch's hourly data;
+  - no event source mapping that reads the stream (enabled, or being created, enabled or
+    updated), or a stream ARN other than the origin's;
+  - an object in the error prefix that a backfill can't read ([§5.3](#53-staging)): the job
+    records it, so later jobs choose the table before they pay for an export.
+
+  One blind spot remains with `runtime.split: store`: a stream's mapping disabled for more
+  than a day while the other streams keep the shared projector busy, then enabled again
+  when its oldest records left are less than 23 hours 50 minutes old.
+
+`backfill` checks these rules before it starts a job, and the job checks them again after
+its last read of the archive and before it makes the version `live`. A backfill reads none
+of the archive's records that arrived before the stream table was created, and none of the
+error objects written before then: they are an older table's. `status` shows, for each
+stream that a region archives with `events: all`, "complete since <time>" or the rule that
+failed, and reports it (DF7204) for the versions activating with the archive source, which
+can't go live from it. Apart from the archive, `status` reports each gap suspected in a
+stream's views (DF7204): a record handled almost 24 hours old, anywhere in the stream item's
+history, and, with an origin, an hour of writes no projector followed or a missing mapping
+affect the versions activated before it, which may miss records. CloudWatch keeps hourly
+data for 455 days, so hours older than that which no earlier check covered stay unchecked:
+the stream item records it, and `status` shows "not checked before <date>".
 
 ## 6. Queries
 
@@ -337,10 +455,19 @@ A named query over a view reads the state of the version it targets, in the stor
 - A query reads states it read at most 30 seconds before, so a version that just went live
   can return `ErrViewNotReady` for up to 30 seconds.
 - Queries over a stream don't read states.
+- A query over a `SYNC` version reads its rows with strong consistency
+  ([sql.md §9.7](sql.md#97-mode)).
+- With `dynaflux.WaitFor(token, timeout)`, a query first waits until the projector of the
+  append's region has handled the token's events. Then it reads the version's state again,
+  not from the 30-second cache, and reads the rows with strong consistency. An event that
+  breaks the version still ends the wait, so the query then returns `ErrViewNotReady`,
+  unless `AllowPartial` is set.
 
-The application's IAM policy needs `dynamodb:Query` on the meta table for the state read;
-without it, queries fail with an error that names the missing permission. `fluxtest` makes
-every version `live` when it creates a store.
+The application's IAM policy needs `dynamodb:Query` on the meta table for the state read,
+which appends to a stream with a `SYNC` view make too; without it, they fail with an error
+that names the missing permission. [infra.md §9.9](infra.md#99-applications) lists what
+else an application needs. `fluxtest` makes every version `live` when it creates a store,
+and writes receipts at once, so `WaitFor` returns at once.
 
 ## 7. Broken versions, gaps and rebuilds
 
@@ -359,8 +486,10 @@ the Athena query that finds the event in the archive.
 A projector blocked for more than 24 hours loses records: DynamoDB trims a change stream
 after 24 hours. Neither the views nor the archive of that region get them. When Lambda wrote
 the lost batch to the bucket under `aws/lambda/`, `status` reports a gap for the stream and
-region with the exact delivery unit and sequence range. *(M6)* `status` also reports gaps it
-suspects from the projector's iterator age.
+region with the exact delivery unit and sequence range. `status` also reports a suspected
+gap (DF7204) from the other gaps of [§5.5](#55-when-the-archive-is-complete): a record
+handled almost 24 hours old, an hour of writes that no successful projector invocation
+followed within 23 hours, or a stream without an event source mapping that reads it.
 
 A gap affects every version of the stream in that region that was neither retired nor
 broken then. The repair is a rebuild of each from a source that holds the lost events. A
@@ -392,8 +521,8 @@ environment:
 2. It warns that it can't see application builds older than the deployed catalog, which may
    still query the version. Deploy the application first.
 3. After confirmation, it sets the version `retired` in each region. Within 30 seconds
-   projectors stop applying it, queries return `ErrViewNotReady`, and its fences stop
-   holding back any delivery unit.
+   projectors and `SYNC` appends stop applying it, queries return `ErrViewNotReady`, and
+   its fences stop holding back any delivery unit.
 4. It marks the version `retired` in `dynaflux.lock`, when it checked every region: with
    `-region` naming only some, the lock stays as it is, since a deploy would retire the
    version in the others without the checks. Run `retire` without `-region` once the
@@ -446,14 +575,25 @@ CLI knows ("upgrade dynaflux").
 - **A re-created regional stack** loses its meta and view tables. Its versions need a
   backfill, which reads the table.
 - **A re-created stream table** starts a new history. Versions filled afterwards don't
-  include the old table's events, which older versions may still count.
+  include the old table's events, which older versions may still count: the table holds
+  none, and a backfill leaves out the archive's records that arrived before the new table
+  was created. It voids the origin of the stream's archive
+  ([§5.5](#55-when-the-archive-is-complete)).
+- **Region names** are canonical, such as `us-east-1`. `dynaflux.Open` and every command
+  refuse a FIPS pseudo-region such as `fips-us-east-1`: the AWS SDK sends its requests to
+  another region than the name says, so the region an event records would match no
+  projector. Set `AWS_USE_FIPS_ENDPOINT` to use FIPS endpoints.
 - **Environments:** every command that reads or changes AWS takes `-prefix`, defaulting to
   `prefix` in `dynaflux.yaml`, and works on one environment per run.
 
 ## 11. Limits
 
-- A table source covers only the stream's log window. Keep the archive on, with
-  `events: all`, for complete backfills *(M6)*.
+- A table source covers only the stream's log window. For complete backfills, keep the
+  archive on with `events: all`, and let `backfill` record each stream's origin before the
+  stream's first event ([§5.5](#55-when-the-archive-is-complete)).
+- Reading the archive waits for Firehose to deliver everything taken before the cut:
+  minutes under steady writes, and 2 hours 30 minutes when the stream gets no new
+  records ([§5.3](#53-staging)).
 - The time split relies on writer clocks within 5 minutes and on events landing within
   15 minutes. A late landing breaks the version with cause `split`; a writer clock more
   than 5 minutes fast can lose an event without a report. `dynaflux import` refuses to run
@@ -479,8 +619,8 @@ others print `<region>: <severity> <code>: <message>` and a `hint:` line. Severi
 `error` and `warning`. Exit status: 0 when there is no error (warnings allowed), 1 when
 there is an error or an operation was refused, 2 for usage, I/O and AWS access problems, or
 a region that couldn't be read. A part of a region that `status` can't read, such as its
-mappings, metrics, executions or gaps, exits with 2 too, and the findings read from the meta
-table still print. Codes are stable as in [config.md](config.md).
+mappings, metrics, executions, gaps or the completeness of its archive, exits with 2 too,
+and the findings read from the meta table still print. Codes are stable as in [config.md](config.md).
 
 | Code | Severity | Meaning |
 |------|----------|---------|
@@ -501,13 +641,14 @@ table still print. Codes are stable as in [config.md](config.md).
 | DF7201 | error | `status`: a version is broken (cause, delivery unit and sequence number or `event_id`, error, time, Athena SQL). |
 | DF7202 | warning | `status`: a version needs a backfill. |
 | DF7203 | error | `status`: a gap was found (delivery unit, sequence range, time, affected versions). |
+| DF7204 | warning | `status`: a region's archive of a stream isn't complete, which affects the versions activating from it, or a gap is suspected in a stream's views, which affects the versions activated before it ([§5.5](#55-when-the-archive-is-complete)): the rule or the evidence, its time, and the versions it affects. |
 | DF7205 | warning | `status`: projector lag is 15 minutes or more. |
 | DF7206 | warning | `status`: another function reads the stream. |
 | DF7208 | error | `status`: the stream's mapping isn't enabled, or its last result is a problem. |
 | DF7209 | error | `status`: projectors block on a version their catalog doesn't know (guard 2); the hint names the build to deploy and the time records start to be lost. |
 | DF7210 | warning | `status`: the archive is stale, or rows failed. |
 | DF7216 | warning | `status`: a backfill is interrupted (its execution ended without finishing). |
-| DF7217 | warning | `status`: a backfill waits for the archive read of a later release *(M6)*: its stream got an event before the fresh check ([§4.3](#43-fresh-streams)). |
+| DF7217 | warning | `status`, `backfill -all`, `import`: a stream table is less than 23 hours old and has no origin in a region that archives it with `events: all`; run `backfill -all` before its first event, or the region's archive of it is never complete ([§5.5](#55-when-the-archive-is-complete)). `backfill -all` says why it recorded none, and `import` warns of a table that holds an event already, whose archive is never complete. |
 | DF7301 | error | `retire`: the version isn't `retained` or `retired` in the lock. |
 | DF7302 | error | `retire`: a deployed catalog makes the version current. |
 | DF7303 | error | `retire`: the view's current version isn't `live` in a region. |
@@ -517,8 +658,8 @@ table still print. Codes are stable as in [config.md](config.md).
 | DF7403 | error | `import`: an event already stored with another payload. |
 | DF7404 | warning | `import`: a view of the stream buckets by `ingest_time`. |
 | DF7405 | error | `import`: this machine's clock differs from DynamoDB's by more than 60 seconds. |
+| DF7406 | error | `import`: the stream table is less than 23 hours old and holds no event, and has no origin in a region that archives it with `events: all`; run `backfill -all` first, since an imported event ends the time to record one ([§5.5](#55-when-the-archive-is-complete)). |
 | DF7501 | error | `backfill`: the version isn't in the region's deployed catalog; deploy `regional.yaml` there first. |
 | DF7502 | error | `backfill`: the version is broken or retired. |
-| DF7503 | error | `backfill`: `-source archive`, but the stream isn't fresh or the region doesn't archive it with `events: all` (the condition that failed). |
+| DF7503 | error | `backfill`: `-source archive`, but the region's archive of the stream isn't complete (the rule that failed, [§5.5](#55-when-the-archive-is-complete)). |
 | DF7504 | error | `backfill -cancel`: the version has no running job to cancel. |
-| DF7505 | error | `backfill`: the version's job waits for the archive read of a later release *(M6)*. |

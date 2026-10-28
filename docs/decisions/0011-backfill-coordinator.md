@@ -7,6 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by [ADR 0016](0016-archive-export-with-athena.md): the `backfill.Archive` seam is
+  reshaped for Athena, and the job item's `stage` gains the archive fields
 
 ## Context
 

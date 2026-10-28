@@ -1381,19 +1381,52 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
     definitions plus the retained versions in `dynaflux.lock` ([§9.9](#99-view-versions)).
   - a `SYNC` view whose `GROUP BY` doesn't include every `PRIMARY KEY` column of the stream
     gets a warning (DF3501): many partition keys share its rows, which makes them hot.
-- How `SYNC` appends behave:
-  - Each event is its own transaction, also in batch appends.
+- How `SYNC` appends behave
+  ([ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md)):
+  - Each event is its own transaction, also in batch appends, which write their events in
+    input order.
   - Only `live` versions are applied in the transaction. A version still being backfilled
     is not, and queries on it return not-ready.
+  - An append reads the states of the versions as queries do, at most 30 seconds old
+    ([lifecycle.md §6](lifecycle.md#6-queries)), for each event, so it needs read access to
+    them even when the application never queries. A state read that fails fails the events
+    not yet written. For up to 30
+    seconds after a version goes `live`, an append may leave it to the projector, which
+    applies the event about a second later. Either way it is applied exactly once.
+  - The event records the versions its transaction applied, and the projector of the
+    append's region skips exactly those ([encoding.md §6](encoding.md#6-stream-items)).
+  - Appends to one row at the same moment conflict and retry. After about ten attempts the
+    append fails with a transient error that names the version and the row.
   - An evaluation error in a `SYNC` view, or a transaction over DynamoDB's 4 MB limit,
     fails the append with a run-time error, and nothing is written.
+  - `dynaflux import` and the generated `Import<Stream>` functions never apply `SYNC`
+    views: the projector applies the events they write.
   - Queries over a `SYNC` view use strongly consistent reads, which cost twice as much. A
     query sees the append at once only in the region that accepted it; other regions see
     it when their projector applies it.
-- A query can also wait for an append without `SYNC`: the append returns a token, and the
-  query option `WaitFor` waits until the projector in the append's region has applied it,
-  then reads with strong consistency. In any other region, `WaitFor` fails at once with a
-  run-time error.
+- A query can also wait for an append without `SYNC`
+  ([ADR 0015](../decisions/0015-wait-tokens-and-receipts.md)):
+  - The append option `dynaflux.Waitable()` asks for it. The projector of the append's
+    region then writes a receipt for each of the call's events once it has applied it: one
+    more write per event, which other appends don't pay. The append returns a token, as
+    every append does.
+  - The query option `dynaflux.WaitFor(token, timeout)` waits until every event of the
+    token has its receipt, reads the version's state again, and runs the query with
+    strongly consistent reads. A query over a stream doesn't poll: its strongly consistent
+    read in the append's region already sees the event. A wait takes about the projector's
+    batching window plus one invocation, 1 to 1.5 seconds by default, so give it a timeout
+    of a few seconds. When the timeout passes first, the query returns an error that
+    matches `dynaflux.ErrWaitTimeout`; when the context ends first, the context's error.
+  - `WaitFor` fails at once, before any read, in any other region than the append's; for
+    an event appended without `Waitable`; for an event that another region stored, as a
+    duplicate of a replicated `DEDUP BY` event is; for a token of more than 1,000 events;
+    and for a token of a stream that the store doesn't have.
+  - A token can be waited on for 24 hours after its append. `dynaflux.ParseToken` reads a
+    token's text back, so another process in the same region can wait for it. A token
+    grants nothing: anyone can write one, and `WaitFor` reads only receipts with it.
+  - Receipts and waits use the meta table: one write per waitable event, and about six
+    strongly consistent reads per wait. With provisioned meta capacity, size it for them,
+    or keep the meta table on demand.
 
 ### 9.8 SPLIT
 
@@ -2057,7 +2090,7 @@ The article before a placeholder fits the word that replaces it: `an avg column`
 | DF3305 | error | an append to <stream> writes <n> items in one transaction; DynamoDB allows 100 | make some views ASYNC, use fewer uniqExact aggregates in SYNC views, or retire old versions |
 | DF3306 | error | SPLIT must be between 2 and 16 | |
 | DF3307 | error | a row can reach <n> KB before its high-water marks; DynamoDB's 400 KB item limit leaves 368 KB after the 32 KB reserved for them | move some aggregates to another view, or use quantileDD with a larger rel_acc |
-| DF3501 | warning | MODE SYNC on a view whose rows many partition keys of <stream> share; concurrent appends will conflict | add the stream's PRIMARY KEY columns to GROUP BY, or use MODE ASYNC |
+| DF3501 | warning | MODE SYNC on a view whose rows many partition keys of <stream> share; concurrent appends will conflict, and canceled transactions are billed | add the stream's PRIMARY KEY columns to GROUP BY, or use MODE ASYNC |
 | DF3502 | retired | Was: <aggregate> over Float64 converges only up to rounding. Retired in M2, when `sum` and `avg` over `Float64` became exact ([§7.2](#72-function-reference)). | |
 | DF3503 | warning | <aggregate> skips rows where <arg> is NULL, so NULL never replaces a value | use a sentinel: <fn>(coalesce(<arg>, <default>), <val>). A UUID <arg> gets no hint. |
 | DF3504 | warning | view reads <column> from DEDUP stream <stream>; a duplicate accepted in two regions has a different <column> in each | group by event_time instead of ingest_time; avoid origin_region |

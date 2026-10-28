@@ -315,7 +315,7 @@ Choosing a placement:
 | Setting | Result |
 |---------|--------|
 | `regions: all`, `events: all` (default) | Every region has a complete archive. Athena and backfills work in any region, including during an outage. Costs one copy per region. |
-| `regions: [r]`, `events: all` | One complete archive, in `r`. If `r` is down, archiving pauses and catches up when it recovers. Other regions backfill from their own tables; reading `r`'s archive from another region comes in M6. |
+| `regions: [r]`, `events: all` | One complete archive, in `r`. If `r` is down, archiving pauses and catches up when it recovers. Other regions backfill from their own tables, which hold only the events of their log window; reading `r`'s archive from another region comes after v1. |
 | `regions: all`, `events: local` | One copy in total, but the full history is the union of the regional tables. |
 
 How each placement affects backfills is in [lifecycle.md §5.2](lifecycle.md#52-sources).
@@ -415,6 +415,7 @@ length of `store`.
 | Iceberg table | `{stream}` | `page_views` | `[a-z0-9_]`, 1 to 255 characters | stream ≤ 255 |
 | Athena view with one row per event | `{stream}_dedup` | `page_views_dedup` | 255 characters | stream ≤ 249 |
 | Athena workgroup | `{prefix}{store}` | `prod-analytics` | 1 to 128 characters from `A-Z a-z 0-9 _ . -` | P ≤ 128 |
+| Backfill workgroup (Athena) | `{prefix}{store}-backfill` | `prod-analytics-backfill` | Athena workgroup | P ≤ 119 |
 | Runtime environment variables | `DYNAFLUX_STORE={store}`, `DYNAFLUX_PREFIX={prefix}`, `DYNAFLUX_MODE` (`projector`, `setup`, `query` or `backfill`), and for projectors in archive regions `DYNAFLUX_ARCHIVE_SCHEMA` (the archive schema's fingerprint) | | | |
 
 - The tightest limits are the bucket name, P + region ≤ 46 for every region in `regions`
@@ -429,11 +430,13 @@ length of `store`.
   a store is deployed.
 - Names are unique within one store, but two stores in the same account and region can
   collide, because `store` may contain `-`. This happens only when one store's
-  `{prefix}{store}` is another's followed by `-stream`, `-view` or `-projector`. For
-  example, the meta table of store `analytics-stream` is `analytics-stream-meta`, which is
-  also the table of stream `meta` in store `analytics`. `validate` sees one store, so it
-  can't detect this, and the second deploy fails. Avoid store names whose last `-` part is
-  `stream`, `view` or `projector`.
+  `{prefix}{store}` is another's followed by `-stream`, `-view`, `-projector` or
+  `-backfill`. For example, the meta table of store `analytics-stream` is
+  `analytics-stream-meta`, which is also the table of stream `meta` in store `analytics`,
+  and the Athena workgroup of store `analytics-backfill` is the backfill workgroup of store
+  `analytics`. `validate` sees one store, so it can't detect this, and the second deploy
+  fails. Avoid store names whose last `-` part is `stream`, `view`, `projector` or
+  `backfill`.
 
 ### Names that `validate` doesn't check
 
@@ -535,7 +538,7 @@ such as `status` and `backfill`, are in [lifecycle.md §12](lifecycle.md#12-diag
 | DF6019 | error | Reported by `generate` only. The catalog takes more than 350,000 bytes compressed with gzip; the message gives its size. Each region's meta table stores the deployed catalog in one item, which DynamoDB limits to 400 KB ([encoding.md §8.4](encoding.md#84-deployed-catalog)). A store within CloudFormation's limit of 500 resources per stack stays below it. | Retire view versions that are no longer needed, remove views, queries or streams, or split the store. |
 | DF6101 | error | `store` isn't a valid store name. | Use lowercase letters, digits and `-`; start with a letter; don't end with `-`. For example `analytics`. |
 | DF6102 | error | `prefix` isn't a valid prefix. | Use lowercase letters, digits and `-`; start with a letter; end with `-`. For example `prod-`. |
-| DF6103 | error | A region isn't an AWS region code. | Use a code such as `us-east-1`. |
+| DF6103 | error | A region isn't an AWS region code, or is a FIPS pseudo-region such as `fips-us-east-1`, which the AWS SDK rewrites to another name ([ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md)). | Use a code such as `us-east-1`. For FIPS endpoints, set `AWS_USE_FIPS_ENDPOINT=true`. |
 | DF6104 | error | `regions` holds `me-south-1` or `me-central-1`, which don't offer the S3 account regional namespace, so Dynaflux can't name its bucket there. | Remove the region. |
 | DF6110 | error | A derived resource name is longer than the AWS limit. The message gives the name, its length and the limit. | Shorten the stream or view name, `store` or `prefix`. The hint gives the budget from [Resource names](#resource-names). |
 | DF6111 | error | With `archive.catalog: s3tables`, the S3 Tables namespace starts with `aws`, which S3 Tables reserves. | Change `prefix` or `store`, or use `archive.catalog: glue`. |
