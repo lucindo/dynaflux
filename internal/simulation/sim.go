@@ -63,9 +63,9 @@
 //     after its origin; (b) a job moves from stage to apply only after its step read the
 //     stream item while, by the model, an origin had landed under a registered catalog that
 //     archives every event of the stream, and neither change happened since; (c) a job that
-//     ends broken while its version isn't names an archive rule; (d) a job marks its error
-//     prefix read only when no object of a commit that failed had landed when its step last
-//     listed the prefix.
+//     ends broken leaves its version broken, and one that fails names an archive rule and
+//     leaves its version short of live; (d) a job marks its error prefix read only when no
+//     object of a commit that failed had landed when its step last listed the prefix.
 //   - P15: a view query that waited for an append's event and returned rows read a version
 //     that was live in the region at some moment after the event's receipt first landed, and
 //     whose rows that the event reaches by the oracle hold it, by their high-water marks or by
@@ -388,7 +388,7 @@ type Outcome struct {
 // out, and WaitsNotReady those whose version wasn't live. Toggles counts the deploys that
 // stopped or started archiving a stream, Origins the origins the CLI recorded, Stalls the
 // regions whose mappings stalled, Lags the progress writes that passed a record a day old,
-// and Incomplete the jobs that ended broken on an archive that wasn't complete. Exports counts
+// and Incomplete the jobs that failed on an archive that wasn't complete. Exports counts
 // the exports Athena ran, Halved those that timed out, FailedTries those that failed, and
 // CommitFailures the puts whose records failed to commit.
 type Stats struct {

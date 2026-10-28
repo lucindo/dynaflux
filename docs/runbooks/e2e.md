@@ -217,7 +217,7 @@ deployment bucket of SAM's `aws-sam-cli-managed-default` stack.
 | Scenario 34: no `AccessDeniedException` for the `PutItem` or the `Query` | The `EnclosingOperation` or `LeadingKeys` condition doesn't limit what [infra.md §9.9](../spec/infra.md#99-applications) says it does. |
 | Scenario 35: `ErrWaitTimeout` | The projector wrote no receipt within 10 seconds: check its log, and that the event has `_rcpt`. |
 | Scenario 36: an `AccessDenied` of the backfill role in CloudTrail, or a job broken with Athena error 234 or 1700 | A statement of the backfill role is missing or too narrow, or Lake Formation governs the archive's catalog ([infra.md §9.6](../spec/infra.md#96-backfill-role)). Record the action and the ARN. |
-| Scenario 36: a job broken because the archive isn't complete | `status` names the rule that failed (DF7204). A gap or a hole the scenario didn't make means a deploy, a projector or Firehose lost records. |
+| Scenario 36: a job failed because the archive isn't complete | `status` names the rule that failed (DF7219). A gap or a hole the scenario didn't make means a deploy, a projector or Firehose lost records. |
 | Scenario 36: a version reads the table where the archive was complete | `backfill` recorded no origin on the first deploy (DF7218), or a rule failed: `status` shows which. |
 | A `dynaflux` command fails with `AccessDenied` under the operator role | A row of [infra.md §9.8](../spec/infra.md#98-operators) is missing or too narrow. Record the command, the action and the ARN. |
 | `backfill-failed` fires outside scenario 24's deny | A backfill step failed after its retries. `dynaflux status` shows the job interrupted (DF7216), and the backfill function's log has the error. |

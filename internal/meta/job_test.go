@@ -436,6 +436,8 @@ func TestDecodeRejectsForeignJobs(t *testing.T) {
 		{"done without fresh", tableSourced(store.Item{"state": s("done"), "_ttl": n("1")}), false},
 		{"done without _ttl", tableSourced(store.Item{"state": s("done"), "fresh": {Type: store.BOOL}}), false},
 		{"_ttl while running", job(store.Item{"_ttl": n("1")}), false},
+		{"a failed job", job(store.Item{"state": s("failed"), "_ttl": n("1")}), true},
+		{"failed without _ttl", job(store.Item{"state": s("failed")}), false},
 		{"an empty name", job(store.Item{"name": s("")}), false},
 		{"a mark of one byte", job(store.Item{"mark": b(7)}), false},
 		{"a run without its last mark", job(store.Item{"runs": {Type: store.L, List: []store.Value{{Type: store.M, Map: map[string]store.Value{

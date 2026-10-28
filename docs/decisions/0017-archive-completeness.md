@@ -125,9 +125,9 @@ table's, which the Iceberg table and the error prefix keep.
 **5. One pure function, `backfill.Completeness(Evidence) Verdict`,** evaluates these rules
 for the CLI's choice of a source, for the job, and for `status`. The job re-reads the stream
 item and `catalog/current` and evaluates every rule at `select`, after the last archive
-read, and the stream item and `current` again before `MakeLive`. A failed rule breaks the
-job, naming the hole or evidence; the version needs a rebuild from the table, since its
-split can't change.
+read, and the stream item and `current` again before `MakeLive`. A failed rule fails the
+job, naming the hole or evidence; the version stays `activating` and needs a rebuild from
+the table, since its split can't change.
 
 ### Rejected
 

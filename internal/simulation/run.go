@@ -75,7 +75,7 @@ type run struct {
 	written map[eventStamp]bool
 	acked   []eventStamp
 	maxHWM  int
-	// incomplete holds, by region, the versions whose jobs an incomplete archive broke.
+	// incomplete holds, by region, the versions whose jobs an incomplete archive failed.
 	incomplete map[string]map[string]bool
 }
 

@@ -175,9 +175,9 @@ func TestStepChecksTheArchiveAfterItsLastRead(t *testing.T) {
 					}
 					return
 				}
-				if j.State != meta.JobBroken || j.Error == nil || j.Error.Phase != meta.PhaseStage || state != meta.Activating || rows[0] != "a -" ||
+				if j.State != meta.JobFailed || j.Error == nil || j.Error.Phase != meta.PhaseStage || state != meta.Activating || rows[0] != "a -" ||
 					!strings.HasPrefix(j.Error.Message, backfill.ErrIncomplete.Error()+": events in us-east-1: "+tt.want) {
-					t.Errorf("job %s with %+v, version %s, rows %q; want broken in stage by %q, activating, no row", j.State, j.Error, state, rows, tt.want)
+					t.Errorf("job %s with %+v, version %s, rows %q; want failed in stage by %q, activating, no row", j.State, j.Error, state, rows, tt.want)
 				}
 			})
 		})
@@ -208,8 +208,8 @@ func TestStepChecksTheArchiveBeforeLive(t *testing.T) {
 		f.env.Core = deploying{Applier: f.env.Core, f: f}
 		f.start()
 		f.run()
-		if j, state := f.job(), f.state().State; j.State != meta.JobBroken || j.Error == nil || j.Error.Phase != meta.PhaseLive || state != meta.Activating {
-			t.Errorf("job %s with %+v, version %s; want broken in live, activating", j.State, j.Error, state)
+		if j, state := f.job(), f.state().State; j.State != meta.JobFailed || j.Error == nil || j.Error.Phase != meta.PhaseLive || state != meta.Activating {
+			t.Errorf("job %s with %+v, version %s; want failed in live, activating", j.State, j.Error, state)
 		}
 	})
 }

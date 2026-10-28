@@ -258,7 +258,7 @@ func (c *cli) printJob(r *regionStatus, j meta.Job) {
 // projector's lag to fall.
 func jobActivity(j meta.Job) string {
 	switch {
-	case j.State == meta.JobDone || j.State == meta.JobBroken:
+	case j.State.Ended():
 	case j.State == meta.JobRunning && j.Split == meta.SplitFence && j.Phase == meta.PhaseWatermark:
 		return "; waits for Firehose to deliver the records taken before " + timeText(j.Cut)
 	case j.Paused && j.State == meta.JobRunning:

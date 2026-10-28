@@ -161,6 +161,14 @@ us-west-2:
 store shop  prefix (none)  account 123456789012  region us-west-2
 dynaflux backfill: us-west-2: page_seen@v1: the completeness of the archive of stream page_views, which -source table doesn't need: backfill: the history of shop-stream-page_views: awsbackfill: the archive's gaps are unknown until the objects under s3://shop-123456789012-us-west-2-an/aws/lambda/ that aren't Lambda's on-failure records are removed (1 of them): deployed: read s3://shop-123456789012-us-west-2-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.00.00-x: invalid character 'o' in literal null (expecting 'u')
 -- want/default_source_while_the_gaps_can't_be_read.stdout --
+-- want/failed_job.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7506: plan_counts@v1's job failed in us-east-1 on an archive of signups that wasn't complete, so the version can't go live
+  hint: read its error with dynaflux status, then rebuild the view
+-- want/failed_job.stdout --
+us-east-1:
+  stream signups: origin recorded; the region's archive of it is complete from now on
+  plan_counts@v1  refused
 -- want/interrupted.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/interrupted.stdout --
@@ -322,6 +330,16 @@ us-east-1  page_seen@v1  activate  0/0 applied
 us-east-1  page_seen@v1  apply  1000/3000 applied  200/s  ETA 10s
 us-east-1  page_seen@v1  apply  2000/3000 applied  200/s  ETA 5s
 us-east-1  page_seen@v1  live
+-- want/watch_a_job_that_fails.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/watch_a_job_that_fails.stdout --
+us-east-1:
+  stream signups: origin recorded; the region's archive of it is complete from now on
+  plan_counts@v1  start    archive source, split by fences
+us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+us-east-1  plan_counts@v1  activate  0/0 applied
+us-east-1  plan_counts@v1  failed: backfill: the archive isn't complete: signups in us-east-1: rule 3: no event source mapping reads the stream
 -- want/watch_failed_execution.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 A new job activates its version, which can't be undone: its source and split are fixed for its life.

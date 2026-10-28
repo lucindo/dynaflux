@@ -469,6 +469,14 @@ func backfillCases() []backfillCase {
 				}
 			},
 		},
+		{
+			name: "failed job", args: slices.Concat([]string{"plan_counts"}, east), status: 1,
+			change: func(t *testing.T, s *backfillStore) {
+				t.Helper()
+				s.exportJob(t)
+				failJob(t, s.metas["us-east-1"], "plan_counts@v1", "signups in us-east-1: rule 3: no event source mapping reads the stream")
+			},
+		},
 		{name: "not in the lock", args: []string{"page_seen@v2"}, status: 2},
 		{name: "not deployed yet", args: []string{"page_seen@v2"}, status: 1, change: rebuiltInTheLock},
 		{
@@ -530,6 +538,7 @@ func backfillWatchCases() []backfillCase {
 	return []backfillCase{
 		{name: "watch", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), progress: watchLive},
 		{name: "watch failed execution", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), status: 1, progress: watchFail},
+		{name: "watch a job that fails", args: slices.Concat([]string{"plan_counts", "-yes", "-watch"}, east), status: 1, progress: watchIncomplete},
 		{name: "watch through a failed read", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), progress: watchFailedRead},
 		{name: "watch json", args: slices.Concat([]string{"page_seen", "-yes", "-watch", "-json"}, east), progress: watchLive},
 		{name: "json without watch", args: []string{"page_seen", "-json"}, status: 2},
@@ -698,6 +707,13 @@ func watchFailedRead(t *testing.T, s *backfillStore) {
 		t.Error(err)
 	}
 	setJob(t, m, func(j *meta.Job) { j.State, j.Phase = meta.JobDone, meta.PhaseLive })
+}
+
+// watchIncomplete fails plan_counts@v1's job on an archive that isn't complete.
+func watchIncomplete(t *testing.T, s *backfillStore) {
+	t.Helper()
+	time.Sleep(7 * time.Second)
+	failJob(t, s.metas["us-east-1"], "plan_counts@v1", "signups in us-east-1: rule 3: no event source mapping reads the stream")
 }
 
 // watchFail fails page_seen@v1's execution.

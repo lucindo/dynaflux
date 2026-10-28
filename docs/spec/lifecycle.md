@@ -139,7 +139,8 @@ Moves:
   the projector of such a build when it finds the version `activating` or `live`
   ([§8](#8-retiring-a-version)).
 - There is no other move. A state never goes back: a cancelled backfill leaves the version
-  `activating`, and a version that must be filled again becomes a new version
+  `activating`, and so does a job that failed on an archive that isn't complete
+  ([§5.4](#54-jobs)). A version that must be filled again becomes a new version
   ([§7.3](#73-rebuilding-a-version)). Nothing leaves `broken` except to `retired`, and
   nothing leaves `retired`.
 
@@ -314,9 +315,8 @@ use `-source table`. `status` says why a job waits. Then the job
 1. Reads the records that Firehose couldn't deliver, under `errors/firehose/<stream>/` in
    the bucket. An object there that doesn't hold Dynaflux records, such as the file list of
    an Iceberg commit that failed, makes the region's archive of the stream incomplete for
-   good ([§5.5](#55-when-the-archive-is-complete)). The job fails, naming the object, and
-   the version needs a rebuild from the table ([§7.3](#73-rebuilding-a-version)), since
-   its split can't change.
+   good ([§5.5](#55-when-the-archive-is-complete)). The job fails, naming the object
+   ([§5.4](#54-jobs)).
 2. Lists the days of the region's Iceberg table with Athena, and plans slices of days of up
    to about 25 GB of Parquet each.
 3. Exports one slice at a time with Athena's `UNLOAD` into its staging prefix, and stages
@@ -359,13 +359,16 @@ Resuming, cancelling and changing the rate don't ask.
 | `-source table\|archive` | Choose the source of a new job ([§5.2](#52-sources)). |
 | `-yes` | Don't ask before starting jobs. |
 
-- **Resuming:** run the same `backfill` command again. A failed job continues from the last
-  chunk it finished. Running a job twice at once is never wrong, only wasted work, and the
-  job item prevents it.
+- **Resuming:** run the same `backfill` command again. An interrupted job continues from the
+  last chunk it finished. Running a job twice at once is never wrong, only wasted work, and
+  the job item prevents it.
 - **Failing:** an event that fails to evaluate breaks the version, which ends the job. An
-  archive found incomplete fails the job ([§5.5](#55-when-the-archive-is-complete)). Any
-  other error is retried; after the retries the job shows as interrupted in `status`, which
-  prints the command that resumes it.
+  archive found incomplete fails the job ([§5.5](#55-when-the-archive-is-complete)), and
+  its version stays `activating` for good, since its split can't change: `status` reports
+  it (DF7219), `backfill` refuses to resume it (DF7506), and the fix is a rebuild
+  ([§7.3](#73-rebuilding-a-version)), whose new version reads the table while the archive
+  stays incomplete. Any other error is retried; after the retries the job shows as
+  interrupted in `status`, which prints the command that resumes it.
 - **Load:** a job pauses while the region's projector is more than 5 minutes behind, and
   continues once it is under 2.5 minutes. A new view table starts with capacity for about
   4,000 writes per second, and the projector writes to it too.
@@ -435,12 +438,13 @@ of the archive's records that arrived before the stream table was created, and n
 error objects written before then: they are an older table's. `status` shows, for each
 stream that a region archives with `events: all`, "complete since <time>" or the rule that
 failed, and reports it (DF7204) for the versions activating with the archive source, which
-can't go live from it. Apart from the archive, `status` reports each gap suspected in a
-stream's views (DF7204): a record handled almost 24 hours old, anywhere in the stream item's
-history, and, with an origin, an hour of writes no projector followed or a missing mapping
-affect the versions activated before it, which may miss records. CloudWatch keeps hourly
-data for 455 days, so hours older than that which no earlier check covered stay unchecked:
-the stream item records it, and `status` shows "not checked before <date>".
+can't go live from it, except those whose job failed on it, which DF7219 reports. Apart from
+the archive, `status` reports each gap suspected in a stream's views (DF7204): a record
+handled almost 24 hours old, anywhere in the stream item's history, and, with an origin, an
+hour of writes no projector followed or a missing mapping affect the versions activated
+before it, which may miss records. CloudWatch keeps hourly data for 455 days, so hours older
+than that which no earlier check covered stay unchecked: the stream item records it, and
+`status` shows "not checked before <date>".
 
 ## 6. Queries
 
@@ -662,6 +666,7 @@ and the findings read from the meta table still print. Codes are stable as in
 | DF7216 | warning | `status`: a backfill is interrupted (its execution ended without finishing). |
 | DF7217 | retired | Was: `status`: a backfill waits for the archive read of a later release. Retired in M6, when backfills read the archive. |
 | DF7218 | warning | `status`, `backfill -all`, `import`: a stream table is less than 23 hours old and has no origin in a region that archives it with `events: all`; run `backfill -all` before its first event, or the region's archive of it is never complete ([§5.5](#55-when-the-archive-is-complete)). `backfill -all` says why it recorded none, and `import` warns of a table that holds an event already, whose archive is never complete. |
+| DF7219 | error | `status`: a version's backfill job failed on an archive that wasn't complete, with the job's error; the version stays `activating` and can't go live. Rebuild the view ([§7.3](#73-rebuilding-a-version)). |
 | DF7301 | error | `retire`: the version isn't `retained` or `retired` in the lock. |
 | DF7302 | error | `retire`: a deployed catalog makes the version current. |
 | DF7303 | error | `retire`: the view's current version isn't `live` in a region. |
@@ -677,3 +682,4 @@ and the findings read from the meta table still print. Codes are stable as in
 | DF7503 | error | `backfill`: `-source archive`, but the region's archive of the stream isn't complete (the rule that failed, [§5.5](#55-when-the-archive-is-complete)). |
 | DF7504 | error | `backfill -cancel`: the version has no running job to cancel. |
 | DF7505 | retired | Was: `backfill`: the version's job waits for the archive read of a later release. Retired in M6, when backfills read the archive. |
+| DF7506 | error | `backfill`: the version's job failed on an archive that wasn't complete; rebuild the view ([§5.4](#54-jobs)). |

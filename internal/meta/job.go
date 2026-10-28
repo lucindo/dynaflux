@@ -78,7 +78,7 @@ const (
 	hwmBackfill = "B"
 )
 
-// jobLifetime is how long a done or broken job's item stays.
+// jobLifetime is how long the item of a job that ended done, broken or failed stays.
 const jobLifetime = 400 * 24 * time.Hour
 
 var (
@@ -94,8 +94,12 @@ const (
 	JobRunning   JobState = "running"
 	JobCancelled JobState = "cancelled"
 	JobDone      JobState = "done"
-	JobBroken    JobState = "broken"
+	JobBroken    JobState = "broken" // its version broke
+	JobFailed    JobState = "failed" // the archive it read isn't complete; its version stays activating
 )
+
+// Ended reports whether a job in state s ended for good: no step resumes it.
+func (s JobState) Ended() bool { return s == JobDone || s == JobBroken || s == JobFailed }
 
 // Phase is the step a backfill job is at (docs/spec/encoding.md §8.3).
 type Phase string
@@ -372,7 +376,7 @@ func encodeJob(j Job) (store.Item, error) {
 	if j.Archive != (ArchiveStage{}) {
 		it[attrStage] = encodeArchiveStage(j.Archive)
 	}
-	if j.State == JobDone || j.State == JobBroken {
+	if j.State.Ended() {
 		it[catalog.AttrTTL] = keys.TTL(micros(j.UpdatedAt.Add(jobLifetime)))
 	}
 	if j.Error != nil {
@@ -584,7 +588,7 @@ func (m *Meta) decodeJob(it store.Item) (Job, error) {
 	if _, ok := it[attrPaused]; ok {
 		j.Paused = r.boolean(attrPaused)
 	}
-	if j.State == JobDone || j.State == JobBroken {
+	if j.State.Ended() {
 		r.integer(catalog.AttrTTL, true)
 	}
 	j.version = r.version()
@@ -596,7 +600,7 @@ func (m *Meta) decodeJob(it store.Item) (Job, error) {
 
 func validJobState(s JobState) bool {
 	switch s {
-	case JobRunning, JobCancelled, JobDone, JobBroken:
+	case JobRunning, JobCancelled, JobDone, JobBroken, JobFailed:
 		return true
 	}
 	return false

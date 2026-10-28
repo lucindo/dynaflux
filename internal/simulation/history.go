@@ -505,8 +505,8 @@ func (rg *region) incomplete(stream string, t time.Time) string {
 }
 
 // checkIncomplete checks P14 on the jobs of a region at quiescence: a job that ended broken
-// while its version isn't names an archive rule. It returns those versions, whose archive
-// wasn't complete.
+// left its version broken, and one that failed names an archive rule and left its version
+// short of live. It returns the versions of the failed jobs, whose archive wasn't complete.
 func (r *run) checkIncomplete(ctx context.Context, rg *region, states map[string]meta.ViewState) map[string]bool {
 	jobs, err := meta.New(rg.mem, r.meta).Jobs(ctx)
 	if err != nil {
@@ -515,15 +515,17 @@ func (r *run) checkIncomplete(ctx context.Context, rg *region, states map[string
 	}
 	out := map[string]bool{}
 	for _, j := range jobs {
-		if j.State != meta.JobBroken || states[j.Version].State == meta.Broken {
-			continue
+		vs := states[j.Version].State
+		switch {
+		case j.State == meta.JobBroken && vs != meta.Broken:
+			r.violatef("P14: %s: the job of %s ended broken, but its version is %s: %+v", rg.name, j.Version, vs, j.Error)
+		case j.State != meta.JobFailed || vs == meta.Broken:
+		case j.Error == nil || !strings.Contains(j.Error.Message, backfill.ErrIncomplete.Error()) || vs == meta.Live:
+			r.violatef("P14: %s: the job of %s failed, but not on an archive rule, or its version is live: %+v", rg.name, j.Version, j.Error)
+		default:
+			out[j.Version] = true
+			r.count(&r.stats.Incomplete)
 		}
-		if j.Error == nil || !strings.Contains(j.Error.Message, backfill.ErrIncomplete.Error()) {
-			r.violatef("P14: %s: the job of %s ended broken, but neither its version nor its archive is: %+v", rg.name, j.Version, j.Error)
-			continue
-		}
-		out[j.Version] = true
-		r.count(&r.stats.Incomplete)
 	}
 	return out
 }

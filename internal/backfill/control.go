@@ -29,7 +29,7 @@ func SourceOf(split meta.Split) Source {
 	return SourceTable
 }
 
-// ErrJobEnded is a cancel or a rate change of a job that is done or broken.
+// ErrJobEnded is a cancel or a rate change of a job that ended.
 var ErrJobEnded = errors.New("backfill: the job has ended")
 
 // Choose returns the split of a new job of version in region, whose deployed catalog is cat,
@@ -54,14 +54,13 @@ func Choose(cat *catalog.Catalog, region, version string, v Verdict, want Source
 }
 
 // Cancel stops a version's running job: a step that finds it cancelled ends, and the version
-// stays activating. A cancelled job stays so; one that is done or broken fails with
-// ErrJobEnded.
+// stays activating. A cancelled job stays so; one that ended fails with ErrJobEnded.
 func Cancel(ctx context.Context, m *meta.Meta, version string) (meta.Job, error) {
 	return m.UpdateJob(ctx, version, func(j *meta.Job) (bool, error) {
 		switch j.State {
 		case meta.JobCancelled:
 			return false, nil
-		case meta.JobDone, meta.JobBroken:
+		case meta.JobDone, meta.JobBroken, meta.JobFailed:
 			return false, fmt.Errorf("backfill: cancel %s: its job is %s: %w", version, j.State, ErrJobEnded)
 		case meta.JobRunning:
 		}
@@ -71,13 +70,13 @@ func Cancel(ctx context.Context, m *meta.Meta, version string) (meta.Job, error)
 }
 
 // SetRate sets the records a second that a version's job applies, 0 for no limit, from its
-// next chunk. A job that is done or broken fails with ErrJobEnded.
+// next chunk. A job that ended fails with ErrJobEnded.
 func SetRate(ctx context.Context, m *meta.Meta, version string, rate int) error {
 	if rate < 0 {
 		return fmt.Errorf("backfill: rate %d for %s", rate, version)
 	}
 	_, err := m.UpdateJob(ctx, version, func(j *meta.Job) (bool, error) {
-		if j.State == meta.JobDone || j.State == meta.JobBroken {
+		if j.State.Ended() {
 			return false, fmt.Errorf("backfill: set the rate of %s: its job is %s: %w", version, j.State, ErrJobEnded)
 		}
 		write := j.Rate != rate

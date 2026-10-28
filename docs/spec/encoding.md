@@ -622,7 +622,7 @@ it stays after the job ends.
 | `stream` | S: the version's stream. |
 | `source` | S: `archive` or `table`, which follows from `split`. |
 | `split` | S: the view-state item's `split` (§8.2): `fence` with the archive source; `time` (additive versions) or `none` (idempotent versions) with the table source. |
-| `state` | S: `running`, `cancelled`, `done` or `broken`. |
+| `state` | S: `running`, `cancelled`, `done`, `broken` (the version broke) or `failed` (the archive it read isn't complete, and the version stays `activating`). |
 | `phase` | S: `activate`, `fence`, `fresh`, `watermark`, `wait`, `stage`, `apply` or `live`. |
 | `attempt` | N, at least 1: the attempt that owns the job. Resuming the job claims it for the next attempt. |
 | `name` | S: the name of the job's executions without the `-a<attempt>` and `-c<k>` suffixes. |
@@ -643,7 +643,7 @@ it stays after the job ends.
 | `paused` | BOOL, true while apply waits for the projector's lag to fall under 2.5 minutes ([lifecycle.md §5.4](lifecycle.md#54-jobs)). Absent otherwise. |
 | `error` | M, the last failure: `phase` (S), `message` (S, cut to at most 1,024 bytes), `at` (N). |
 | `_v` | N, as §7.1. |
-| `_ttl` | 400 days after the job became `done` or `broken`, as §5.4. None while `running` or `cancelled`. |
+| `_ttl` | 400 days after the job became `done`, `broken` or `failed`, as §5.4. None while `running` or `cancelled`. |
 
 ### 8.4 Deployed catalog
 

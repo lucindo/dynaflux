@@ -542,15 +542,17 @@ func (s *step) ended(ctx context.Context) bool {
 	return err == nil && s.stop(ctx, state, j.Phase, fmt.Errorf("backfill: %s is %s", s.version, vs.State)) == nil
 }
 
-// fail ends the step on err. A broken version ends the job broken, a retired one cancelled,
-// and one that another worker of the attempt made live done; any other error is recorded in
-// the job and returned.
+// fail ends the step on err. A broken version ends the job broken, an archive that isn't
+// complete failed, a retired version cancelled, and one that another worker of the attempt
+// made live done; any other error is recorded in the job and returned.
 func (s *step) fail(ctx context.Context, phase meta.Phase, err error) (time.Duration, bool, error) {
 	switch {
 	case errors.Is(err, errNotOwner):
 		return 0, true, nil
-	case errors.Is(err, projector.ErrBroken), errors.Is(err, ErrIncomplete):
+	case errors.Is(err, projector.ErrBroken):
 		return 0, true, s.stop(ctx, meta.JobBroken, phase, err)
+	case errors.Is(err, ErrIncomplete):
+		return 0, true, s.stop(ctx, meta.JobFailed, phase, err)
 	case errors.Is(err, meta.ErrTransition), errors.Is(err, meta.ErrNotActivating):
 		states, serr := s.env.Meta.ViewStates(ctx)
 		if serr != nil {

@@ -21,9 +21,9 @@ import (
 )
 
 // check runs the properties checked at quiescence: P0 on the acknowledged appends and on
-// every change stream; P1, P3, P10, the jobs that the archive broke (P14) and the backfills'
+// every change stream; P1, P3, P10, the jobs that the archive failed (P14) and the backfills'
 // end states (P6) per region; P2 across regions; P13. The rest of P4–P9 was checked as the
-// run went. A version whose job an incomplete archive broke stays activating, so P1, P2 and
+// run went. A version whose job an incomplete archive failed stays activating, so P1, P2 and
 // P6 leave it out.
 func (r *run) check(ctx context.Context) {
 	r.checkAcked()

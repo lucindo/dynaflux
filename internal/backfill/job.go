@@ -31,7 +31,7 @@ func LocalExecution(int) string { return "local" }
 // and returns it. A version already activating keeps the split of its state item, so another
 // r.Split fails with meta.ErrTransition, as does a version that is live, broken or retired.
 // A job takes the split asked for until its version is activated; after that its split is
-// fixed. A job that is done or broken fails with meta.ErrJobExists. A caller that loses the
+// fixed. A job that ended fails with meta.ErrJobExists. A caller that loses the
 // race to create or claim the job gets the winner's attempt.
 func Start(ctx context.Context, m *meta.Meta, r Request) (meta.Job, error) {
 	if r.Version == "" || r.Stream == "" || r.Name == "" || r.Execution == nil {

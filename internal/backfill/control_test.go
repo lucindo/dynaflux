@@ -103,17 +103,19 @@ func TestCancelAndSetRate(t *testing.T) {
 		t.Errorf("Cancel without a job: %v, want ErrNoJob", err)
 	}
 	start(totals)
-	if _, err := m.UpdateJob(ctx, totals, func(j *meta.Job) (bool, error) {
-		j.State = meta.JobDone
-		return true, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := backfill.Cancel(ctx, m, totals); !errors.Is(err, backfill.ErrJobEnded) {
-		t.Errorf("Cancel of a done job: %v, want ErrJobEnded", err)
-	}
-	if err := backfill.SetRate(ctx, m, totals, 10); !errors.Is(err, backfill.ErrJobEnded) {
-		t.Errorf("SetRate of a done job: %v, want ErrJobEnded", err)
+	for _, state := range []meta.JobState{meta.JobDone, meta.JobFailed} {
+		if _, err := m.UpdateJob(ctx, totals, func(j *meta.Job) (bool, error) {
+			j.State = state
+			return true, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backfill.Cancel(ctx, m, totals); !errors.Is(err, backfill.ErrJobEnded) {
+			t.Errorf("Cancel of a %s job: %v, want ErrJobEnded", state, err)
+		}
+		if err := backfill.SetRate(ctx, m, totals, 10); !errors.Is(err, backfill.ErrJobEnded) {
+			t.Errorf("SetRate of a %s job: %v, want ErrJobEnded", state, err)
+		}
 	}
 	if err := backfill.SetRate(ctx, m, peaks, -1); err == nil {
 		t.Error("a negative rate: no error")

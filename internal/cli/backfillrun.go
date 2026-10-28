@@ -290,8 +290,8 @@ func (w *watched) observe(j meta.Job, executions bool, err error) (string, watch
 	switch j.State {
 	case meta.JobDone:
 		w.ended, w.ok, line = true, true, "live"
-	case meta.JobBroken:
-		w.ended, line = true, "broken"
+	case meta.JobBroken, meta.JobFailed:
+		w.ended, line = true, string(j.State)
 		if j.Error != nil {
 			line += ": " + j.Error.Message
 		}

@@ -1424,6 +1424,15 @@ func historyControls() []control {
 			Seeds:    100,
 			Want:     p14,
 		},
+		{
+			ID:       "C112", // a job on an archive that isn't complete ends broken, though its version is activating
+			File:     step,
+			Old:      "s.stop(ctx, meta.JobFailed, phase, err)",
+			New:      "s.stop(ctx, meta.JobBroken, phase, err)",
+			Scenario: holesSc,
+			Seeds:    20,
+			Want:     p14,
+		},
 	}
 }
 

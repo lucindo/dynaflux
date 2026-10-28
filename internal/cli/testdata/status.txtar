@@ -66,6 +66,36 @@ us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:0
   stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T02:57:00Z, complete since 1999-12-29T01:00:00Z
   stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive without recent data, complete since 1999-12-29T01:00:00Z
   backfill plan_counts@v2: running, attempt 1, phase watermark, 0 of 0 records applied; rate no limit; archive source, split by fences; Firehose shows no recent data, and the job can't tell that it holds nothing: CloudWatch doesn't list its data freshness, as after 14 days without records, or the delivery stream isn't ACTIVE; append an event to signups, or rebuild the view to fill it from the table; execution running
+-- want/archive_job_failed.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7219: the backfill of plan_counts@v2 failed on an archive of stream signups that wasn't complete, so plan_counts@v2 can't go live; its last error, in phase stage at 2000-01-01T00:00:00Z: backfill: the archive isn't complete: signups in us-east-1: rule 2: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z
+  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts
+-- want/archive_job_failed.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, not complete: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z
+  backfill plan_counts@v2: failed, attempt 1, phase stage, 0 of 0 records applied; archive source, split by fences; Athena scanned 1.2 GB; its last error, in phase stage at 2000-01-01T00:00:00Z: backfill: the archive isn't complete: signups in us-east-1: rule 2: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z
+-- want/archive_job_failed_on_a_missing_mapping.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7219: the backfill of plan_counts@v2 failed on an archive of stream signups that wasn't complete, so plan_counts@v2 can't go live; its last error, in phase stage at 2000-01-01T00:00:00Z: backfill: the archive isn't complete: signups in us-east-1: rule 3: no event source mapping reads the stream
+  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts
+-- want/archive_job_failed_on_a_missing_mapping.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: failed, attempt 1, phase stage, 0 of 0 records applied; archive source, split by fences; Athena scanned 1.2 GB; its last error, in phase stage at 2000-01-01T00:00:00Z: backfill: the archive isn't complete: signups in us-east-1: rule 3: no event source mapping reads the stream
 -- want/archive_job_stages.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/archive_job_stages.stdout --

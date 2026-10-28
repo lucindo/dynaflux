@@ -434,20 +434,23 @@ func TestStepReadsTheErrorPrefixFirst(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				f.checkBrokenByErrors(object, tt.broken)
+				f.checkFailedByErrors(object, tt.broken)
 			})
 		})
 	}
 }
 
-// checkBrokenByErrors checks a job that broke on an error object it can't read, before any
-// query, and the errors hole it recorded.
-func (f *fixture) checkBrokenByErrors(object, reason string) {
+// checkFailedByErrors checks a job that failed on an error object it can't read, before any
+// query, its version still activating, and the errors hole it recorded.
+func (f *fixture) checkFailedByErrors(object, reason string) {
 	f.t.Helper()
 	j := f.job()
-	if j.State != meta.JobBroken || j.Error == nil || !strings.Contains(j.Error.Message, reason) ||
+	if j.State != meta.JobFailed || j.Error == nil || !strings.Contains(j.Error.Message, reason) ||
 		!strings.Contains(j.Error.Message, backfill.ErrIncomplete.Error()) {
-		f.t.Errorf("job %s with %+v; want broken as an incomplete archive: %s", j.State, j.Error, reason)
+		f.t.Errorf("job %s with %+v; want failed as an incomplete archive: %s", j.State, j.Error, reason)
+	}
+	if vs := f.state(); vs.State != meta.Activating {
+		f.t.Errorf("version %s, want activating", vs.State)
 	}
 	item, _, err := f.m.Stream(f.t.Context(), stream)
 	if holes := item.After(); err != nil || len(holes) != 1 || holes[0].Cause != meta.HoleErrors || holes[0].Object != object {
@@ -478,9 +481,9 @@ func gzipped(t *testing.T, data []byte) []byte {
 	return b.Bytes()
 }
 
-// A job that an older build left at the watermark, with no origin, breaks before it reads
+// A job that an older build left at the watermark, with no origin, fails before it reads
 // anything.
-func TestStepWithoutAnOriginBreaksAtTheWatermark(t *testing.T) {
+func TestStepWithoutAnOriginFailsAtTheWatermark(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		f := archived(t)
@@ -495,8 +498,8 @@ func TestStepWithoutAnOriginBreaksAtTheWatermark(t *testing.T) {
 			t.Fatal(err)
 		}
 		j := f.job()
-		if j.State != meta.JobBroken || j.Error == nil || j.Error.Phase != meta.PhaseWatermark || !strings.Contains(j.Error.Message, "no origin was recorded") {
-			t.Errorf("job %s with %+v; want broken at the watermark for no origin", j.State, j.Error)
+		if j.State != meta.JobFailed || j.Error == nil || j.Error.Phase != meta.PhaseWatermark || !strings.Contains(j.Error.Message, "no origin was recorded") {
+			t.Errorf("job %s with %+v; want failed at the watermark for no origin", j.State, j.Error)
 		}
 		if qs := f.archive.started(); len(qs) > 0 {
 			t.Errorf("queries %+v", qs)

@@ -478,6 +478,9 @@ func (p *regionPlanner) jobItem(it *planItem, vv *catalog.ViewVersion, vs meta.V
 	case meta.JobBroken:
 		return it.refuse("DF7502", fmt.Sprintf("%s's job broke in %s", it.version, p.d.region),
 			"read its error with dynaflux status, then rebuild the view"), nil
+	case meta.JobFailed:
+		return it.refuse("DF7506", fmt.Sprintf("%s's job failed in %s on an archive of %s that wasn't complete, so the version can't go live",
+			it.version, p.d.region, vv.Stream), "read its error with dynaflux status, then rebuild the view"), nil
 	case meta.JobCancelled, meta.JobRunning:
 	}
 	var running []string

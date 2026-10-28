@@ -84,6 +84,10 @@ func (r *regionStatus) findings(f *fleet, prefix string, now time.Time) []findin
 		case r.blocking(id):
 			fs = append(fs, r.blocked(vs, now))
 		case !defined || vs.State == meta.Live || vs.State == meta.Retired:
+		case hasJob && j.State == meta.JobFailed:
+			fs = append(fs, regionFinding(r.region, diag.SeverityError, "DF7219",
+				fmt.Sprintf("the backfill of %s failed on an archive of stream %s that wasn't complete, so %s can't go live%s", id, vv.Stream, id, jobError(j)),
+				rebuildHint([]string{id}, prefix)))
 		case hasJob && j.State == meta.JobRunning:
 			if e, read := r.execs[id]; read && e.ARN == "" {
 				fs = append(fs, regionFinding(r.region, diag.SeverityWarning, "DF7216",
@@ -143,9 +147,13 @@ func noOrigin(region, stream string, born time.Time, st backfill.OriginStatus, p
 // DF7218 when its table is less than 23 hours old and has no origin; DF7204 when its archive
 // isn't complete, for the versions activating from it; and DF7204 for each gap suspected in
 // the views applied live, for the versions activated before it that no finding named yet.
+// DF7219 already names the versions whose jobs failed.
 func (r *regionStatus) archiveFindings(s streamStatus, prefix string, now time.Time) []finding {
 	var fs []finding
 	named := map[string]bool{}
+	for _, j := range r.jobs {
+		named[j.Version] = j.State == meta.JobFailed
+	}
 	if a := s.check; a != nil && !a.unread {
 		if a.noOrigin && !a.born.IsZero() && now.Sub(a.born) < backfill.FreshAge {
 			fs = append(fs, noOrigin(r.region, s.name, a.born, backfill.OriginStatus{}, prefix))

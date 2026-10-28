@@ -507,6 +507,22 @@ func statusArchiveCases() []statusCase {
 			t.Helper()
 			s.fenceJob(t, meta.PhaseStage)
 		}},
+		// The failed job names its version, so the archive's finding doesn't.
+		{"archive job failed", east, 1, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.fenceJob(t, meta.PhaseStage)
+			m := s.metas["us-east-1"]
+			all, off := map[string]meta.ArchiveMode{"signups": meta.ArchiveAll}, map[string]meta.ArchiveMode{"signups": meta.ArchiveOff}
+			must(t, m.ApplyArchiveModes(t.Context(), all, off, false, time.Now()))
+			must(t, m.ApplyArchiveModes(t.Context(), off, all, false, time.Now().Add(time.Minute)))
+			failJob(t, m, "plan_counts@v2", "signups in us-east-1: rule 2: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z")
+		}},
+		// The job failed on evidence that is gone since: its version still can't go live.
+		{"archive job failed on a missing mapping", east, 1, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.fenceJob(t, meta.PhaseStage)
+			failJob(t, s.metas["us-east-1"], "plan_counts@v2", "signups in us-east-1: rule 3: no event source mapping reads the stream")
+		}},
 	}
 }
 
@@ -554,6 +570,18 @@ func brokenSeen(t *testing.T, s *statusStore) {
 	t.Helper()
 	markBroken(t, s.metas["us-east-1"], "page_seen@v1", "page_views", meta.Failure{Cause: meta.CauseRecord,
 		EventID: "e6", Error: "division by zero", At: time.Now()})
+}
+
+// failJob ends version's job in m as a job ends on an archive that isn't complete, for reason.
+func failJob(t *testing.T, m *meta.Meta, version, reason string) {
+	t.Helper()
+	if _, err := m.UpdateJob(t.Context(), version, func(j *meta.Job) (bool, error) {
+		j.State = meta.JobFailed
+		j.Error = &meta.JobError{Phase: j.Phase, Message: backfill.ErrIncomplete.Error() + ": " + reason, At: time.Now()}
+		return true, nil
+	}); err != nil {
+		t.Error(err)
+	}
 }
 
 func markBroken(t *testing.T, m *meta.Meta, version, stream string, f meta.Failure) {
