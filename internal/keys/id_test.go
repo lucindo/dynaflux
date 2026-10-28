@@ -108,6 +108,19 @@ func TestOwner(t *testing.T) {
 	}
 }
 
+func TestOwnerEvent(t *testing.T) {
+	t.Parallel()
+	const id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	if got, err := keys.OwnerEvent(id); err != nil || got != "E"+id {
+		t.Errorf("OwnerEvent = %q, %v; want %q", got, err, "E"+id)
+	}
+	for _, bad := range []string{strings.ToLower(id), id[1:], "81ARZ3NDEKTSV4RRFFQ69G5FAV", keys.UnitKey(exampleUnit)} {
+		if o, err := keys.OwnerEvent(bad); err == nil {
+			t.Errorf("OwnerEvent(%q) = %q, want an error", bad, o)
+		}
+	}
+}
+
 func TestCanonical(t *testing.T) {
 	t.Parallel()
 	dec := func(s string) expr.Value {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/infra"
 )
 
@@ -37,13 +38,23 @@ func validManifest() *infra.Manifest {
 				Common: infra.Common{ID: "BackfillStateMachine"}, Name: "${prefix}analytics-backfill", Role: "${ref:RoleSetup.arn}",
 				LogGroup: "logs", Function: "${ref:Setup.arn}",
 			}},
-			Functions: []infra.Function{{Common: infra.Common{ID: "Setup"}, Name: "setup", Role: "${ref:RoleSetup.arn}", LogGroup: "logs"}},
+			Functions: []infra.Function{
+				{Common: infra.Common{ID: "Setup"}, Name: "setup", Role: "${ref:RoleSetup.arn}", LogGroup: "logs"},
+				{
+					Common: infra.Common{ID: "ProjectorPageViews"}, Name: "projector", Mode: catalog.EnvModeProjector, Role: "${ref:RoleSetup.arn}",
+					LogGroup: "logs", After: []string{"ArchiveMode"},
+				},
+			},
+			ArchiveModes: []infra.ArchiveMode{{
+				Common: infra.Common{ID: "ArchiveMode"}, Handler: "${ref:Setup.arn}", MetaTable: "${prefix}analytics-meta",
+				Streams: map[string]string{"page_views": "all"},
+			}},
 			StreamLookups: []infra.StreamLookup{
 				{Common: infra.Common{ID: "LookupPageViews"}, Handler: "${ref:Setup.arn}", Table: "${ref:StreamPageViews.name}"},
 			},
 			Catalogs: []infra.CatalogRegistration{{
 				Common: infra.Common{ID: "Catalog"}, Handler: "${ref:Setup.arn}", MetaTable: "${prefix}analytics-meta",
-				After: []string{"LookupPageViews", "RoleSetupPolicy1"},
+				After: []string{"LookupPageViews", "ProjectorPageViews", "RoleSetupPolicy1"},
 			}},
 			LogStreams: []infra.LogStream{{Common: infra.Common{ID: "LogStreamPage", ArchiveOnly: true}, Group: "logs", Name: "page"}},
 			ArchiveSchemas: []infra.ArchiveSchema{{
@@ -79,6 +90,18 @@ func TestCheck(t *testing.T) {
 		want   string // a part of the error; empty for none
 	}{
 		{"valid", func(*infra.Manifest) {}, ""},
+		{
+			"projector before the archive mode", func(m *infra.Manifest) { m.Regional.Functions[1].After = nil },
+			"ProjectorPageViews, a function in mode projector, waits for an archive mode: false",
+		},
+		{
+			"another function after the archive mode", func(m *infra.Manifest) { m.Regional.Functions[0].After = []string{"ArchiveMode"} },
+			"Setup, a function in mode , waits for an archive mode: true",
+		},
+		{
+			"function waits for a missing resource", func(m *infra.Manifest) { m.Regional.Functions[1].After = []string{"ArchiveMode", "Mode"} },
+			"ProjectorPageViews after Mode isn't a resource of its scope",
+		},
 		{"ID of 255 characters", func(m *infra.Manifest) { m.Regional.Tables[0].ID = "M" + strings.Repeat("x", 254) }, ""},
 		{
 			"ID of 256 characters", func(m *infra.Manifest) { m.Regional.Tables[0].ID = "M" + strings.Repeat("x", 255) },

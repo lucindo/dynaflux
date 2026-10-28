@@ -17,8 +17,11 @@ func Operations() map[string][]string {
 		return out
 	}
 	return map[string][]string{
-		"s3":         names(reflect.TypeFor[s3API]()),
+		"s3":         names(reflect.TypeFor[S3]()),
 		"dynamodb":   append(names(reflect.TypeFor[DynamoDB]()), names(reflect.TypeFor[streamsAPI]())...),
-		"cloudwatch": names(reflect.TypeFor[CloudWatch]()),
+		"cloudwatch": append(names(reflect.TypeFor[CloudWatch]()), names(reflect.TypeFor[MetricLister]())...),
+		"athena":     names(reflect.TypeFor[Athena]()),
+		"firehose":   names(reflect.TypeFor[Firehose]()),
+		"lambda":     names(reflect.TypeFor[Lambda]()),
 	}
 }

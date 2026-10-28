@@ -4,6 +4,7 @@
 package cloudformation
 
 import (
+	"slices"
 	"strconv"
 
 	"go.yaml.in/yaml/v4"
@@ -15,13 +16,20 @@ import (
 // role the policy, so the role exists before its policies.
 func managedPolicy(r *resolver, role infra.Role, p infra.ManagedPolicy) *yaml.Node {
 	statements := make([]*yaml.Node, 0, len(p.Statements))
+	c := role.Common
+	// A policy of archive-only statements alone would be empty elsewhere, which IAM refuses.
+	c.ArchiveOnly = c.ArchiveOnly || !slices.ContainsFunc(p.Statements, func(st infra.Statement) bool { return !st.ArchiveOnly })
 	for _, st := range p.Statements {
-		statements = append(statements, statement(r, st))
+		n := statement(r, st)
+		if st.ArchiveOnly {
+			n = ifArchive(n)
+		}
+		statements = append(statements, n)
 	}
 	return resource("AWS::IAM::ManagedPolicy", mapping(
 		kv("Roles", seq(intrinsic("Ref", str(role.ID)))),
 		kv("PolicyDocument", policyDocument(statements...)),
-	), archiveCondition(role.Common)...)
+	), archiveCondition(c)...)
 }
 
 // Retries of the state machine's tasks.

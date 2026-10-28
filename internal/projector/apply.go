@@ -24,6 +24,13 @@ import (
 // condition that keeps failing means the backend disagrees with the _v it returns.
 const maxAttempts = 100
 
+// A row write that meets a transaction (store.ErrConflict) reads the row again and retries
+// up to conflictRetries times, each after a wait from conflictWait to 10 times as long.
+const (
+	conflictRetries = 4
+	conflictWait    = 5 * time.Millisecond
+)
+
 // applyRows writes the rows of unit own's records, "" for the backfill's, parallel at a
 // time, and returns each one's error. Every write has finished when it returns. It
 // reads every row before it writes any: pruning reads the items of the other units whose
@@ -117,9 +124,41 @@ func (c *Core) units(ctx context.Context, stream, own string, items []*item) (ma
 	return units, nil
 }
 
-// writeRow writes the contributions of g that cur, its stored item, doesn't hold yet, by its
-// high-water marks, in one conditional write.
+// writeRow writes the contributions of g that cur, its stored item, doesn't hold yet. A write
+// that meets a transaction may have been applied, so the row is read again before a retry.
+// Retrying in place keeps a hot row from failing the batch in the region whose appends
+// write SYNC rows too (ADR 0014 §7).
 func (c *Core) writeRow(ctx context.Context, g *rowGroup, cur *item, units map[string]meta.Unit) error {
+	for n := 1; ; n++ {
+		err := c.putRow(ctx, g, cur, units)
+		if !errors.Is(err, store.ErrConflict) || n > conflictRetries {
+			return err
+		}
+		t := time.NewTimer(g.conflictWait(n))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return err
+		case <-t.C:
+		}
+		if cur, err = c.readRow(ctx, g); err != nil {
+			return err
+		}
+	}
+}
+
+// conflictWait returns the wait before g's retry n after a conflict. It is a hash of the row
+// item, the first record and n, which spreads the writers that met one transaction and
+// keeps a simulation run replayable.
+func (g *rowGroup) conflictWait(n int) time.Duration {
+	x := fmt.Sprintf("%s\x00%s\x00%s\x00%d", g.key.PK, g.key.SK, g.contribs[0].seq, n)
+	spread := int(9 * conflictWait / time.Microsecond)
+	return conflictWait + time.Duration(keys.Bucket(x, spread+1))*time.Microsecond
+}
+
+// putRow writes the contributions of g that cur, its stored item, doesn't hold yet, by its
+// high-water marks, in one conditional write.
+func (c *Core) putRow(ctx context.Context, g *rowGroup, cur *item, units map[string]meta.Unit) error {
 	v := g.v
 	table := c.naming.ViewTable(v.name, v.def.Number)
 	for range maxAttempts {
@@ -324,15 +363,7 @@ func (c *Core) readMarkers(ctx context.Context, table string, g *rowGroup, ms []
 // putMarker creates the marker k owned by owner unless one exists, and returns the stored
 // owner.
 func (c *Core) putMarker(ctx context.Context, table string, g *rowGroup, k store.Key, owner string) (string, error) {
-	it := store.Item{
-		catalog.AttrPK:          {Type: store.S, Str: k.PK},
-		catalog.AttrSK:          {Type: store.S, Str: k.SK},
-		catalog.AttrMarkerOwner: {Type: store.S, Str: owner},
-	}
-	if g.hasExp {
-		it[catalog.AttrTTL] = keys.TTL(g.exp)
-	}
-	err := c.b.Put(ctx, table, it, store.IfAbsent())
+	err := c.b.Put(ctx, table, g.marker(k, owner), store.IfAbsent())
 	var ce *store.ConditionError
 	switch {
 	case errors.As(err, &ce):
@@ -345,6 +376,19 @@ func (c *Core) putMarker(ctx context.Context, table string, g *rowGroup, k store
 		return "", fmt.Errorf("projector: write view %s marker %q: %w", g.v.id, k.PK, err)
 	}
 	return owner, nil
+}
+
+// marker returns g's marker item k, owned by owner, which expires with the row.
+func (g *rowGroup) marker(k store.Key, owner string) store.Item {
+	it := store.Item{
+		catalog.AttrPK:          {Type: store.S, Str: k.PK},
+		catalog.AttrSK:          {Type: store.S, Str: k.SK},
+		catalog.AttrMarkerOwner: {Type: store.S, Str: owner},
+	}
+	if g.hasExp {
+		it[catalog.AttrTTL] = keys.TTL(g.exp)
+	}
+	return it
 }
 
 func markerOwner(it store.Item) (string, error) {

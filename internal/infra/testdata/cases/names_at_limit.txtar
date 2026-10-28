@@ -279,6 +279,12 @@ Resources:
           ExpirationInDays: 30
           NoncurrentVersionExpiration:
             NoncurrentDays: 1
+        - Id: backfill-results
+          Status: Enabled
+          Prefix: athena/backfill/
+          ExpirationInDays: 30
+          NoncurrentVersionExpiration:
+            NoncurrentDays: 1
       Tags:
       - Key: dynaflux:kind
         Value: bucket
@@ -609,6 +615,8 @@ Resources:
     Type: AWS::Serverless::Function
     Metadata:
       BuildMethod: go1.x
+    DependsOn:
+    - ArchiveMode
     Properties:
       FunctionName: !Sub ${Prefix}analytics-at-the-limit-x-projector
       CodeUri: ../../cmd/dynaflux-runtime
@@ -800,6 +808,15 @@ Resources:
         Value: backfill
       - Key: dynaflux:store
         Value: analytics-at-the-limit-x
+  ArchiveMode:
+    Type: Custom::DynafluxArchiveMode
+    Properties:
+      ServiceToken: !GetAtt Setup.Arn
+      ServiceTimeout: 300
+      MetaTable: !Ref Meta
+      Streams:
+        a_1: "off"
+        a__b: "off"
   Catalog:
     Type: Custom::DynafluxCatalog
     DependsOn:

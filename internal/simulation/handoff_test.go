@@ -81,7 +81,7 @@ func (h *handoff) makeLive(t *testing.T, version string) {
 
 // core returns a container's core, writing through b.
 func (h *handoff) core(b store.Backend) *projector.Core {
-	return projector.New(h.sys.cat.Projector(), b, h.archive, projector.Config{Naming: h.sys.Config().Naming})
+	return projector.New(h.sys.cat.Projector(), b, h.archive, projector.Config{Naming: h.sys.Config().Naming, Region: "r0"})
 }
 
 // batch appends a page view of s0 per sequence number and returns them as one batch of

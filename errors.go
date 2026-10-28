@@ -28,13 +28,18 @@ var (
 	// combinations to read.
 	ErrTooManyKeys = engine.ErrTooManyKeys // "too many key combinations"
 	// ErrEvaluation is an expression of a query that failed on the rows it read, such as an
-	// integer division by zero, or a sum outside its result type.
+	// integer division by zero, or a sum outside its result type; or one of a SYNC view
+	// that failed on an appended event, which then isn't written. The error names the view
+	// version.
 	ErrEvaluation = engine.ErrEvaluation // "evaluation error"
 	// ErrViewNotReady is a query over a view whose version isn't live in the store's region:
 	// no backfill has made it live yet, or it broke or was retired. The error names the
 	// version, its state and the region, and a broken version's failure. [AllowPartial]
 	// reads the view anyway.
 	ErrViewNotReady = engine.ErrViewNotReady // "view version not ready"
+	// ErrWaitTimeout is a query whose [WaitFor] timeout passed before the projector had
+	// handled every event of the token.
+	ErrWaitTimeout = engine.ErrWaitTimeout // "wait for an append timed out"
 )
 
 // ValueError is a value that Dynaflux can't store: invalid UTF-8, a Float64 that isn't

@@ -59,7 +59,8 @@ do. It then fills each view version that isn't live from its stream table, as
 dynaflux backfill does on AWS: an idempotent version is live in about a second, an
 additive one in about 7 seconds. It prints the environment that points the
 application at DynamoDB Local on standard output, then a line for each batch it
-projects, until it is interrupted.
+projects, until it is interrupted. It stops at an event that an application appended
+in another region than the one it prints: SYNC views would count it twice.
 
 Dev runs what dynaflux generate wrote: it refuses to run while generate would change
 dynaflux.lock. Run again, it reads the streams from their start and skips what it
@@ -184,7 +185,7 @@ func (c *cli) openDev(p *project, o devOptions, staging string) (*devRun, int) {
 		return nil, exitUsage
 	}
 	states := meta.NewStateCache(m)
-	core := projector.New(compiled, b, nil, projector.Config{Naming: naming, States: states})
+	core := projector.New(compiled, b, nil, projector.Config{Naming: naming, States: states, Region: region})
 	d := &devRun{
 		c: c, endpoint: o.endpoint, naming: naming, region: region, states: states, core: core,
 		timeout: time.Duration(p.cfg.Runtime.TimeoutSeconds) * time.Second, runs: runs,
@@ -336,6 +337,11 @@ func (d *devRun) stopped(err error) int {
 		d.c.errorf("dynaflux dev: DynamoDB Local stopped answering at %s: %v\n  hint: start it with %s, then run dynaflux dev again",
 			d.endpoint, err, dockerRun(d.endpoint))
 		return exitUsage
+	}
+	if _, foreign := errors.AsType[*regionError](err); foreign {
+		d.c.errorf("dynaflux dev: %v\n  hint: set AWS_REGION=%s in the application, as dev prints, then run dynaflux dev -reset: the stream table keeps the event",
+			err, d.region)
+		return exitErrors
 	}
 	d.c.errorf("dynaflux dev: %v\n  hint: fix the cause and run dynaflux dev again; it reads the streams from their start", err)
 	return exitErrors

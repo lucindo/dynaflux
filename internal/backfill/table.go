@@ -252,7 +252,7 @@ func (s *step) commitScan(ctx context.Context, j *meta.Job, from meta.Stage, buf
 	if len(buf) == 0 && !done && sameStage(from, to) {
 		return nil
 	}
-	run, wrote, err := s.sortedRun(ctx, j, "", buf)
+	run, wrote, err := s.sortedRun(ctx, j, buf)
 	if err != nil {
 		return err
 	}

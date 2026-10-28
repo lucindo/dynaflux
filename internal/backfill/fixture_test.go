@@ -6,11 +6,15 @@ package backfill_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -62,7 +66,9 @@ type fixture struct {
 	archive *archiveFake
 	units   *unitsFake
 	tables  *tablesFake
+	witness *witnessFake
 	lag     *lagFake
+	hash    string // the catalog's
 	enc     *archive.Encoder
 	engine  *engine.Engine // appends to the stream table; made on first use
 	events  int
@@ -70,8 +76,15 @@ type fixture struct {
 	stepTime time.Duration
 }
 
+// region is the fixture's, which archives every event of the stream.
+const region = "us-east-1"
+
+// streamARN is the ARN of the fixture's stream in its region.
+const streamARN = "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-events/stream/2000-01-01T00:00:00.000"
+
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	// The default config archives every event of every stream in every region.
 	data := catalogtest.Marshal(t, storeName, storeSQL)
 	cat, err := engine.Compile(data)
 	if err != nil {
@@ -86,9 +99,10 @@ func newFixture(t *testing.T) *fixture {
 	def, _ := cat.Catalog().Stream(stream)
 	f := &fixture{
 		t: t, b: b, m: m, cat: cat, runs: backfill.NewMemRuns(),
-		archive: &archiveFake{complete: true, files: map[string][]byte{}},
+		archive: &archiveFake{complete: true, files: map[string][]byte{}, errors: map[string][]byte{}, written: map[string]time.Time{}},
 		units:   &unitsFake{}, tables: &tablesFake{born: time.Now().Add(-48 * time.Hour)}, lag: &lagFake{},
-		enc: archive.NewEncoder(def), stepTime: stepTime,
+		witness: &witnessFake{facts: backfill.Facts{ARN: streamARN, Mapping: true}},
+		enc:     archive.NewEncoder(def), stepTime: stepTime, hash: catalog.Hash(data),
 	}
 	f.env = &backfill.Env{
 		Naming:  naming,
@@ -100,13 +114,36 @@ func newFixture(t *testing.T) *fixture {
 		Units:   f.units,
 		Tables:  f.tables,
 		Archive: f.archive,
+		Region:  region,
+		Witness: f.witness,
 		Runs:    f.runs,
 		Lag:     f.lag,
 		Bounds:  meta.DefaultBounds,
 		Memory:  64 << 20,
 		Log:     slog.New(slog.DiscardHandler),
 	}
+	f.recordOrigin()
 	return f
+}
+
+// recordOrigin gives the stream the item a deploy writes, and an origin that a backfill -all
+// recorded while the stream table, born when the fixture's tables say, was fresh.
+func (f *fixture) recordOrigin() {
+	f.t.Helper()
+	ctx := f.t.Context()
+	item, _, err := f.m.Stream(ctx, stream)
+	if err == nil {
+		err = f.m.ApplyArchiveModes(ctx, nil, map[string]meta.ArchiveMode{stream: meta.ArchiveAll}, true, f.tables.born)
+	}
+	if err == nil {
+		item, _, err = f.m.Stream(ctx, stream)
+	}
+	if err == nil {
+		_, err = f.m.RecordOrigin(ctx, item, meta.Origin{At: f.tables.born, Hash: f.hash, RegisteredAt: f.tables.born, Born: f.tables.born, ARN: streamARN})
+	}
+	if err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 // seq returns the i-th sequence number, as the archive holds it.
@@ -114,11 +151,27 @@ func seq(i int) string { return fmt.Sprintf("%040d", i) }
 
 // record adds to an archive file the record of an event of account with n, at seq i of unit.
 func (f *fixture) record(file, unit string, i int, account string, n uint64) {
+	f.archive.add(file, f.event(unit, i, account, n))
+}
+
+// recordError adds the same to an object of the error prefix.
+func (f *fixture) recordError(object, unit string, i int, account string, n uint64) {
+	f.archive.addError(object, f.event(unit, i, account, n))
+}
+
+// event returns the archive record of a new event of account with n, at seq i of unit, which
+// arrived now.
+func (f *fixture) event(unit string, i int, account string, n uint64) []byte {
+	return f.eventAt(unit, i, account, n, time.Now())
+}
+
+// eventAt is event for a record that arrived at arrival.
+func (f *fixture) eventAt(unit string, i int, account string, n uint64, arrival time.Time) []byte {
 	f.events++
 	id := fmt.Sprintf("01JB8Z9X4Q7M3N2P5R6S8%05d", f.events)
-	at := time.Now().UnixMicro()
+	at := arrival.UnixMicro()
 	vals := []expr.Value{expr.String(account), expr.Uint(n), expr.String(id), expr.Micros(at), expr.Micros(at), expr.String("us-east-1")}
-	f.archive.add(file, f.enc.AppendRecord(nil, vals, unit, seq(i), time.Time{}))
+	return f.enc.AppendRecord(nil, vals, unit, seq(i), arrival)
 }
 
 // progress raises a unit's progress to seq i, as a projector's batch does.
@@ -212,13 +265,32 @@ func rowsIn(t *testing.T, b store.Backend, cat *engine.Catalog, accounts ...stri
 	return out
 }
 
-// archiveFake is an archive whose files tests write, and whose watermark they set. onOpen,
-// when set, runs before a file opens.
+// archiveFake is an archive whose export files and error objects tests write, and whose
+// watermark they set. Every export it runs yields every file, and its queries end at once:
+// they succeed unless outcomes, which tests set, give the next export's status. Partitions
+// are parts, or one partition of a day on each side of the start without a record count.
+// onOpen, when set, runs before a file opens.
 type archiveFake struct {
 	mu       sync.Mutex
 	complete bool
 	files    map[string][]byte
+	errors   map[string][]byte
+	written  map[string]time.Time // when each error object was last written
+	parts    []backfill.Partition
+	outcomes []backfill.QueryStatus
+	throttle int    // how many starts to refuse with ErrThrottled
+	loseNext bool   // the next export's start creates its query, but its response is lost
+	running  int    // how many reads of an export's status say it runs, before its outcome
+	failOpen string // a file whose next open fails
+	queries  []fakeQuery
 	onOpen   func(file string)
+}
+
+// fakeQuery is a query the archive started, its token and its status.
+type fakeQuery struct {
+	q      backfill.Query
+	token  string
+	status backfill.QueryStatus
 }
 
 func (a *archiveFake) add(file string, rec []byte) {
@@ -227,10 +299,34 @@ func (a *archiveFake) add(file string, rec []byte) {
 	a.files[file] = append(append(a.files[file], rec...), '\n')
 }
 
+// addError adds to an error object a line of the form Firehose writes a record it couldn't
+// deliver in, with rec as its rawData.
+func (a *archiveFake) addError(object string, rec []byte) {
+	line := `{"attemptsMade":1,"errorCode":"Iceberg.InvalidRecord","rawData":"` + base64.StdEncoding.EncodeToString(rec) + `"}`
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.errors[object] = append(a.errors[object], line+"\n"...)
+	a.written[object] = time.Now()
+}
+
 func (a *archiveFake) setComplete(complete bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.complete = complete
+}
+
+// setOutcomes sets the statuses of the next exports, in turn.
+func (a *archiveFake) setOutcomes(outcomes ...backfill.QueryStatus) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.outcomes = outcomes
+}
+
+// started returns the queries the archive started, in order.
+func (a *archiveFake) started() []fakeQuery {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.queries)
 }
 
 func (a *archiveFake) Complete(context.Context, string, time.Time) (bool, error) {
@@ -239,19 +335,109 @@ func (a *archiveFake) Complete(context.Context, string, time.Time) (bool, error)
 	return a.complete, nil
 }
 
-func (a *archiveFake) Export(context.Context, *meta.Job) ([]string, bool, error) {
+func (a *archiveFake) Start(_ context.Context, q backfill.Query, token string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return slices.Sorted(maps.Keys(a.files)), true, nil
+	if a.throttle > 0 {
+		a.throttle--
+		return "", fmt.Errorf("TooManyRequestsException: %w", backfill.ErrThrottled)
+	}
+	for i, fq := range a.queries {
+		if fq.token == token {
+			return queryID(i), nil
+		}
+	}
+	st := backfill.QueryStatus{State: backfill.QuerySucceeded, Scanned: 100}
+	if q.Kind == backfill.QueryExport && len(a.outcomes) > 0 {
+		st, a.outcomes = a.outcomes[0], a.outcomes[1:]
+	}
+	a.queries = append(a.queries, fakeQuery{q: q, token: token, status: st})
+	if a.loseNext && q.Kind == backfill.QueryExport {
+		a.loseNext = false
+		return "", errors.New("connection reset")
+	}
+	return queryID(len(a.queries) - 1), nil
 }
 
-func (a *archiveFake) Open(_ context.Context, file string) (io.ReadCloser, error) {
-	if a.onOpen != nil {
-		a.onOpen(file)
+func queryID(i int) string { return "q" + strconv.Itoa(i) }
+
+// query returns the query of id.
+func (a *archiveFake) query(id string) (fakeQuery, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	i, err := strconv.Atoi(strings.TrimPrefix(id, "q"))
+	if err != nil || i < 0 || i >= len(a.queries) {
+		return fakeQuery{}, fmt.Errorf("no query %s", id)
+	}
+	return a.queries[i], nil
+}
+
+func (a *archiveFake) Status(_ context.Context, id string) (backfill.QueryStatus, error) {
+	fq, err := a.query(id)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err == nil && fq.q.Kind == backfill.QueryExport && a.running > 0 {
+		a.running--
+		return backfill.QueryStatus{State: backfill.QueryRunning}, nil
+	}
+	return fq.status, err
+}
+
+func (a *archiveFake) Stop(context.Context, string) error { return nil }
+
+func (a *archiveFake) Partitions(_ context.Context, id string) ([]backfill.Partition, error) {
+	fq, err := a.query(id)
+	switch {
+	case err != nil:
+		return nil, err
+	case fq.q.Kind != backfill.QueryPartitions || fq.status.State != backfill.QuerySucceeded:
+		return nil, fmt.Errorf("query %s listed no partitions: %+v", id, fq)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return io.NopCloser(bytes.NewReader(a.files[file])), nil
+	if a.parts != nil {
+		return slices.Clone(a.parts), nil
+	}
+	day := time.Now().Truncate(24 * time.Hour)
+	return []backfill.Partition{{From: day.Add(-24 * time.Hour), To: day.Add(48 * time.Hour), Bytes: 1 << 20}}, nil
+}
+
+func (a *archiveFake) Files(_ context.Context, id string) ([]string, error) {
+	fq, err := a.query(id)
+	switch {
+	case err != nil:
+		return nil, err
+	case fq.q.Kind != backfill.QueryExport || fq.status.State != backfill.QuerySucceeded:
+		return nil, fmt.Errorf("query %s exported no files: %+v", id, fq)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Sorted(maps.Keys(a.files)), nil
+}
+
+func (a *archiveFake) ErrorObjects(_ context.Context, _, after string, since time.Time) ([]string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.DeleteFunc(slices.Sorted(maps.Keys(a.errors)), func(name string) bool {
+		return name <= after || a.written[name].Before(since)
+	}), nil
+}
+
+func (a *archiveFake) Open(_ context.Context, name string) (io.ReadCloser, error) {
+	if a.onOpen != nil {
+		a.onOpen(name)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if name == a.failOpen {
+		a.failOpen = ""
+		return nil, errors.New("SlowDown")
+	}
+	data, ok := a.files[name]
+	if !ok {
+		data = a.errors[name]
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 // unitsFake lists the units a test sets, and calls onList, when set, before it returns.
@@ -283,6 +469,30 @@ type tablesFake struct {
 
 func (t *tablesFake) Born(context.Context, string) (time.Time, bool, error) {
 	return t.born, t.restored, nil
+}
+
+// witnessFake shows the facts a test sets, whatever the origin.
+type witnessFake struct {
+	mu    sync.Mutex
+	facts backfill.Facts
+}
+
+func (w *witnessFake) set(facts backfill.Facts) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.facts = facts
+}
+
+func (w *witnessFake) StreamARN(context.Context, string) (string, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.facts.ARN, nil
+}
+
+func (w *witnessFake) Facts(context.Context, string, meta.StreamItem) (backfill.Facts, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.facts, nil
 }
 
 type lagFake struct {

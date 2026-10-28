@@ -146,8 +146,8 @@ func TestArchiveJobLayout(t *testing.T) {
 		m := meta.New(bk, table)
 		j := tableJob()
 		j.Split, j.Phase, j.Attempt, j.Execution = meta.SplitFence, meta.PhaseWatermark, 2, "arn:aws:states:execution:x"
-		j.Cut, j.Waits = bubbleStart.Add(90*time.Second), meta.WaitArchive
-		createJob(t, m, j)
+		j.Cut = bubbleStart.Add(90 * time.Second)
+		created := createJob(t, m, j)
 		wantItem(t, bk, store.Item{
 			"pk": s("job"), "sk": s(version), "stream": s(stream), "source": s("archive"), "split": s("fence"),
 			"state": s("running"), "phase": s("watermark"), "attempt": n("2"),
@@ -155,8 +155,58 @@ func TestArchiveJobLayout(t *testing.T) {
 			"created_at": n("946684800000000"), "updated_at": n("946684800000000"), "cut": n("946684890000000"),
 			"staging": s("backfill/page_daily@v2/946684800000000/"),
 			"staged":  n("0"), "applied": n("0"), "skipped": n("0"), "chunks": n("0"), "rate": n("0"),
-			"waits": s("archive_read"), "_v": n("1"),
+			"_v": n("1"),
 		})
+		if read := readJob(t, m); !reflect.DeepEqual(read, created) {
+			t.Errorf("read %+v, want %+v", read, created)
+		}
+	})
+}
+
+// An archive source's stage stores the fields that aren't zero.
+func TestArchiveStageLayout(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		bk := mem.New()
+		m := meta.New(bk, table)
+		j := tableJob()
+		j.Split, j.Phase, j.Cut = meta.SplitFence, meta.PhaseStage, bubbleStart.Add(90*time.Second)
+		j.Archive = meta.ArchiveStage{
+			Errors:    meta.ErrorPrefix{After: "errors/firehose/page_views/2000/01/01/00/a.gz", Done: true, Foreign: 2},
+			PlanQuery: "q-plan",
+			Plan:      "plan-1-0a1b",
+			Export:    meta.Export{From: bubbleStart.Add(-24 * time.Hour), To: bubbleStart.Add(-12 * time.Hour), Try: 3, Failed: 1, ID: "q-slice"},
+			Slice:     1,
+			Query:     "q-slice",
+			File:      4,
+			Skip:      120,
+			Rows:      5000,
+			Scanned:   1 << 30,
+			Tries:     2,
+		}
+		created := createJob(t, m, j)
+		item, err := bk.Get(t.Context(), table, store.Key{PK: "job", SK: version}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := store.Value{Type: store.M, Map: map[string]store.Value{
+			"errors": {Type: store.M, Map: map[string]store.Value{
+				"after": s("errors/firehose/page_views/2000/01/01/00/a.gz"), "done": {Type: store.BOOL, Bool: true}, "foreign": n("2"),
+			}},
+			"plan_query": s("q-plan"),
+			"plan":       s("plan-1-0a1b"),
+			"export": {Type: store.M, Map: map[string]store.Value{
+				"from": n("946598400000000"), "to": n("946641600000000"), "try": n("3"), "failed": n("1"), "id": s("q-slice"),
+			}},
+			"slice": n("1"), "query": s("q-slice"), "file": n("4"), "skip": n("120"), "rows": n("5000"),
+			"scanned": n("1073741824"), "tries": n("2"),
+		}}
+		if !reflect.DeepEqual(item["stage"], want) {
+			t.Errorf("stage %+v, want %+v", item["stage"], want)
+		}
+		if read := readJob(t, m); !reflect.DeepEqual(read, created) || read.Archive != j.Archive {
+			t.Errorf("read %+v, want %+v", read.Archive, j.Archive)
+		}
 	})
 }
 
@@ -378,9 +428,6 @@ func TestDecodeRejectsForeignJobs(t *testing.T) {
 		{"a done table job", tableSourced(done), true},
 		{"a table source split by fences", job(store.Item{"source": s("table")}), false},
 		{"an unknown state", job(store.Item{"state": s("paused")}), false},
-		{"an archive job that waits", job(store.Item{"waits": s("archive_read")}), true},
-		{"a table job that waits", tableSourced(store.Item{"waits": s("archive_read")}), false},
-		{"an unknown wait", job(store.Item{"waits": s("archive")}), false},
 		{"attempt 0", job(store.Item{"attempt": n("0")}), false},
 		{"read_after on an archive job", job(store.Item{"read_after": n("1")}), false},
 		{"a stage on an archive job", job(store.Item{"stage": {Type: store.M, Map: map[string]store.Value{"segments": n("1")}}}), false},

@@ -39,12 +39,12 @@ func LoadCatalog(data string) *dynaflux.Catalog {
 
 // AppendEvent appends the event whose fields are ev. With [dynaflux.ErrDuplicate], it
 // returns the Token of the event stored before.
-func AppendEvent(ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, ev []any, _ ...dynaflux.AppendOption) (dynaflux.Token, error) {
+func AppendEvent(ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, ev []any, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	cl, err := open(s, c, stream, ev)
 	if err != nil {
 		return dynaflux.Token{}, err
 	}
-	res, err := cl.append(ctx, [][]any{ev}, engine.AppendMode{})
+	res, err := cl.append(ctx, [][]any{ev}, access.Get().AppendMode(opts))
 	if err != nil {
 		return dynaflux.Token{}, err
 	}
@@ -52,14 +52,14 @@ func AppendEvent(ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, st
 	if r.Err != nil && !errors.Is(r.Err, dynaflux.ErrDuplicate) {
 		return dynaflux.Token{}, r.Err
 	}
-	return cl.token([]store.Key{r.Key}), r.Err
+	return cl.token([]store.Item{r.Stored}), r.Err
 }
 
 // AppendEvents appends evs, each with its own write. The Token names every event stored, by
 // this call or, for a duplicate, before it. When an event fails, the error is a
 // *dynaflux.BatchError.
-func AppendEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, evs []E, fields func(*E) []any, _ ...dynaflux.AppendOption) (dynaflux.Token, error) {
-	return appendBatch(ctx, s, c, stream, evs, fields, engine.AppendMode{})
+func AppendEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, evs []E, fields func(*E) []any, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
+	return appendBatch(ctx, s, c, stream, evs, fields, access.Get().AppendMode(opts))
 }
 
 // ImportEvents appends evs as [AppendEvents] does, but without the ACCEPT window.
@@ -81,7 +81,7 @@ func appendBatch[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Cata
 	if err != nil {
 		return dynaflux.Token{}, err
 	}
-	var stored []store.Key
+	var stored []store.Item
 	errs := make([]error, len(res))
 	var batchErr error
 	for i, r := range res {
@@ -89,7 +89,7 @@ func appendBatch[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Cata
 			batchErr = &dynaflux.BatchError{Errs: errs}
 		}
 		if r.Err == nil || errors.Is(r.Err, dynaflux.ErrDuplicate) {
-			stored = append(stored, r.Key)
+			stored = append(stored, r.Stored)
 		}
 	}
 	return cl.token(stored), batchErr
@@ -311,9 +311,9 @@ func (cl *call) keyValues(ptrs []any) ([]expr.Value, error) {
 	return vals, nil
 }
 
-func (cl *call) token(ks []store.Key) dynaflux.Token {
+func (cl *call) token(stored []store.Item) dynaflux.Token {
 	var t dynaflux.Token
-	access.Get().InitToken(&t, cl.e.Token(cl.stream, ks))
+	access.Get().InitToken(&t, cl.e.Token(cl.stream, stored))
 	return t
 }
 

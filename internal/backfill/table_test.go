@@ -243,7 +243,7 @@ func TestStepUniqExactTakesASplit(t *testing.T) {
 		if serr != nil || len(items) != 1 {
 			t.Fatalf("scan: %d items, %v", len(items), serr)
 		}
-		core := projector.New(f.cat.Projector(), failRows{f.b}, nil, projector.Config{Naming: f.env.Naming})
+		core := projector.New(f.cat.Projector(), failRows{f.b}, nil, projector.Config{Naming: f.env.Naming, Region: "us-east-1"})
 		batch := projector.Batch{Stream: stream, Unit: "u1", Records: []projector.Record{{Op: projector.Insert, Seq: seq(1), New: items[0]}}}
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		res, err := core.Handle(ctx, batch)
@@ -315,7 +315,7 @@ func TestStepTimeSplitAcrossClocks(t *testing.T) {
 		f := newFixture(t)
 		half := f.env.Bounds.Clock / 2
 		f.env.Now = func() time.Time { return time.Now().Add(half) }
-		core := projector.New(f.cat.Projector(), f.b, nil, projector.Config{Naming: f.env.Naming, Now: func() time.Time { return time.Now().Add(-half) }})
+		core := projector.New(f.cat.Projector(), f.b, nil, projector.Config{Naming: f.env.Naming, Region: "us-east-1", Now: func() time.Time { return time.Now().Add(-half) }})
 		f.env.Core = core
 		elsewhere := mem.New() // the region the event is appended in, now
 		e := engine.New(elsewhere, engine.Options{Region: "us-east-1", Entropy: rand.NewChaCha8([32]byte{})})

@@ -21,7 +21,7 @@ import (
 // ReadRow returns the logical row of view version (such as page_daily@v2) whose key
 // values, in ORDER BY order, are key: the key values, then each aggregate's finalized value
 // in catalog order. ok is false when the row doesn't exist or has expired. The items of a
-// SPLIT row are one Query.
+// SPLIT row are one Query. Reads of a SYNC version are strongly consistent.
 func (e *Engine) ReadRow(ctx context.Context, cat *Catalog, version string, key []expr.Value) ([]expr.Value, bool, error) {
 	name, vv, err := cat.version(version)
 	if err == nil {
@@ -37,7 +37,7 @@ func (e *Engine) ReadRow(ctx context.Context, cat *Catalog, version string, key 
 	table := e.naming(cat).ViewTable(name, vv.Number)
 	var items []store.Item
 	if vv.Split == 1 {
-		it, gerr := e.b.Get(ctx, table, store.Key{PK: sq.PK, SK: sq.From}, false)
+		it, gerr := e.b.Get(ctx, table, store.Key{PK: sq.PK, SK: sq.From}, sq.Consistent)
 		if gerr != nil {
 			return nil, false, fmt.Errorf("dynaflux: read view %s: %w", version, gerr)
 		}
@@ -79,7 +79,8 @@ func (e *Engine) ReadPartition(ctx context.Context, cat *Catalog, version string
 		}
 		now := time.Now()
 		table := e.naming(cat).ViewTable(name, vv.Number)
-		for items, qerr := range rowItems(e.b.Query(ctx, table, store.Query{PK: pk, PageSize: firstPage}), vv.Split > 1) {
+		q := store.Query{PK: pk, PageSize: firstPage, Consistent: consistent(vv)}
+		for items, qerr := range rowItems(e.b.Query(ctx, table, q), vv.Split > 1) {
 			if qerr != nil {
 				yield(nil, fmt.Errorf("dynaflux: read view %s: %w", version, qerr))
 				return
@@ -149,6 +150,10 @@ func finalize(id string, vv *catalog.ViewVersion, ks []expr.Value, states []agg.
 	return row, nil
 }
 
+// consistent reports whether reads of vv are strongly consistent: those of a SYNC version,
+// which an append in the region changes in its transaction (sql.md §9.7).
+func consistent(vv *catalog.ViewVersion) bool { return vv.Mode == catalog.ModeSync }
+
 // rowQuery returns the read of every item of the logical row with key values kvs: a
 // Query whose From is the item's key for a view without SPLIT. It returns false when the
 // key is too long for any row to have it.
@@ -165,7 +170,7 @@ func rowQuery(vv *catalog.ViewVersion, kvs []expr.Value) (store.Query, bool, err
 			return store.Query{}, false, err
 		}
 	}
-	q := store.Query{PK: pk, From: cmp.Or(lsk, keys.NoSortKey)}
+	q := store.Query{PK: pk, From: cmp.Or(lsk, keys.NoSortKey), Consistent: consistent(vv)}
 	if vv.Split > 1 {
 		q.From, q.To = keys.SplitKey(lsk, 0), keys.SplitKey(lsk, vv.Split-1)
 	}
@@ -244,7 +249,7 @@ func (e *Engine) pointRows(ctx context.Context, cat *Catalog, q *query, r *read,
 	now := time.Now()
 	table := e.naming(cat).ViewTable(q.def.Source.Name, q.view.Number)
 	for chunk := range slices.Chunk(ks, store.MaxBatchGetKeys) {
-		its, err := e.b.BatchGet(ctx, table, chunk, false)
+		its, err := e.b.BatchGet(ctx, table, chunk, r.consistent)
 		if err != nil {
 			return err
 		}
@@ -266,7 +271,7 @@ func (e *Engine) comboRows(ctx context.Context, cat *Catalog, q *query, r *read,
 	if q.stream != nil {
 		from, to := r.eventRange()
 		return func(yield func(source, error) bool) {
-			for row, err := range e.events(ctx, cat, q.stream, combo, from, to, q.desc) {
+			for row, err := range e.events(ctx, cat, q.stream, combo, from, to, q.desc, r.consistent) {
 				if !yield(source{vals: row}, err) {
 					return
 				}
@@ -286,6 +291,7 @@ func (e *Engine) comboRows(ctx context.Context, cat *Catalog, q *query, r *read,
 		// may let in.
 		sq.PageSize = perCombo*q.view.Split + 1
 	}
+	sq.Consistent = r.consistent
 	return e.viewRows(ctx, cat, q, sq)
 }
 

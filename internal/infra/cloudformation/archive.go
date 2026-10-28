@@ -10,8 +10,12 @@ import (
 	"github.com/lucindo/dynaflux/internal/setup"
 )
 
-// addArchive adds the archive resources of s.
-func addArchive(rs *resources, r *resolver, s infra.Scope) {
+// addArchive adds the archive resources of s, and the archive modes, of only some regions
+// when someRegions is set.
+func addArchive(rs *resources, r *resolver, s infra.Scope, someRegions bool) {
+	for _, x := range s.ArchiveModes {
+		rs.add(x.ID, func() *yaml.Node { return archiveMode(r, x, someRegions) })
+	}
 	for _, x := range s.ArchiveWorkGroups {
 		rs.add(x.ID, func() *yaml.Node { return archiveWorkGroup(r, x) })
 	}
@@ -37,16 +41,24 @@ func dependsOn(ids ...string) pair {
 	return kv("DependsOn", n)
 }
 
-// archiveWorkGroup returns the workgroup. RecursiveDeleteOption lets CloudFormation delete
+// archiveWorkGroup returns a workgroup. RecursiveDeleteOption lets CloudFormation delete
 // it: Athena refuses to delete a workgroup with any query history otherwise.
 func archiveWorkGroup(r *resolver, x infra.ArchiveWorkGroup) *yaml.Node {
+	results := kv("ManagedQueryResultsConfiguration", mapping(kv("Enabled", boolean(true))))
+	if x.Results != "" {
+		results = kv("ResultConfiguration", mapping(
+			kv("OutputLocation", r.value(x.Results)),
+			kv("EncryptionConfiguration", mapping(kv("EncryptionOption", str("SSE_S3")))),
+			kv("ExpectedBucketOwner", r.value(infra.Text("${"+infra.PlaceholderAccount+"}"))),
+		))
+	}
 	return resource("AWS::Athena::WorkGroup", mapping(
 		kv("Name", r.value(x.Name)),
 		kv("RecursiveDeleteOption", boolean(true)),
 		kv("WorkGroupConfiguration", mapping(
 			kv("EnforceWorkGroupConfiguration", boolean(true)),
 			kv("EngineVersion", mapping(kv("SelectedEngineVersion", str("Athena engine version 3")))),
-			kv("ManagedQueryResultsConfiguration", mapping(kv("Enabled", boolean(true)))),
+			results,
 		)),
 		kv("Tags", tags(x.Tags)),
 	), archiveCondition(x.Common)...)

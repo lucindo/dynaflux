@@ -81,7 +81,7 @@ func TestRetireOnDynamoDBLocal(t *testing.T) {
 	it, err := b.Get(ctx, naming.StreamTable("page_views"), out[0].Key, true)
 	must(t, err)
 	const seq = "100000000000000000005"
-	core := projector.New(cat.Projector(), b, nil, projector.Config{Naming: naming})
+	core := projector.New(cat.Projector(), b, nil, projector.Config{Naming: naming, Region: emulatortest.Region})
 	hctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	r, err := core.Handle(hctx, projector.Batch{Stream: "page_views", Unit: unit, Records: []projector.Record{{Op: projector.Insert, Seq: seq, New: it}}})

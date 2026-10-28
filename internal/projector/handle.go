@@ -91,6 +91,9 @@ type Config struct {
 	// BackfillRows is how many rows ApplyBackfill writes at once; 0 means as many as a live
 	// batch does, 16.
 	BackfillRows int
+	// Region is the region the core runs in, by its canonical name: only an INSERT whose
+	// origin_region it is has its _sync read and its receipt written. Handle needs it.
+	Region string
 }
 
 // ErrUnknownVersion fails a batch whose stream has an activating or live version that the
@@ -120,6 +123,7 @@ type Core struct {
 	window, lifetime time.Duration
 	now              func() time.Time
 	backfillRows     int
+	region           string
 }
 
 // rowParallelism bounds the rows a batch writes at once.
@@ -153,6 +157,7 @@ func New(c *Compiled, b store.Backend, a Archiver, cfg Config) *Core {
 		lifetime:     w - catalog.LifetimeMarginSeconds*time.Second,
 		now:          now,
 		backfillRows: cmp.Or(cfg.BackfillRows, rowParallelism),
+		region:       cfg.Region,
 	}
 }
 
@@ -184,9 +189,11 @@ func (r *record) name() string {
 	return "unit " + r.unit + " record " + r.Seq
 }
 
-// Handle applies a batch to every view version of its stream that the batch reaches,
-// archives its INSERT records and advances the unit's progress past what it applied; a batch
-// without an INSERT only reads the view states for its MODIFY records, if any. A version
+// Handle records a lag in the stream's item when a record above progress is almost a day
+// old, applies a batch to every view version of its stream that the batch reaches,
+// archives its INSERT records, advances the unit's progress past what it applied, then
+// writes the receipts that appends in the core's region asked for; a batch without an
+// INSERT only reads the view states for its MODIFY records, if any. A version
 // split by time takes an INSERT whose ingest_time is after the split time. Its breaker opens
 // on an INSERT at or before it when the batch started at or after the split's late bound,
 // and on a MODIFY whose images straddle it. Handle fails with [ErrUnknownVersion] while the
@@ -203,8 +210,8 @@ func (c *Core) Handle(ctx context.Context, b Batch) (Result, error) {
 		return Result{}, nil
 	}
 	deadline, ok := ctx.Deadline()
-	if !ok || b.Unit == "" {
-		return Result{}, errors.New("projector: a batch needs a delivery unit and a context with a deadline")
+	if !ok || b.Unit == "" || c.region == "" {
+		return Result{}, errors.New("projector: a batch needs a delivery unit, a context with a deadline and a core with a region")
 	}
 	left := time.Until(deadline)
 	if left > c.lifetime {
@@ -239,18 +246,52 @@ func (c *Core) Handle(ctx context.Context, b Batch) (Result, error) {
 	// still leaves time to checkpoint the rows written below it.
 	rowCtx, cancelRows := context.WithDeadline(ctx, deadline.Add(-reserve-reserve/2))
 	defer cancelRows()
+	// A batch of REMOVEs reads and writes nothing, and can't fail.
+	if inserts == 0 && modifies == 0 {
+		return res, nil
+	}
+	if err = c.markLag(rowCtx, b, recs, start); err != nil {
+		return Result{Stats: res.Stats}, err
+	}
 	// Only an INSERT changes a view or the archive, and progress may stay below the rest. A
 	// MODIFY still meets G3, and the time split: older code must not consume one.
 	if inserts == 0 {
-		if modifies > 0 {
-			err = c.modifies(rowCtx, s, recs, &res.Stats)
-		}
-		return res, err
+		return res, c.modifies(rowCtx, s, recs, &res.Stats)
 	}
 	if err = c.apply(rowCtx, ctx, b, s, recs, start, deadline, &res); err != nil {
 		return Result{Stats: res.Stats}, err
 	}
 	return res, nil
+}
+
+// lagAge is how old a record may get before the projector that handles it records a lag in
+// its stream's archive: DynamoDB trims change records after 24 hours, so older ones may be
+// gone (ADR 0017 §4 item 2).
+const lagAge = 23*time.Hour + 50*time.Minute
+
+// markLag records a lag of b's stream when a record of recs above its unit's progress arrived
+// lagAge or more before start, the batch's start by the host's clock. It comes before
+// anything else that may fail the batch, the view states among them, so a batch that fails
+// until DynamoDB trims the records after it still records the lag, and progress never passes a
+// trimmed range unrecorded. Only a batch with a record that old reads the unit.
+func (c *Core) markLag(ctx context.Context, b Batch, recs []record, start time.Time) error {
+	old := func(r record) bool { return !r.Arrival.IsZero() && start.Sub(r.Arrival) >= lagAge }
+	if !slices.ContainsFunc(recs, old) {
+		return nil
+	}
+	u, err := c.meta.Unit(ctx, b.Stream, b.Unit)
+	if err != nil {
+		return fmt.Errorf("projector: %w", err)
+	}
+	// Records at or below progress were applied: a mapping that starts at the trim horizon
+	// delivers them again.
+	if !slices.ContainsFunc(recs, func(r record) bool { return r.seq > u.Progress && old(r) }) {
+		return nil
+	}
+	if err = c.meta.MarkLag(ctx, b.Stream, start); err != nil {
+		return fmt.Errorf("projector: %w", err)
+	}
+	return nil
 }
 
 // apply is Handle's work on a batch with an INSERT, in recs, which started at start. It sends
@@ -261,6 +302,7 @@ func (c *Core) apply(ctx, progressCtx context.Context, b Batch, s *Stream, recs 
 		return err
 	}
 	rc.start = start
+	waitable := c.waitable(recs)
 	// Records at or below progress, read after the invocation started, were applied, and a row
 	// may have dropped their marks since (S9 rule 1).
 	recs = slices.DeleteFunc(recs, func(r record) bool { return r.seq <= rc.unit.Progress })
@@ -285,7 +327,11 @@ func (c *Core) apply(ctx, progressCtx context.Context, b Batch, s *Stream, recs 
 	if err != nil {
 		return err
 	}
-	return c.advance(progressCtx, rc, recs, failed, deadline)
+	if err = c.advance(progressCtx, rc, recs, failed, deadline); err != nil {
+		return err
+	}
+	c.receipts(ctx, b.Stream, waitable, failed, res)
+	return nil
 }
 
 // sortRecords pads sequence numbers, sorts the records by them and drops repeats: Lambda
@@ -466,12 +512,15 @@ func (c *Core) archive(ctx context.Context, b Batch, recs []record) error {
 
 // evaluate adds an INSERT record's contributions to rs: to each version it reaches, to a
 // fenced version only above the fence, and to a version split by time only after the split
-// time. A version whose evaluation fails, or whose time split can't place the record, is
-// marked broken, and gets nothing more from the batch.
+// time. Before those checks, it skips the versions that the record's append applied (ADR
+// 0014). A version whose evaluation fails, or whose time split can't place the record, is
+// marked broken, and gets nothing more from the batch; so is each version the record
+// reaches when its _sync is malformed.
 func (c *Core) evaluate(ctx context.Context, rs *rows, s *Stream, r *record, rc *reach, broken map[*view]bool, st *Stats) error {
 	vals, bad := s.Decode(r.New)
+	synced, serr := c.synced(r.New)
 	for _, v := range rc.views {
-		if f, fenced := rc.fences[v]; broken[v] || fenced && r.seq <= f {
+		if f, fenced := rc.fences[v]; broken[v] || synced[v.id] || fenced && r.seq <= f {
 			continue
 		}
 		live, err := byTime(rc.states[v.id], rc.start, r)
@@ -484,7 +533,10 @@ func (c *Core) evaluate(ctx context.Context, rs *rows, s *Stream, r *record, rc 
 		if !live {
 			continue
 		}
-		if err = rs.add(v, r, vals, bad); err != nil {
+		if err = serr; err == nil {
+			err = rs.add(v, r, vals, bad)
+		}
+		if err != nil {
 			if err = c.open(ctx, v, r, meta.CauseRecord, err, broken, st); err != nil {
 				return err
 			}

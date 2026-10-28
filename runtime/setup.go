@@ -52,6 +52,7 @@ func (s *setupFn) serve(ctx context.Context, ev cfn.Event) (string, map[string]a
 	}
 	resp, err := s.h.Handle(work, setup.Request{
 		Type: ev.ResourceType, Action: string(ev.RequestType), PhysicalID: ev.PhysicalResourceID, Props: ev.ResourceProperties,
+		OldProps: ev.OldResourceProperties,
 	})
 	// What LambdaWrap would fall back to: a failed Create has no ID, and the rollback's
 	// Delete then carries the request's.

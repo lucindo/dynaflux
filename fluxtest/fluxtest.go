@@ -6,12 +6,15 @@
 //
 // It differs from a deployed store:
 //   - Every view, ASYNC ones included, is updated before an append returns, so a query sees
-//     the append at once. A deployed ASYNC view lags by about a second.
-//   - SYNC views are updated the same way, so an evaluation error in one fails the test, as
-//     an ASYNC view's does, instead of failing the append.
+//     the append at once. A deployed ASYNC view lags by about a second, and an evaluation
+//     error in one fails the test.
+//   - SYNC views are updated in the append's transaction, as when deployed: an evaluation
+//     error in one fails the append with dynaflux.ErrEvaluation, and nothing is written.
 //   - Reads are consistent: a read sees every append that returned before it started.
 //   - Every view version is live from the start, so queries never return
 //     dynaflux.ErrViewNotReady. A deployed version is live once its backfill finished.
+//   - The receipt of a dynaflux.Waitable append is written before the append returns, so
+//     dynaflux.WaitFor returns at once. A deployed wait takes about a second.
 //   - Every event's origin_region is "local".
 //   - Event IDs come from a fixed random source, so inside testing/synctest a test's IDs are
 //     the same in every run.
@@ -41,8 +44,12 @@ import (
 	"github.com/lucindo/dynaflux/internal/store/mem"
 )
 
-// unit is the delivery unit of every event.
-const unit = "fluxtest"
+// unit is the delivery unit of every event, and region the origin_region of each, the
+// projector's region.
+const (
+	unit   = "fluxtest"
+	region = "local"
+)
 
 // NewStore returns an empty in-memory store for the catalog of a generated client, such as
 // flux.Catalog. It fails the test when the catalog can't be loaded, and when a view's
@@ -64,7 +71,7 @@ func NewStore(tb testing.TB, cat *dynaflux.Catalog) *dynaflux.Store {
 		Backend: b,
 		tb:      tb,
 		meta:    m,
-		core:    projector.New(c.Projector(), b, nil, projector.Config{Naming: naming}),
+		core:    projector.New(c.Projector(), b, nil, projector.Config{Naming: naming, Region: region}),
 		// The longest invocation the prune window allows.
 		timeout: time.Duration(c.Catalog().PruneWindowSeconds-catalog.LifetimeMarginSeconds) * time.Second,
 		streams: map[string]string{},
@@ -73,7 +80,7 @@ func NewStore(tb testing.TB, cat *dynaflux.Catalog) *dynaflux.Store {
 		p.streams[naming.StreamTable(s.Name)] = s.Name
 	}
 	e := engine.New(p, engine.Options{
-		Region:  "local",
+		Region:  region,
 		Entropy: rand.NewChaCha8([32]byte{}),
 	})
 	s := new(dynaflux.Store)
@@ -102,6 +109,20 @@ func (p *projecting) Put(ctx context.Context, table string, it store.Item, c sto
 	}
 	if stream, ok := p.streams[table]; ok {
 		p.project(ctx, stream, it)
+	}
+	return nil
+}
+
+// Transact projects the event that a SYNC append's transaction stored, as Put does: the
+// projector skips the versions that the transaction applied.
+func (p *projecting) Transact(ctx context.Context, puts []store.TxPut) error {
+	if err := p.Backend.Transact(ctx, puts); err != nil {
+		return err
+	}
+	for _, put := range puts {
+		if stream, ok := p.streams[put.Table]; ok {
+			p.project(ctx, stream, put.Item)
+		}
 	}
 	return nil
 }

@@ -40,9 +40,11 @@ const (
 	s3PutObject        = "s3:PutObject"
 	s3DeleteObject     = "s3:DeleteObject"
 	s3ListBucket       = "s3:ListBucket"
+	s3BucketLocation   = "s3:GetBucketLocation"
 	logsPutLogEvents   = "logs:PutLogEvents"
 	glueCreateDatabase = "glue:CreateDatabase"
 	glueGetDatabase    = "glue:GetDatabase"
+	glueGetDatabases   = "glue:GetDatabases"
 	glueGetTable       = "glue:GetTable"
 	glueUpdateTable    = "glue:UpdateTable"
 	dynamoGetItem      = "dynamodb:GetItem"
@@ -52,8 +54,8 @@ const (
 
 // regional returns the regional scope: the meta table and a table per view version, the
 // bucket, the projectors, the setup function and the backfill function with their log groups
-// and roles, the backfill state machine, a lookup and a mapping per stream, the archive, the
-// catalog's registration, and the alarms that watch them.
+// and roles, the archive mode, the backfill state machine, a lookup and a mapping per stream,
+// the archive, the catalog's registration, and the alarms that watch them.
 func (b *builder) regional() Scope {
 	s := Scope{Tables: b.regionalTables(), Buckets: []Bucket{b.bucket()}}
 	if b.cfg.Runtime.Split == config.SplitStream {
@@ -64,6 +66,7 @@ func (b *builder) regional() Scope {
 		b.addFunction(&s, b.projector(idProjector, b.naming.ProjectorFunction(), "", b.cat.Streams...))
 	}
 	b.addFunction(&s, b.setup())
+	s.ArchiveModes = []ArchiveMode{b.archiveMode()}
 	b.addBackfill(&s)
 	for _, st := range b.cat.Streams {
 		s.StreamLookups = append(s.StreamLookups, StreamLookup{
@@ -100,6 +103,18 @@ func (b *builder) catalogRegistration(functions []Function) CatalogRegistration 
 	}
 }
 
+// archiveMode returns the archive mode of each stream where the region archives.
+func (b *builder) archiveMode() ArchiveMode {
+	streams := map[string]string{}
+	for _, st := range b.cat.Streams {
+		streams[st.Name] = ArchiveOff
+		if st.Archive != nil {
+			streams[st.Name] = string(st.Archive.Events)
+		}
+	}
+	return ArchiveMode{Common: Common{ID: idArchiveMode}, Handler: ref(idSetup, AttrARN), MetaTable: ref(idMeta, AttrName), Streams: streams}
+}
+
 // regionalTables returns the meta table and the table of every version in the catalog,
 // current and retained. They are derived state that lives and dies together: a meta table
 // that outlived its view tables would mark new, empty ones live and skip their records.
@@ -132,9 +147,10 @@ func (b *builder) bucket() Bucket {
 			b.naming.Bucket(placeholder(PlaceholderAccount), placeholder(PlaceholderRegion))),
 		NoncurrentExpiryDays: noncurrentExpiryDays,
 		AbortMultipartDays:   abortMultipartDays,
-		Expiries: []Expiry{{
-			ID: "backfill-staging", Prefix: backfillStaging, Days: stagingExpiryDays, NoncurrentDays: stagingNoncurrentDays,
-		}},
+		Expiries: []Expiry{
+			{ID: "backfill-staging", Prefix: backfillStaging, Days: stagingExpiryDays, NoncurrentDays: stagingNoncurrentDays},
+			{ID: "backfill-results", Prefix: backfillResults, Days: stagingExpiryDays, NoncurrentDays: stagingNoncurrentDays},
+		},
 		Deletion: DeletionRetainExceptOnCreate,
 	}
 }
@@ -154,6 +170,7 @@ type function struct {
 	// statements are the role's statements besides the one for the log group, and managed
 	// those that grow with the store, which go in managed policies.
 	statements, managed []Statement
+	after               []string // the resources the function waits for
 }
 
 // addFunction adds f to s, with a log group that only it writes and a role that only it
@@ -198,6 +215,7 @@ func (b *builder) addFunction(s *Scope, f function) {
 		TimeoutSeconds: f.timeoutSeconds,
 		Code:           b.code,
 		Env:            env,
+		After:          f.after,
 	})
 }
 
@@ -249,6 +267,7 @@ func (b *builder) projector(id, name, owner string, streams ...catalog.Stream) f
 	return function{
 		id: id, kind: catalog.ResourceProjectorFunction, name: name, mode: catalog.EnvModeProjector,
 		tags: b.tags(TagKindProjector, owner), timeoutSeconds: b.cfg.Runtime.TimeoutSeconds, env: env, statements: statements,
+		after: []string{idArchiveMode},
 	}
 }
 

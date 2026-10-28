@@ -25,10 +25,13 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/lucindo/dynaflux/internal/backfill"
+	"github.com/lucindo/dynaflux/internal/backfill/awsbackfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/diag"
 	"github.com/lucindo/dynaflux/internal/engine"
 	"github.com/lucindo/dynaflux/internal/expr"
+	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/store"
 	"github.com/lucindo/dynaflux/internal/valuetext"
@@ -145,7 +148,7 @@ func (c *cli) importEvents(o importOptions, args []string) int {
 		fmt.Fprintf(&c.out, "%s: %d events fit %s in %s\n", in.name, sum.events, s.Name, d.region)
 		return exitOK
 	}
-	if status = c.checkClock(d); status != exitOK {
+	if status = max(c.checkClock(d), c.checkOrigins(d, s, prefixFlag(o.aws.prefix))); status != exitOK {
 		return status
 	}
 	if sum.toWrite == 0 {
@@ -355,6 +358,57 @@ func (c *cli) checkClock(d *deployment) int {
 		fmt.Sprintf("this machine's clock is %s %s DynamoDB's, more than %s", skew.Round(time.Second), how, maxClockSkew),
 		"set the clock, with NTP, and run import again")
 	return exitErrors
+}
+
+// checkOrigins refuses to import into s while its table is less than 23 hours old and a
+// region that archives it with events: all has no origin of it, and could still record one
+// (DF7406): replication carries an imported event to every region, which ends the time to
+// record one there. A region whose replica holds an event already can't: it gets DF7217. prefix
+// is the -prefix flag for the hint. DynamoDB Local has no archive.
+func (c *cli) checkOrigins(d *deployment, s *catalog.Stream, prefix string) int {
+	if d.clients.tables == nil || s.Archive == nil || s.Archive.Events != catalog.ArchiveEventsAll {
+		return exitOK
+	}
+	stream, table := s.Name, d.naming.StreamTable(s.Name)
+	born, _, err := d.clients.tables.Born(c.ctx, table)
+	if err != nil {
+		c.errorf("dynaflux import: %s: describe %s: %v", d.region, table, err)
+		return exitUsage
+	}
+	if time.Since(born) >= backfill.FreshAge {
+		return exitOK
+	}
+	status := exitOK
+	for _, r := range s.Archive.Regions {
+		cl := d.cloud.clients(r)
+		item, _, rerr := meta.New(cl.data, d.naming.MetaTable()).Stream(c.ctx, stream)
+		var arn string
+		if rerr == nil && item.Origin != nil {
+			arn, rerr = awsbackfill.StreamARN(c.ctx, cl.describe, table)
+		}
+		if rerr != nil {
+			c.errorf("dynaflux import: %s: the origin of stream %s: %v", r, stream, rerr)
+			return exitUsage
+		}
+		if item.Origin != nil && !item.Origin.Void(arn) {
+			continue
+		}
+		fresh, _, ferr := backfill.CheckStream(c.ctx, d.clients.tables, cl.data, table)
+		switch {
+		case ferr != nil:
+			c.errorf("dynaflux import: %s: %v", r, ferr)
+			return exitUsage
+		case !fresh:
+			noOrigin(r, stream, born, backfill.OriginStatus{State: backfill.OriginTooLate}, prefix).write(&c.errOut)
+		default:
+			c.finding(r, diag.SeverityError, "DF7406",
+				fmt.Sprintf("the table of stream %s is less than 23 hours old and has no origin in %s, which archives it with events: all", stream, r),
+				fmt.Sprintf("run dynaflux backfill -all -region %s%s first: an imported event ends the time to record one, and the archive of %s in %s would never be complete",
+					r, prefix, stream, r))
+			status = exitErrors
+		}
+	}
+	return status
 }
 
 // lineParser reads the events of a stream from JSON objects.

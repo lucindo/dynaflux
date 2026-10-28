@@ -277,7 +277,7 @@ func (f *fakeMetrics) GetMetricData(_ context.Context, in *cloudwatch.GetMetricD
 	out := &cloudwatch.GetMetricDataOutput{}
 	for _, q := range in.MetricDataQueries {
 		out.MetricDataResults = append(out.MetricDataResults, types.MetricDataResult{
-			Id: q.Id, Values: f.values[aws.ToString(q.MetricStat.Metric.Dimensions[0].Value)],
+			Id: q.Id, Values: f.values[aws.ToString(q.MetricStat.Metric.Dimensions[0].Value)], StatusCode: types.StatusCodeComplete,
 		})
 	}
 	return out, nil
@@ -337,7 +337,7 @@ func (p pagedMetrics) GetMetricData(_ context.Context, in *cloudwatch.GetMetricD
 	}
 	out := &cloudwatch.GetMetricDataOutput{}
 	for _, q := range in.MetricDataQueries {
-		out.MetricDataResults = append(out.MetricDataResults, types.MetricDataResult{Id: q.Id, Values: p[page][aws.ToString(q.Id)]})
+		out.MetricDataResults = append(out.MetricDataResults, types.MetricDataResult{Id: q.Id, Values: p[page][aws.ToString(q.Id)], StatusCode: types.StatusCodeComplete})
 	}
 	if page+1 < len(p) {
 		out.NextToken = aws.String("2")

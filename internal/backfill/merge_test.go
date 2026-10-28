@@ -95,11 +95,11 @@ func selected(t *testing.T, f *fixture, fences map[string]string) []string {
 	var recs []projector.BackfillRecord
 	for _, file := range f.archive.files {
 		for line := range bytes.Lines(file) {
-			unit, seq, it, err := dec.Decode(bytes.TrimSuffix(line, []byte("\n")))
+			r, err := dec.Decode(bytes.TrimSuffix(line, []byte("\n")))
 			if err != nil {
 				t.Fatal(err)
 			}
-			recs = append(recs, projector.BackfillRecord{Unit: unit, Seq: seq, Item: it})
+			recs = append(recs, projector.BackfillRecord{Unit: r.Unit, Seq: r.Seq, Item: r.Item})
 		}
 	}
 	sel, err := projectortest.SelectBackfill(recs, fences)

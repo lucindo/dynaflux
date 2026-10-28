@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,14 +38,16 @@ var backfillRegions = []string{"us-east-1", "us-west-2"} //nolint:gochecknogloba
 
 // backfillStore is testdata/backfill.txtar deployed in us-east-1 and us-west-2 in memory,
 // with page_counts@v1 live in us-east-1 and an event of page_views in each region. signups'
-// table is new in us-east-1; every other stream table is three days old. Make it in a
-// synctest bubble, whose clock reads 2000-01-01T00:00:00Z.
+// table is new in us-east-1; every other stream table is three days old. Both regions archive
+// both streams with events: all, and no origin is recorded yet. Make it in a synctest bubble,
+// whose clock reads 2000-01-01T00:00:00Z.
 type backfillStore struct {
 	dir      string
 	backends map[string]store.Backend
 	metas    map[string]*meta.Meta
 	sfn      map[string]*fakeSFN
 	tables   map[string]*fakeReplicas
+	aws      map[string]*fakeAWS
 }
 
 func newBackfillStore(t *testing.T) *backfillStore {
@@ -68,7 +71,7 @@ func newBackfillStore(t *testing.T) *backfillStore {
 		t.Fatal(err)
 	}
 	s := &backfillStore{dir: dir, backends: map[string]store.Backend{}, metas: map[string]*meta.Meta{},
-		sfn: map[string]*fakeSFN{}, tables: map[string]*fakeReplicas{}}
+		sfn: map[string]*fakeSFN{}, tables: map[string]*fakeReplicas{}, aws: map[string]*fakeAWS{}}
 	naming := catalog.Naming{Store: "shop"}
 	old := time.Now().Add(-72 * time.Hour)
 	for _, r := range backfillRegions {
@@ -76,6 +79,10 @@ func newBackfillStore(t *testing.T) *backfillStore {
 		s.backends[r], s.metas[r] = b, meta.New(b, naming.MetaTable())
 		s.sfn[r] = &fakeSFN{status: map[string]types.ExecutionStatus{}}
 		s.tables[r] = &fakeReplicas{born: map[string]time.Time{naming.StreamTable("page_views"): old, naming.StreamTable("signups"): old}}
+		s.aws[r] = healthyAWS(naming, r, res.Catalog)
+		if err = s.metas[r].ApplyArchiveModes(ctx, nil, map[string]meta.ArchiveMode{"page_views": meta.ArchiveAll, "signups": meta.ArchiveAll}, true, old); err != nil {
+			t.Fatal(err)
+		}
 		if _, err = s.metas[r].RegisterCatalog(ctx, data, "v0.5.0"); err != nil {
 			t.Fatal(err)
 		}
@@ -91,6 +98,101 @@ func newBackfillStore(t *testing.T) *backfillStore {
 	s.tables["us-east-1"].born[naming.StreamTable("signups")] = time.Now()
 	s.live(t, "us-east-1", "page_counts@v1", "page_views")
 	return s
+}
+
+// origin records the origin of stream's archive in region at at, for its table as tables
+// describes it now.
+func (s *backfillStore) origin(t *testing.T, region, stream string, at time.Time) {
+	t.Helper()
+	m := s.metas[region]
+	item, _, err := m.Stream(t.Context(), stream)
+	if err == nil {
+		_, err = m.RecordOrigin(t.Context(), item, meta.Origin{At: at, Hash: "0123456789ab", RegisteredAt: at,
+			Born: s.tables[region].born[shop.StreamTable(stream)], ARN: streamARN(shop, region, stream)})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// listingJob gives plan_counts@v1 the job of exportJob, but listing the partitions with Athena
+// query q-0.
+func listingJob(t *testing.T, s *backfillStore) {
+	t.Helper()
+	s.exportJob(t)
+	_, err := s.metas["us-east-1"].UpdateJob(t.Context(), "plan_counts@v1", func(j *meta.Job) (bool, error) {
+		j.Archive = meta.ArchiveStage{PlanQuery: "q-0"}
+		return true, nil
+	})
+	must(t, err)
+}
+
+// stoppedQueries checks that backfill stopped the Athena queries want in us-east-1.
+func stoppedQueries(want ...string) func(*testing.T, *backfillStore) {
+	return func(t *testing.T, s *backfillStore) {
+		t.Helper()
+		if got := s.aws["us-east-1"].stopped; !slices.Equal(got, want) {
+			t.Errorf("stopped the queries %q, want %q", got, want)
+		}
+	}
+}
+
+// tryStartedMeanwhile gives plan_counts@v1 the job of exportJob, whose step starts the slice's
+// second try, query q-2, once backfill read the job: at its first DescribeExecution.
+func tryStartedMeanwhile(t *testing.T, s *backfillStore) {
+	t.Helper()
+	s.exportJob(t)
+	s.sfn["us-east-1"].described = func() {
+		_, err := s.metas["us-east-1"].UpdateJob(t.Context(), "plan_counts@v1", func(j *meta.Job) (bool, error) {
+			j.Archive.Export.Try, j.Archive.Export.ID = 2, "q-2"
+			return true, nil
+		})
+		must(t, err)
+	}
+}
+
+// brokenGaps gives page_views an origin in us-west-2, and the bucket there an object under
+// aws/lambda/ that isn't Lambda's: the archive's gaps can't be read.
+func brokenGaps(t *testing.T, s *backfillStore) {
+	t.Helper()
+	s.origin(t, "us-west-2", "page_views", time.Now().Add(-48*time.Hour))
+	s.aws["us-west-2"].objects["aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.00.00-x"] = "not a record"
+}
+
+// gap puts in region's bucket Lambda's on-failure record of a batch of stream whose records
+// arrived at at.
+func (s *backfillStore) gap(region, stream string, at time.Time) {
+	s.aws[region].objects["aws/lambda/uuid/shardId-0001/"+at.UTC().Format("2006/01/02/2006-01-02T15.04.05")+"-a"] = fmt.Sprintf(
+		`{"requestContext":{"requestId":"r1","condition":"RetryAttemptsExhausted"},"version":"1.0","DDBStreamBatchInfo":{"shardId":"shardId-0001",`+
+			`"startSequenceNumber":"100","endSequenceNumber":"250","approximateArrivalOfFirstRecord":"%s","approximateArrivalOfLastRecord":"%s",`+
+			`"batchSize":3,"streamArn":%q},"payload":"{}"}`, at.UTC().Format(time.RFC3339), at.UTC().Format(time.RFC3339), streamARN(shop, region, stream))
+}
+
+// exportJob gives plan_counts@v1, activated in us-east-1 with the fence split, a running job
+// whose execution plan-counts-v1-0a1b2c-a1 runs and which exports a slice of signups with
+// Athena query q-1.
+func (s *backfillStore) exportJob(t *testing.T) {
+	t.Helper()
+	const region, name = "us-east-1", "plan-counts-v1-0a1b2c"
+	m := s.metas[region]
+	arn := s.sfn[region].arn(region, name+"-a1")
+	if _, err := backfill.Start(t.Context(), m, backfill.Request{
+		Version: "plan_counts@v1", Stream: "signups", Name: name, Execution: func(int) string { return arn }, Split: meta.SplitFence,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.sfn[region].status[arn] = types.ExecutionStatusRunning
+	if _, err := m.Activate(t.Context(), "plan_counts@v1", "signups", meta.SplitFence, meta.DefaultBounds); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.UpdateJob(t.Context(), "plan_counts@v1", func(j *meta.Job) (bool, error) {
+		j.Phase = meta.PhaseStage
+		j.Archive = meta.ArchiveStage{PlanQuery: "q-0", Plan: "plan-1-0a1b", Scanned: 4096,
+			Export: meta.Export{From: time.Now().Add(-48 * time.Hour), To: time.Now(), Try: 1, ID: "q-1"}}
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (s *backfillStore) live(t *testing.T, region, version, stream string) {
@@ -127,15 +229,20 @@ func (s *backfillStore) run(t *testing.T, stdin string, terminal bool, args ...s
 
 func (s *backfillStore) runContext(ctx context.Context, stdin string, terminal bool, args ...string) result {
 	var stdout, stderr strings.Builder
+	status := cli.RunEnv(ctx, append([]string{"backfill"}, args...), strings.NewReader(stdin), &stdout, &stderr, s.dir, s.cliEnv(terminal))
+	return result{status, stdout.String(), stderr.String()}
+}
+
+// cliEnv is the store's AWS.
+func (s *backfillStore) cliEnv(terminal bool) cli.Env {
 	env := cli.Env{
 		Region: "us-east-1", Account: account, Terminal: terminal, Backends: s.backends,
-		StepFunctions: map[string]cli.StepFunctions{}, Tables: map[string]backfill.Tables{},
+		StepFunctions: map[string]cli.StepFunctions{}, Tables: map[string]backfill.Tables{}, AWS: map[string]cli.AWS{},
 	}
 	for _, r := range backfillRegions {
-		env.StepFunctions[r], env.Tables[r] = s.sfn[r], s.tables[r]
+		env.StepFunctions[r], env.Tables[r], env.AWS[r] = s.sfn[r], s.tables[r], s.aws[r]
 	}
-	status := cli.RunEnv(ctx, append([]string{"backfill"}, args...), strings.NewReader(stdin), &stdout, &stderr, s.dir, env)
-	return result{status, stdout.String(), stderr.String()}
+	return env
 }
 
 // fakeSFN is a region's Step Functions: executions by ARN, which a start makes running and a
@@ -146,6 +253,8 @@ type fakeSFN struct {
 	started []string // name and input
 	stopped []string // ARNs
 	fail    error    // DescribeExecution's
+	// described runs once, at the first DescribeExecution: what a step does meanwhile.
+	described func()
 }
 
 func (f *fakeSFN) arn(region, name string) string {
@@ -164,6 +273,10 @@ func (f *fakeSFN) StartExecution(_ context.Context, in *sfn.StartExecutionInput,
 func (f *fakeSFN) DescribeExecution(_ context.Context, in *sfn.DescribeExecutionInput, _ ...func(*sfn.Options)) (*sfn.DescribeExecutionOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if d := f.described; d != nil {
+		f.described = nil
+		d()
+	}
 	if f.fail != nil {
 		return nil, f.fail
 	}
@@ -216,7 +329,23 @@ func backfillCases() []backfillCase {
 			checkJob(t, s, "us-east-1", "plan_counts@v1", meta.SplitFence, 1)
 			checkJob(t, s, "us-west-2", "page_counts@v1", meta.SplitTime, 1)
 			checkJob(t, s, "us-west-2", "page_seen@v1", meta.SplitNone, 1)
+			checkOrigin(t, s, "us-east-1", "signups", true)
+			checkOrigin(t, s, "us-east-1", "page_views", false)
+			checkOrigin(t, s, "us-west-2", "signups", false)
 		}},
+		{
+			// signups got an event in us-east-1 before its origin: it never gets one.
+			name: "young stream with an event", args: slices.Concat([]string{"-all", "-yes"}, east),
+			change: func(t *testing.T, s *backfillStore) {
+				t.Helper()
+				appendEvent(t, s, "us-east-1", "signups", expr.String("u1"), expr.String("pro"), expr.Null())
+			},
+			check: func(t *testing.T, s *backfillStore) {
+				t.Helper()
+				checkJob(t, s, "us-east-1", "plan_counts@v1", meta.SplitTime, 1)
+				checkOrigin(t, s, "us-east-1", "signups", false)
+			},
+		},
 		{name: "named", args: slices.Concat([]string{"page_seen", "-yes", "-rate", "500"}, east), check: func(t *testing.T, s *backfillStore) {
 			t.Helper()
 			if j := checkJob(t, s, "us-east-1", "page_seen@v1", meta.SplitNone, 1); j.Rate != 500 {
@@ -282,6 +411,30 @@ func backfillCases() []backfillCase {
 			},
 		},
 		{
+			name: "cancel an export", args: slices.Concat([]string{"-cancel", "plan_counts@v1"}, east), change: func(t *testing.T, s *backfillStore) {
+				t.Helper()
+				s.exportJob(t)
+			},
+			check: func(t *testing.T, s *backfillStore) {
+				t.Helper()
+				if got := s.aws["us-east-1"].stopped; !slices.Equal(got, []string{"q-1"}) {
+					t.Errorf("stopped the queries %q, want q-1", got)
+				}
+				if want := []string{s.sfn["us-east-1"].arn("us-east-1", "plan-counts-v1-0a1b2c-a1")}; !slices.Equal(s.sfn["us-east-1"].stopped, want) {
+					t.Errorf("stopped %q, want %q", s.sfn["us-east-1"].stopped, want)
+				}
+			},
+		},
+		{
+			// A step starts the slice's second try after the plan read the job.
+			name: "cancel a try started meanwhile", args: slices.Concat([]string{"-cancel", "plan_counts@v1"}, east),
+			change: tryStartedMeanwhile, check: stoppedQueries("q-2"),
+		},
+		{
+			name: "cancel a listing", args: slices.Concat([]string{"-cancel", "plan_counts@v1"}, east),
+			change: listingJob, check: stoppedQueries("q-0"),
+		},
+		{
 			name: "cancel", args: slices.Concat([]string{"-cancel", "page_seen@v1", "plan_counts@v1"}, east), status: 1,
 			change: func(t *testing.T, s *backfillStore) {
 				t.Helper()
@@ -322,9 +475,20 @@ func backfillCases() []backfillCase {
 			name: "region not deployed", args: []string{"page_seen", "-yes"}, status: 1,
 			change: func(_ *testing.T, s *backfillStore) { s.backends["us-west-2"] = mem.New() },
 		},
-		{name: "archive not fresh", args: []string{"-source", "archive", "page_counts", "-region", "us-west-2"}, status: 1},
+		{name: "archive without an origin", args: []string{"-source", "archive", "page_counts", "-region", "us-west-2"}, status: 1},
 		{name: "archive of a fresh stream", args: slices.Concat([]string{"-source", "archive", "plan_counts", "-yes"}, east)},
 		{name: "table of a fresh stream", args: slices.Concat([]string{"-source", "table", "plan_counts", "-yes"}, east)},
+		{
+			// A table rebuild repairs a gap: the archive's evidence that can't be read doesn't stop it.
+			name: "table while the gaps can't be read", args: []string{"-source", "table", "page_seen", "-region", "us-west-2", "-yes"}, status: 2,
+			change: brokenGaps,
+			check: func(t *testing.T, s *backfillStore) {
+				t.Helper()
+				checkJob(t, s, "us-west-2", "page_seen@v1", meta.SplitNone, 1)
+			},
+		},
+		{name: "default source while the gaps can't be read", args: []string{"page_seen", "-region", "us-west-2", "-yes"}, status: 2, change: brokenGaps},
+		{name: "all while the gaps can't be read", args: []string{"-all", "-region", "us-west-2", "-yes"}, status: 2, change: brokenGaps},
 		{
 			name: "source of an activating version", args: slices.Concat([]string{"-source", "table", "plan_counts"}, east), status: 2,
 			change: func(t *testing.T, s *backfillStore) {
@@ -381,8 +545,6 @@ func backfillWatchCases() []backfillCase {
 				}
 			},
 		},
-		{name: "job waits", args: slices.Concat([]string{"plan_counts"}, east), status: 1, change: waitingJob},
-		{name: "all skips a job that waits", args: slices.Concat([]string{"-all", "-yes"}, east), change: waitingJob},
 		{
 			name: "source of a running job", args: slices.Concat([]string{"page_seen", "-source", "archive"}, east), status: 2,
 			change: func(t *testing.T, s *backfillStore) {
@@ -550,23 +712,31 @@ func watchFail(t *testing.T, s *backfillStore) {
 	}
 }
 
-// waitingJob gives plan_counts@v1, activated in us-east-1 with the fence split, a job that
-// waits for the archive read of a later release.
-func waitingJob(t *testing.T, s *backfillStore) {
+// checkOrigin checks whether region has recorded the origin of stream's archive.
+func checkOrigin(t *testing.T, s *backfillStore, region, stream string, want bool) {
 	t.Helper()
-	m := s.metas["us-east-1"]
-	if _, err := backfill.Start(t.Context(), m, backfill.Request{
-		Version: "plan_counts@v1", Stream: "signups", Name: "plan-counts-v1-0a1b2c", Execution: backfill.LocalExecution, Split: meta.SplitFence,
-	}); err != nil {
+	item, _, err := s.metas[region].Stream(t.Context(), stream)
+	if err != nil || (item.Origin != nil) != want {
+		t.Errorf("%s: the origin of %s is %+v, %v; want one: %t", region, stream, item.Origin, err, want)
+	}
+}
+
+// appendEvent appends an event of vals to stream in region.
+func appendEvent(t *testing.T, s *backfillStore, region, stream string, vals ...expr.Value) {
+	t.Helper()
+	data, err := catalog.Marshal(compile(t, s.dir).Catalog)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Activate(t.Context(), "plan_counts@v1", "signups", meta.SplitFence, meta.DefaultBounds); err != nil {
+	cat, err := engine.Compile(data)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.UpdateJob(t.Context(), "plan_counts@v1", func(j *meta.Job) (bool, error) {
-		j.Phase, j.Waits = meta.PhaseWatermark, meta.WaitArchive
-		return true, nil
-	}); err != nil {
+	out, err := engine.New(s.backends[region], engine.Options{Region: region}).Append(t.Context(), cat, stream, [][]expr.Value{vals}, engine.AppendMode{})
+	if err == nil {
+		err = out[0].Err
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 }

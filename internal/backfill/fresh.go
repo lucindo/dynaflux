@@ -11,9 +11,9 @@ import (
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-// freshAge is how young a stream table must be for an empty replica to prove it never held an
+// FreshAge is how young a stream table must be for an empty replica to prove it never held an
 // event: every event is kept at least a day after its write (DF2109), less an hour of margin.
-const freshAge = 23 * time.Hour
+const FreshAge = 23 * time.Hour
 
 // CheckStream reports whether a stream table is fresh (lifecycle.md §4.3, F2 and F3): no
 // replica was restored from a backup, the earliest replica is younger than 23 hours when the
@@ -24,7 +24,7 @@ func CheckStream(ctx context.Context, t Tables, b store.Backend, streamTable str
 	if err != nil {
 		return false, time.Time{}, fmt.Errorf("backfill: describe %s: %w", streamTable, err)
 	}
-	if restored || time.Since(born) >= freshAge {
+	if restored || time.Since(born) >= FreshAge {
 		return false, born, nil
 	}
 	var start *store.Key
@@ -37,7 +37,7 @@ func CheckStream(ctx context.Context, t Tables, b store.Backend, streamTable str
 			return false, born, nil
 		}
 		if next == nil {
-			return time.Since(born) < freshAge, born, nil
+			return time.Since(born) < FreshAge, born, nil
 		}
 		start = next
 	}

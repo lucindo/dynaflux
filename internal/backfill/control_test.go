@@ -29,57 +29,43 @@ func archivedCatalog(t *testing.T, archive string) *catalog.Catalog {
 	return cat
 }
 
-// A new job of an additive version reads the archive only where the fresh rule will most
-// likely make it live without a read: a fresh stream that the region archives with events:
-// all. Otherwise it reads the table, split by time for an additive version and not at all
-// for an idempotent one, which reads the archive only when asked; asking for the archive
-// where it can't serve says which condition failed.
+// A new job reads the archive whenever the region's archive of the stream is complete, unless
+// the table is asked for. Otherwise it reads the table, split by time for an additive version
+// and not at all for an idempotent one; asking for the archive names the rule that failed.
 func TestChoose(t *testing.T) {
 	t.Parallel()
-	all := archivedCatalog(t, "{enabled: true, regions: [us-east-1], events: all}")
-	local := archivedCatalog(t, "{enabled: true, events: local}")
+	cat := archivedCatalog(t, "{enabled: true, regions: [us-east-1], events: all}")
+	complete := backfill.Verdict{Complete: true}
+	hole := backfill.Verdict{Rule: backfill.RuleHole, Reason: "a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z"}
 	tests := []struct {
 		name    string
-		cat     *catalog.Catalog
-		region  string
 		version string
-		fresh   bool
+		verdict backfill.Verdict
 		want    backfill.Source
 		split   meta.Split
 		err     string
 	}{
-		{"fresh, archived", all, "us-east-1", totals, true, "", meta.SplitFence, ""},
-		{"fresh, archived, idempotent", all, "us-east-1", peaks, true, "", meta.SplitNone, ""},
-		{"fresh, archived, idempotent, archive asked", all, "us-east-1", peaks, true, backfill.SourceArchive, meta.SplitFence, ""},
-		{"fresh, archived, archive asked", all, "us-east-1", totals, true, backfill.SourceArchive, meta.SplitFence, ""},
-		{"fresh, archived, table asked", all, "us-east-1", totals, true, backfill.SourceTable, meta.SplitTime, ""},
-		{"not fresh", all, "us-east-1", totals, false, "", meta.SplitTime, ""},
-		{"not fresh, idempotent", all, "us-east-1", peaks, false, "", meta.SplitNone, ""},
-		{"not fresh, markers", all, "us-east-1", kinds, false, "", meta.SplitTime, ""},
-		{"not archived here", all, "us-west-2", totals, true, "", meta.SplitTime, ""},
-		{"local events", local, "us-east-1", peaks, true, "", meta.SplitNone, ""},
+		{"complete", totals, complete, "", meta.SplitFence, ""},
+		{"complete, idempotent", peaks, complete, "", meta.SplitFence, ""},
+		{"complete, archive asked", totals, complete, backfill.SourceArchive, meta.SplitFence, ""},
+		{"complete, table asked", totals, complete, backfill.SourceTable, meta.SplitTime, ""},
+		{"complete, idempotent, table asked", peaks, complete, backfill.SourceTable, meta.SplitNone, ""},
+		{"incomplete", totals, hole, "", meta.SplitTime, ""},
+		{"incomplete, idempotent", peaks, hole, "", meta.SplitNone, ""},
+		{"incomplete, markers", kinds, hole, "", meta.SplitTime, ""},
 		{
-			"archive asked, not fresh", all, "us-east-1", totals, false, backfill.SourceArchive, "",
-			"backfill: the archive source isn't available: stream events isn't fresh in us-east-1, " +
-				"and this release reads the archive only of a stream without events",
+			"incomplete, archive asked", totals, hole, backfill.SourceArchive, "",
+			"backfill: the archive isn't complete: events in us-east-1: rule 2: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z",
 		},
-		{
-			"archive asked, not archived here", all, "us-west-2", totals, true, backfill.SourceArchive, "",
-			"backfill: the archive source isn't available: us-west-2 doesn't archive stream events with events: all",
-		},
-		{
-			"archive asked, local events", local, "us-east-1", totals, true, backfill.SourceArchive, "",
-			"backfill: the archive source isn't available: us-east-1 doesn't archive stream events with events: all",
-		},
-		{"unknown version", all, "us-east-1", "totals@v2", true, "", "", "backfill: totals@v2 isn't in the catalog"},
+		{"unknown version", "totals@v2", complete, "", "", "backfill: totals@v2 isn't in the catalog"},
 	}
 	for _, tt := range tests {
-		split, err := backfill.Choose(tt.cat, tt.region, tt.version, tt.fresh, tt.want)
+		split, err := backfill.Choose(cat, "us-east-1", tt.version, tt.verdict, tt.want)
 		var got string
 		if err != nil {
 			got = err.Error()
 		}
-		if split != tt.split || got != tt.err || (tt.want == backfill.SourceArchive && tt.err != "") != errors.Is(err, backfill.ErrArchiveSource) {
+		if split != tt.split || got != tt.err || (tt.want == backfill.SourceArchive && tt.err != "") != errors.Is(err, backfill.ErrIncomplete) {
 			t.Errorf("%s: Choose = %q, %q; want %q, %q", tt.name, split, got, tt.split, tt.err)
 		}
 	}

@@ -44,7 +44,7 @@ func (f *fixture) buildOn(t *testing.T, b store.Backend, drop, retired []string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return projector.New(p, b, f.archive, projector.Config{Naming: catalog.Naming{Store: "app"}})
+	return projector.New(p, b, f.archive, projector.Config{Naming: catalog.Naming{Store: "app"}, Region: region})
 }
 
 func handleWith(t *testing.T, core *projector.Core, recs ...projector.Record) (projector.Result, error) {

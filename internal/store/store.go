@@ -152,6 +152,9 @@ type Backend interface {
 	ScanPage(ctx context.Context, table string, s Scan, start *Key) ([]Item, *Key, error)
 	// Put writes a whole item, replacing a stored one, when c holds.
 	Put(ctx context.Context, table string, it Item, c Cond) error
+	// Transact writes every put or none (TransactWriteItems): tables of the store's region,
+	// distinct items. A stream table must be MREC: MRSC tables have no transactions.
+	Transact(ctx context.Context, puts []TxPut) error
 }
 
 // TxPut is one write of a transaction: a whole item, written when its condition holds.

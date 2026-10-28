@@ -107,9 +107,10 @@ const simStore = "../internal/simulation/testdata/sim"
 // shortest prune window that a 30 s function allows.
 const suiteConfig = "runtime: {timeout_seconds: 30, prune_window_seconds: 90}\narchive: {enabled: true, events: all}\n"
 
-// loadSuite compiles the harness's store with suiteConfig and builds its manifest.
-func loadSuite() (*suite, error) {
-	root := os.DirFS(simStore)
+// loadSuite compiles a store of the harness, in dir, with suiteConfig and builds its
+// manifest.
+func loadSuite(dir string) (*suite, error) {
+	root := os.DirFS(dir)
 	fsys := fstest.MapFS{}
 	err := fs.WalkDir(root, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -581,6 +582,13 @@ type fakeFirehose struct {
 	// script decides what becomes of each record; every record is accepted while it is nil.
 	script   func(rec archived) outcome
 	archived []archived
+	sent     []sent // the bytes of each record stored, in archived's order
+}
+
+// sent is a record as its delivery stream received it.
+type sent struct {
+	stream string
+	data   []byte
 }
 
 // outcome is what the fake does with one record.
@@ -616,7 +624,8 @@ func newFakeFirehose(t *testing.T) *fakeFirehose {
 	f := &fakeFirehose{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		var in struct {
-			Records []batchRecord `json:"Records"`
+			DeliveryStreamName string        `json:"DeliveryStreamName"`
+			Records            []batchRecord `json:"Records"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 			t.Errorf("PutRecordBatch request: %v", err)
@@ -624,7 +633,7 @@ func newFakeFirehose(t *testing.T) *fakeFirehose {
 			return
 		}
 		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
-		out, ok := f.put(t, in.Records)
+		out, ok := f.put(t, in.DeliveryStreamName, in.Records)
 		if !ok {
 			w.Header().Set("X-Amzn-Errortype", "ResourceNotFoundException")
 			w.WriteHeader(http.StatusBadRequest)
@@ -640,8 +649,8 @@ func newFakeFirehose(t *testing.T) *fakeFirehose {
 	return f
 }
 
-// put answers one call, or reports false when the fake is down.
-func (f *fakeFirehose) put(t *testing.T, recs []batchRecord) (batchOutput, bool) {
+// put answers one call to stream, or reports false when the fake is down.
+func (f *fakeFirehose) put(t *testing.T, stream string, recs []batchRecord) (batchOutput, bool) {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -662,6 +671,7 @@ func (f *fakeFirehose) put(t *testing.T, recs []batchRecord) (batchOutput, bool)
 		}
 		if o != rejected {
 			f.archived = append(f.archived, rec)
+			f.sent = append(f.sent, sent{stream: stream, data: r.Data})
 		}
 		if o == accepted {
 			out.RequestResponses[i].RecordID = strconv.Itoa(len(f.archived))
@@ -690,6 +700,19 @@ func (f *fakeFirehose) records() []archived {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.archived)
+}
+
+// received returns the records stored for deliveryStream, as it received them.
+func (f *fakeFirehose) received(deliveryStream string) [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out [][]byte
+	for _, s := range f.sent {
+		if s.stream == deliveryStream {
+			out = append(out, s.data)
+		}
+	}
+	return out
 }
 
 // stored returns how many times each (_shard, _seq) was stored.

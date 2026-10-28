@@ -22,6 +22,7 @@ type Funcs struct {
 	InitToken    func(dst any, text string)                  // dst is a *dynaflux.Token
 	ReadRange    func(opts any) (since, until *time.Time)    // opts is a []dynaflux.ReadOption
 	QueryOptions func(opts any) engine.QueryOptions          // opts is a []dynaflux.QueryOption
+	AppendMode   func(opts any) engine.AppendMode            // opts is a []dynaflux.AppendOption
 }
 
 var funcs Funcs //nolint:gochecknoglobals // set once, by package dynaflux's init

@@ -49,18 +49,22 @@ func NewSetup(h *setup.Handler, w io.Writer) func(context.Context, cfn.Event) (s
 
 // BackfillParts are what a backfill function reaches AWS with.
 type BackfillParts struct {
-	Store  store.Backend
-	Units  backfill.Lister
-	Tables backfill.Tables
-	Lag    backfill.Lag
-	Runs   func(bucket string) backfill.Runs
+	Store   store.Backend
+	Units   backfill.Lister
+	Tables  backfill.Tables
+	Lag     backfill.Lag
+	Runs    func(bucket string) backfill.Runs
+	Archive func(bucket string) ArchiveReader
 }
+
+// ArchiveReader exposes archiveReader.
+type ArchiveReader = archiveReader
 
 // NewBackfill returns the Invoke of a backfill function over p, logging to w, as Run builds
 // it.
 func NewBackfill(c *engine.Catalog, e Env, p BackfillParts, w io.Writer) (func(context.Context, []byte) ([]byte, error), error) {
 	f, err := newBackfill(c, env{prefix: e.Prefix, region: e.Region, memory: e.Memory},
-		backfillParts{store: p.Store, units: p.Units, tables: p.Tables, lag: p.Lag, runs: p.Runs}, newLogger(w, e.LogLevel))
+		backfillParts{store: p.Store, units: p.Units, tables: p.Tables, lag: p.Lag, runs: p.Runs, archive: p.Archive}, newLogger(w, e.LogLevel))
 	if err != nil {
 		return nil, err
 	}

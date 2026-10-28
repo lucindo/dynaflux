@@ -17,6 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/backfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/cli"
 	"github.com/lucindo/dynaflux/internal/engine"
@@ -66,6 +67,58 @@ func newImportStore(t *testing.T) *importStore {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// youngImportStore is testdata/import.txtar's store in memory in us-east-1 and us-west-2,
+// both archiving every stream with events: all. page_views's table is an hour old, and only
+// us-west-2 has recorded the origin of its archive.
+type youngImportStore struct {
+	dir      string
+	backends map[string]store.Backend
+	metas    map[string]*meta.Meta
+	tables   *fakeReplicas
+	aws      map[string]*fakeAWS
+}
+
+func newYoungImportStore(t *testing.T) *youngImportStore {
+	t.Helper()
+	ctx := t.Context()
+	s := &youngImportStore{dir: writeProject(t, "import"), backends: map[string]store.Backend{}, metas: map[string]*meta.Meta{},
+		aws: map[string]*fakeAWS{}}
+	path := filepath.Join(s.dir, "dynaflux.yaml")
+	cfg, err := os.ReadFile(path)
+	must(t, err)
+	must(t, os.WriteFile(path, append(cfg, "archive: {enabled: true, events: all}\n"...), 0o644))
+	cat := compile(t, s.dir).Catalog
+	data, err := catalog.Marshal(cat)
+	must(t, err)
+	born := time.Now().Add(-time.Hour)
+	s.tables = &fakeReplicas{born: map[string]time.Time{shop.StreamTable("page_views"): born}}
+	modes := map[string]meta.ArchiveMode{}
+	for _, st := range cat.Streams {
+		modes[st.Name] = meta.ArchiveAll
+	}
+	for _, r := range backfillRegions {
+		b := mem.New()
+		s.backends[r], s.metas[r], s.aws[r] = b, meta.New(b, shop.MetaTable()), healthyAWS(shop, r, cat)
+		must(t, s.metas[r].ApplyArchiveModes(ctx, nil, modes, true, born))
+		_, err = s.metas[r].RegisterCatalog(ctx, data, "v0.5.0")
+		must(t, err)
+	}
+	item, _, err := s.metas["us-west-2"].Stream(ctx, "page_views")
+	must(t, err)
+	_, err = s.metas["us-west-2"].RecordOrigin(ctx, item, meta.Origin{At: born.Add(time.Minute), Hash: "0123456789ab", RegisteredAt: born,
+		Born: born, ARN: streamARN(shop, "us-west-2", "page_views")})
+	must(t, err)
+	return s
+}
+
+func (s *youngImportStore) env() cli.Env {
+	env := cli.Env{Account: account, Backends: s.backends, Tables: map[string]backfill.Tables{}, AWS: map[string]cli.AWS{}}
+	for _, r := range backfillRegions {
+		env.Tables[r], env.AWS[r] = s.tables, s.aws[r]
+	}
+	return env
 }
 
 // importRun is one run of dynaflux import.
@@ -412,6 +465,63 @@ func (s *importStore) pageViews(t *testing.T, n int) {
 }
 
 // Import sends -rate events a second, and reports its progress every 10 seconds.
+// Import refuses to write to a stream whose table is less than 23 hours old while a region
+// that archives it with events: all has no origin of it, naming each such region; once every
+// such region has one, it imports.
+func TestImportYoungStream(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		s := newYoungImportStore(t)
+		run := func() result {
+			var stdout, stderr strings.Builder
+			status := cli.RunEnv(t.Context(), []string{"import", "-region", "us-east-1", "page_views", "-file", "input/views.jsonl", "-yes"},
+				nil, &stdout, &stderr, s.dir, s.env())
+			return result{status, stdout.String(), stderr.String()}
+		}
+		header := "store shop  prefix (none)  account 123456789012  region us-east-1\n"
+		want := result{1, "", header + ingestWarning +
+			"us-east-1: error DF7406: the table of stream page_views is less than 23 hours old and has no origin in us-east-1, which archives it with events: all\n" +
+			"  hint: run dynaflux backfill -all -region us-east-1 first: an imported event ends the time to record one, and the archive of page_views in us-east-1 would never be complete\n"}
+		if got := run(); got != want {
+			t.Errorf("without an origin in us-east-1:\ngot  %+v\nwant %+v", got, want)
+		}
+		m := s.metas["us-east-1"]
+		item, _, err := m.Stream(t.Context(), "page_views")
+		must(t, err)
+		born := s.tables.born[shop.StreamTable("page_views")]
+		_, err = m.RecordOrigin(t.Context(), item, meta.Origin{At: time.Now(), Hash: "0123456789ab", RegisteredAt: born, Born: born,
+			ARN: streamARN(shop, "us-east-1", "page_views")})
+		must(t, err)
+		want = result{0, "3 events: 3 stored, 0 already present, 0 conflicting\n", header + ingestWarning + viewsPlan}
+		if got := run(); got != want {
+			t.Errorf("with every origin:\ngot  %+v\nwant %+v", got, want)
+		}
+	})
+}
+
+// A region whose replica holds an event already can never record an origin: import goes on,
+// and says the archive there is never complete.
+func TestImportYoungStreamWithEvents(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		s := newYoungImportStore(t)
+		event := store.Item{"pk": {Type: store.S, Str: "u0"}, "sk": {Type: store.S, Str: "e0"}}
+		must(t, s.backends["us-east-1"].Put(t.Context(), shop.StreamTable("page_views"), event, store.Cond{}))
+		var stdout, stderr strings.Builder
+		status := cli.RunEnv(t.Context(), []string{"import", "-region", "us-east-1", "page_views", "-file", "input/views.jsonl", "-yes"},
+			nil, &stdout, &stderr, s.dir, s.env())
+		want := result{0, "3 events: 3 stored, 0 already present, 0 conflicting\n", "store shop  prefix (none)  account 123456789012  region us-east-1\n" +
+			ingestWarning +
+			"us-east-1: warning DF7217: the table of stream page_views is less than 23 hours old and has no origin in us-east-1, which archives it with events: all; " +
+			"it holds events already, so the archive of it there is never complete\n" +
+			"  hint: backfills there read the table; to keep a new stream's whole history, run dynaflux backfill -all after the deploy that adds it, before its first event\n" +
+			viewsPlan}
+		if got := (result{status, stdout.String(), stderr.String()}); got != want {
+			t.Errorf("got  %+v\nwant %+v", got, want)
+		}
+	})
+}
+
 func TestImportPacing(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {

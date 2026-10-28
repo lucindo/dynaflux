@@ -38,7 +38,7 @@ func (e *Engine) Read(ctx context.Context, cat *Catalog, stream string, key []ex
 			yield(nil, err)
 			return
 		}
-		for row, rerr := range e.events(ctx, cat, s, key, from, to, false) {
+		for row, rerr := range e.events(ctx, cat, s, key, from, to, false, false) {
 			if rerr != nil {
 				yield(nil, fmt.Errorf("dynaflux: read %s: %w", stream, rerr))
 				return
@@ -52,8 +52,8 @@ func (e *Engine) Read(ctx context.Context, cat *Catalog, stream string, key []ex
 
 // events yields the live events of s whose PRIMARY KEY values are key and whose event_time
 // is in [from, to), merged from every shard in (event_time, event_id) order, or in the
-// reverse order with desc.
-func (e *Engine) events(ctx context.Context, cat *Catalog, s *stream, key []expr.Value, from, to *int64, desc bool) iter.Seq2[[]expr.Value, error] {
+// reverse order with desc. consistent makes the reads strongly consistent.
+func (e *Engine) events(ctx context.Context, cat *Catalog, s *stream, key []expr.Value, from, to *int64, desc, consistent bool) iter.Seq2[[]expr.Value, error] {
 	return func(yield func([]expr.Value, error) bool) {
 		pk, err := s.lookupKey(key)
 		lo, hi, ok := "", "", false
@@ -68,7 +68,8 @@ func (e *Engine) events(ctx context.Context, cat *Catalog, s *stream, key []expr
 			return
 		}
 		now := time.Now().UnixMicro()
-		for it, qerr := range merge(e.shards(ctx, e.table(cat, s), s, pk, lo, hi, desc), desc) {
+		q := store.Query{PK: pk, From: lo, To: hi, Desc: desc, PageSize: firstPage, Consistent: consistent}
+		for it, qerr := range merge(e.shards(ctx, e.table(cat, s), s, q), desc) {
 			if qerr != nil {
 				yield(nil, qerr)
 				return
@@ -135,12 +136,13 @@ func skRange(from, to *int64) (string, string, bool, error) {
 	return string(lo), string(hi), true, nil
 }
 
-func (e *Engine) shards(ctx context.Context, table string, s *stream, pk, lo, hi string, desc bool) []iter.Seq2[store.Item, error] {
-	q := store.Query{PK: pk, From: lo, To: hi, Desc: desc, PageSize: firstPage}
+// shards returns q's read of each shard of s: q itself without SHARDS.
+func (e *Engine) shards(ctx context.Context, table string, s *stream, q store.Query) []iter.Seq2[store.Item, error] {
 	if s.Def.Shards == 1 {
 		return []iter.Seq2[store.Item, error]{e.b.Query(ctx, table, q)}
 	}
 	seqs := make([]iter.Seq2[store.Item, error], s.Def.Shards)
+	pk := q.PK
 	for i := range seqs {
 		q.PK = keys.ShardKey(pk, i)
 		seqs[i] = e.b.Query(ctx, table, q)

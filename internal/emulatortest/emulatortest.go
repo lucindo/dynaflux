@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,14 @@ func (r renamed) ScanPage(ctx context.Context, _ string, s store.Scan, start *st
 
 func (r renamed) Put(ctx context.Context, _ string, it store.Item, c store.Cond) error {
 	return r.b.Put(ctx, r.table, it, c)
+}
+
+func (r renamed) Transact(ctx context.Context, puts []store.TxPut) error {
+	puts = slices.Clone(puts)
+	for i := range puts {
+		puts[i].Table = r.table
+	}
+	return r.b.Transact(ctx, puts)
 }
 
 // uniquePrefix is a valid deployment prefix that no other test, process or earlier run

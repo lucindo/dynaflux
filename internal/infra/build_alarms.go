@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/lucindo/dynaflux/internal/archive"
 	"github.com/lucindo/dynaflux/internal/catalog"
 )
 
@@ -168,7 +169,7 @@ func (b *builder) archiveAlarms(stream string) []Alarm {
 			metric(metricDataFreshness, statMaximum)),
 		b.alarm(id, name, b.tags(TagKindArchive, stream), rule{"FailedRows", SeverityCritical, 1, 1,
 			"Firehose couldn't write rows of stream " + stream + " to its archive table, so the archive misses them. " +
-				"They are under " + firehoseErrorPrefix(stream) + " in the store's bucket."},
+				"They are under " + archive.ErrorPrefix(stream) + " in the store's bucket."},
 			metric(metricFailedRows, statSum)),
 	}
 	for i := range alarms {

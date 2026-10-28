@@ -49,7 +49,7 @@ func newProjector(c *engine.Catalog, e env, b store.Backend, s firehose.Sender, 
 	naming := catalog.Naming{Prefix: e.prefix, Store: cat.Store}
 	w := firehose.NewWriter(c.Projector(), naming, e.region, s)
 	p := &projectorFn{
-		core:    projector.New(c.Projector(), b, w, projector.Config{Naming: naming}),
+		core:    projector.New(c.Projector(), b, w, projector.Config{Naming: naming, Region: e.region}),
 		streams: map[string]string{},
 		guard:   archive.CheckSchema(cat, e.region, e.archiveSchema),
 		log:     log,

@@ -179,6 +179,19 @@ func (s *pageViews) Config() simulation.Config {
 		Backfill: []string{pageHourly, pageUsers, siteDaily, userLatest, pageTags, pageRates, quotaByAccount,
 			chargeTotals},
 		Retire: pageHourlyV1,
+		Params: params(),
+	}
+}
+
+// params holds the value of each query's parameter that reads every row: every value of
+// the partition key.
+func params() map[string]expr.Value {
+	return map[string]expr.Value{
+		"sites":     every("s", sites),
+		"pages":     every("p", pages),
+		"users":     every("u", users),
+		"accounts":  every("a", accounts),
+		"customers": every("c", customers),
 	}
 }
 
@@ -246,11 +259,11 @@ func (*pageViews) Event(r *rand.Rand, n int, poison bool) simulation.Event {
 	}}
 }
 
-func (s *pageViews) NewCore(b store.Backend, a simulation.Archiver, cat *projector.Compiled) simulation.Core {
+func (s *pageViews) NewCore(region string, b store.Backend, a simulation.Archiver, cat *projector.Compiled) simulation.Core {
 	if cat == nil {
 		cat = s.core.Projector()
 	}
-	return projector.New(cat, b, a, projector.Config{Naming: s.Config().Naming})
+	return projector.New(cat, b, a, projector.Config{Naming: s.Config().Naming, Region: region})
 }
 
 // pageView is a decoded event of page_views.
@@ -418,8 +431,15 @@ func (s *pageViews) expectTags(o *simulation.Oracle, ev pageView) error {
 
 // Read reads every view through its named query, and the breakers from the meta table.
 func (s *pageViews) Read(ctx context.Context, b store.Backend) (simulation.State, error) {
+	return readState(ctx, b, s.cat, params())
+}
+
+// readState reads every view of cat's store through its named query, whose one parameter,
+// from all, holds every value of the view's partition key, and the breakers from the meta
+// table.
+func readState(ctx context.Context, b store.Backend, cat *engine.Catalog, all map[string]expr.Value) (simulation.State, error) {
 	st := simulation.State{Rows: simulation.Rows{}, Broken: map[string]simulation.Breaker{}}
-	states, err := meta.New(b, metaTable()).ViewStates(ctx)
+	states, err := meta.New(b, catalog.Naming{Store: cat.Catalog().Store}.MetaTable()).ViewStates(ctx)
 	if err != nil {
 		return st, err
 	}
@@ -434,15 +454,8 @@ func (s *pageViews) Read(ctx context.Context, b store.Backend) (simulation.State
 		}
 	}
 	e := engine.New(b, engine.Options{})
-	all := map[string]expr.Value{
-		"sites":     every("s", sites),
-		"pages":     every("p", pages),
-		"users":     every("u", users),
-		"accounts":  every("a", accounts),
-		"customers": every("c", customers),
-	}
-	for i := range s.cat.Catalog().Queries {
-		if err = s.readView(ctx, e, &s.cat.Catalog().Queries[i], all, st.Rows); err != nil {
+	for i := range cat.Catalog().Queries {
+		if err = readView(ctx, e, cat, &cat.Catalog().Queries[i], all, st.Rows); err != nil {
 			return st, err
 		}
 	}
@@ -452,12 +465,12 @@ func (s *pageViews) Read(ctx context.Context, b store.Backend) (simulation.State
 // readView adds the rows that q reads to rows, and those of the view's retained versions,
 // which a query can't read, a partition at a time. q's one parameter, from all, holds every
 // value of the partition key, which is one column.
-func (s *pageViews) readView(ctx context.Context, e *engine.Engine, q *catalog.Query, all map[string]expr.Value, rows simulation.Rows) error {
-	v, _ := s.cat.Catalog().View(q.Source.Name)
+func readView(ctx context.Context, e *engine.Engine, cat *engine.Catalog, q *catalog.Query, all map[string]expr.Value, rows simulation.Rows) error {
+	v, _ := cat.Catalog().View(q.Source.Name)
 	cur, _ := v.Current()
 	values := all[q.Params[0].Name]
 	// The oracle has the rows of every version, live or not.
-	got, err := e.Query(ctx, s.cat, q.Name, []expr.Value{values}, engine.QueryOptions{AllowPartial: true})
+	got, err := e.Query(ctx, cat, q.Name, []expr.Value{values}, engine.QueryOptions{AllowPartial: true})
 	if err != nil {
 		return fmt.Errorf("%s: %w", q.Name, err)
 	}
@@ -471,7 +484,7 @@ func (s *pageViews) readView(ctx context.Context, e *engine.Engine, q *catalog.Q
 		}
 		id := catalog.VersionID(v.Name, vv.Number)
 		for _, key := range values.AsArray() {
-			for row, rerr := range e.ReadPartition(ctx, s.cat, id, []expr.Value{key}) {
+			for row, rerr := range e.ReadPartition(ctx, cat, id, []expr.Value{key}) {
 				if rerr != nil {
 					return fmt.Errorf("%s: %w", id, rerr)
 				}

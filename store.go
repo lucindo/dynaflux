@@ -50,6 +50,13 @@ func init() {
 			}
 			return engine.QueryOptions(o)
 		},
+		AppendMode: func(opts any) engine.AppendMode {
+			var o appendOptions
+			for _, opt := range opts.([]AppendOption) {
+				opt(&o)
+			}
+			return engine.AppendMode(o)
+		},
 	})
 }
 
@@ -104,22 +111,39 @@ type Catalog struct {
 	err error // why the generated catalog can't be loaded
 }
 
-// Token names the events that an append stored. The zero Token names none.
+// Token names the events that an append stored, in the store's region. The zero Token
+// names none.
 type Token struct {
 	s string
 }
 
-// String returns the token's text form, which is opaque.
+// String returns the token's text form, which is opaque. [ParseToken] reads it back.
 func (t Token) String() string { return t.s }
 
 // IsZero reports whether t is the zero Token.
 func (t Token) IsZero() bool { return t.s == "" }
 
-// AppendOption configures an append. There are none yet; every generated append method
-// takes them, so adding one won't change the methods' types.
+// ParseToken returns the Token whose text form is s, so that another process in the same
+// region can wait for its events with [WaitFor]. It checks only the form: a token is
+// unauthenticated text that grants nothing, since WaitFor reads only receipts with it.
+func ParseToken(s string) (Token, error) {
+	if err := engine.CheckToken(s); err != nil {
+		return Token{}, fmt.Errorf("dynaflux: %w", err)
+	}
+	return Token{s: s}, nil
+}
+
+// AppendOption configures an append. Every generated append method takes them.
 type AppendOption func(*appendOptions)
 
-type appendOptions struct{}
+type appendOptions engine.AppendMode
+
+// Waitable asks the projector of the store's region to write a receipt for each event of
+// the append once it has handled it, so that [WaitFor] can wait for them: one more write to
+// the store's meta table per event, which other appends don't pay.
+func Waitable() AppendOption {
+	return func(o *appendOptions) { o.Receipt = true }
+}
 
 // QueryOption configures a query.
 type QueryOption func(*queryOptions)
@@ -131,6 +155,24 @@ type queryOptions engine.QueryOptions
 // events: those a backfill hasn't applied yet, or every event after the version broke.
 func AllowPartial() QueryOption {
 	return func(o *queryOptions) { o.AllowPartial = true }
+}
+
+// WaitFor makes a query first wait until the projector of the store's region has handled
+// every event of tok, an append's token in this region, for at most timeout. A query over a
+// view then reads its version's state again, and both kinds read strongly consistently, so
+// the rows include the events. A wait takes about the projector's batching window plus one
+// invocation, 1 to 1.5 seconds by default: give it a timeout of a few seconds. When the
+// timeout passes first, the query returns an error that matches [ErrWaitTimeout]; when ctx
+// ends first, ctx's error.
+//
+// The query fails at once, before any read, in another region than the append's, for an
+// event appended without [Waitable], for one that another region stored, as a duplicate of
+// a replicated DEDUP BY event is, for a token of more than 1,000 events, and for a token of
+// a stream that the store doesn't have. A token can be waited on for 24 hours after its
+// append. The zero Token waits for nothing. Given more than once, WaitFor makes the query
+// wait for each token in turn, each for its own timeout.
+func WaitFor(tok Token, timeout time.Duration) QueryOption {
+	return func(o *queryOptions) { o.Wait = append(o.Wait, engine.Wait{Token: tok.s, Timeout: timeout}) }
 }
 
 // ReadOption configures a stream read.

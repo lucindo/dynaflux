@@ -20,7 +20,9 @@ import (
 	"github.com/aws/aws-lambda-go/cfn"
 	"github.com/aws/aws-lambda-go/lambdacontext"
 
+	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/setup"
+	"github.com/lucindo/dynaflux/internal/store/mem"
 	"github.com/lucindo/dynaflux/runtime"
 )
 
@@ -193,6 +195,30 @@ func TestSetupReplies(t *testing.T) {
 				t.Errorf("replies %+v\nwant one PUT without Content-Type of\n%s", got, tt.want)
 			}
 		})
+	}
+}
+
+// An update of ArchiveMode compares the modes it sends with the old ones: a stream that
+// starts archiving gets a hole.
+func TestSetupArchiveModeReadsTheOldProperties(t *testing.T) {
+	t.Parallel()
+	const props = `{"ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:prod-analytics-setup", "ServiceTimeout": "300",
+    "MetaTable": "prod-analytics-meta", "Streams": {"clicks": "all"}}`
+	b := mem.New()
+	m := meta.New(b, "prod-analytics-meta")
+	if err := m.ApplyArchiveModes(t.Context(), nil, map[string]meta.ArchiveMode{"clicks": meta.ArchiveOff}, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	fn := runtime.NewSetup(&setup.Handler{Meta: b}, io.Discard)
+	r := newReplies(t)
+	ev := cfnEvent(t, "Update", setup.TypeArchiveMode, "ArchiveMode", "prod-analytics-meta/archive-mode", props, r.url())
+	ev.OldResourceProperties["Streams"] = map[string]any{"clicks": "off"}
+	if reason, err := fn(t.Context(), ev); reason != "" || err != nil {
+		t.Fatalf("got %q, %v; want the reply sent", reason, err)
+	}
+	s, _, err := m.Stream(t.Context(), "clicks")
+	if err != nil || s.Mode != meta.ArchiveAll || len(s.Holes) != 1 || s.Holes[0].From != meta.ArchiveOff {
+		t.Errorf("stream item %+v, %v; want mode all after a hole from off", s, err)
 	}
 }
 

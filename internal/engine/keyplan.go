@@ -55,6 +55,8 @@ type read struct {
 	// loV and hiV are the bounds as given, which rows are checked against.
 	loV, hiV *typedBound
 	empty    bool // no row can match: the read sends no request
+	// consistent makes every read strongly consistent.
+	consistent bool
 }
 
 // planRead evaluates the key plan of q for params.

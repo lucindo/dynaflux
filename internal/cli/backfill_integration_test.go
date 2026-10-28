@@ -72,6 +72,7 @@ func TestBackfillOnDynamoDBLocal(t *testing.T) {
 			nil, &stdout, &stderr, dir, cli.Env{
 				Region: emulatortest.Region, Account: account, Backends: map[string]store.Backend{emulatortest.Region: b},
 				StepFunctions: map[string]cli.StepFunctions{emulatortest.Region: steps}, Tables: map[string]backfill.Tables{emulatortest.Region: tables},
+				AWS: map[string]cli.AWS{emulatortest.Region: healthyAWS(naming, emulatortest.Region, res.Catalog)},
 			})
 		return result{status, stdout.String(), stderr.String()}
 	}

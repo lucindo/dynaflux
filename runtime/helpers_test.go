@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -47,6 +48,8 @@ func rowText(row []expr.Value) string {
 			parts[i] = v.AsString()
 		case expr.KindUint:
 			parts[i] = strconv.FormatUint(v.AsUint(), 10)
+		case expr.KindMicros:
+			parts[i] = time.UnixMicro(v.AsMicros()).UTC().Format(time.RFC3339Nano)
 		default:
 			parts[i] = fmt.Sprintf("kind %d", v.Kind())
 		}

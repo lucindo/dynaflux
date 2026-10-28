@@ -7,8 +7,6 @@
 package engine
 
 import (
-	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -92,6 +90,14 @@ func Compile(data []byte) (*Catalog, error) {
 		ps, _ := p.Stream(def.Streams[i].Name)
 		c.streams[ps.Def.Name] = compileStream(ps)
 	}
+	for id, vv := range def.Versions() {
+		if vv.Mode == catalog.ModeSync {
+			c.streams[vv.Stream].sync = append(c.streams[vv.Stream].sync, id)
+		}
+	}
+	for _, s := range c.streams {
+		slices.Sort(s.sync)
+	}
 	for i := range def.Queries {
 		q, qerr := c.compileQuery(&def.Queries[i])
 		if qerr != nil {
@@ -125,6 +131,8 @@ type stream struct {
 	// event_time, then the DEDUP BY columns. Empty without DEDUP BY.
 	idTypes []catalog.Type
 	dedup   []int // indexes in Columns of the DEDUP BY columns
+	// sync are the IDs of the stream's SYNC versions, sorted.
+	sync []string
 	// archive encodes the stream's archive records; nil when the stream isn't archived.
 	archive *archive.Encoder
 }
@@ -201,25 +209,4 @@ func (e *Engine) naming(cat *Catalog) catalog.Naming {
 
 func (e *Engine) table(cat *Catalog, s *stream) string {
 	return e.naming(cat).StreamTable(s.Def.Name)
-}
-
-// tokenFormat is the first byte of a token's binary form.
-const tokenFormat = 1
-
-// Token returns the text of a token that names the events at ks, which this engine appended
-// to stream, or "" when ks is empty.
-func (e *Engine) Token(stream string, ks []store.Key) string {
-	if len(ks) == 0 {
-		return ""
-	}
-	b := appendText([]byte{tokenFormat}, e.region)
-	b = appendText(b, stream)
-	for _, k := range ks {
-		b = appendText(appendText(b, k.PK), k.SK)
-	}
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func appendText(b []byte, s string) []byte {
-	return append(binary.AppendUvarint(b, uint64(len(s))), s...)
 }

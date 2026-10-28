@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/backfill"
 	"github.com/lucindo/dynaflux/internal/deployed"
 	"github.com/lucindo/dynaflux/internal/meta"
 )
@@ -147,6 +149,8 @@ func (c *cli) printStream(r *regionStatus, s streamStatus, verbose bool) {
 	switch {
 	case !r.local:
 		fmt.Fprintf(&c.out, "  stream %s: %s\n", s.name, s.delivery())
+	case s.check != nil:
+		fmt.Fprintf(&c.out, "  stream %s: archive %s\n", s.name, s.check.text())
 	case verbose:
 		fmt.Fprintf(&c.out, "  stream %s:\n", s.name)
 	}
@@ -185,16 +189,33 @@ func (s *streamStatus) delivery() string {
 		}
 		parts = append(parts, p)
 	}
-	switch {
-	case s.archive == "":
-	case s.archiveUnread:
-		parts = append(parts, "archive couldn't be read")
-	case s.freshness != nil:
-		parts = append(parts, "archive "+durationText(*s.freshness)+" behind")
-	default:
-		parts = append(parts, "archive without recent data")
+	if s.archive == "" {
+		return strings.Join(parts, "; ")
 	}
-	return strings.Join(parts, "; ")
+	archive := "archive without recent data"
+	switch {
+	case s.archiveUnread:
+		archive = "archive couldn't be read"
+	case s.delivered != nil:
+		archive = "archive delivered through " + timeText(*s.delivered)
+	}
+	if s.check != nil {
+		archive += ", " + s.check.text()
+	}
+	return strings.Join(append(parts, archive), "; ")
+}
+
+// text says whether the archive is complete, since when, or the rule that failed.
+func (a *archiveCheck) text() string {
+	switch {
+	case a.unread:
+		return "completeness couldn't be read"
+	case !a.verdict.Complete:
+		return "not complete: " + a.verdict.Reason
+	case a.unchecked.IsZero():
+		return "complete since " + timeText(a.since)
+	}
+	return "complete since " + timeText(a.since) + ", not checked before " + a.unchecked.UTC().Format(time.DateOnly)
 }
 
 func (c *cli) printJob(r *regionStatus, j meta.Job) {
@@ -210,12 +231,15 @@ func (c *cli) printJob(r *regionStatus, j meta.Job) {
 		line += " at " + timeText(vs.SplitAt)
 	}
 	if j.Split != meta.SplitFence && r.cat.ExactHandoff(r.region, j.Stream) {
-		line += " (the stream held events when the job started, or -source table chose it)"
+		line += " (the archive wasn't complete when the job started, or -source table chose it)"
 	}
-	line += jobActivity(j)
+	if n := j.Archive.Scanned; n > 0 {
+		line += "; Athena scanned " + bytesText(n)
+	}
+	line += r.activity(j)
 	e, read := r.execs[j.Version]
 	switch {
-	case j.State != meta.JobRunning || j.Waits != "":
+	case j.State != meta.JobRunning:
 	case r.local:
 		line += "; execution not available locally"
 	case !read:
@@ -230,17 +254,54 @@ func (c *cli) printJob(r *regionStatus, j meta.Job) {
 	c.out.WriteString(line + jobError(j) + "\n")
 }
 
-// jobActivity says why a job that hasn't ended doesn't move: it waits for a later release,
-// or for the projector's lag to fall.
+// jobActivity says why a job that hasn't ended doesn't move: it waits for Firehose, or for the
+// projector's lag to fall.
 func jobActivity(j meta.Job) string {
 	switch {
 	case j.State == meta.JobDone || j.State == meta.JobBroken:
-	case j.Waits == meta.WaitArchive:
-		return "; waits for the archive read of a later release"
+	case j.State == meta.JobRunning && j.Split == meta.SplitFence && j.Phase == meta.PhaseWatermark:
+		return "; waits for Firehose to deliver the records taken before " + timeText(j.Cut)
 	case j.Paused && j.State == meta.JobRunning:
 		return "; paused: the projector is more than 5 minutes behind"
 	}
 	return ""
+}
+
+// idleSlack is how long past backfill.IdleAfter a job may still wait at watermark before
+// status says it can't tell that Firehose holds nothing: the job checks every minute.
+const idleSlack = 2 * time.Minute
+
+// activity is jobActivity, except that it says from the archive's metrics why a job still waits
+// at watermark.
+func (r *regionStatus) activity(j meta.Job) string {
+	s := r.stream(j.Stream)
+	if j.State != meta.JobRunning || j.Split != meta.SplitFence || j.Phase != meta.PhaseWatermark ||
+		s == nil || s.archive == "" || s.archiveUnread || r.local {
+		return jobActivity(j)
+	}
+	switch idle := j.Cut.Add(backfill.IdleAfter); {
+	case s.delivered != nil:
+		return fmt.Sprintf("; waits for Firehose, delivered through %s, to deliver the records taken before %s", timeText(*s.delivered), timeText(j.Cut))
+	case r.now.Before(idle.Add(idleSlack)):
+		return "; Firehose shows no recent data: the job waits until " + timeText(idle) + " to tell that it holds nothing"
+	}
+	return "; Firehose shows no recent data, and the job can't tell that it holds nothing: CloudWatch doesn't list its data " +
+		"freshness, as after 14 days without records, or the delivery stream isn't ACTIVE; append an event to " + j.Stream +
+		", or rebuild the view to fill it from the table"
+}
+
+// bytesText is n bytes in decimal units, as Athena bills them.
+func bytesText(n int64) string {
+	const unit = 1000
+	if n < unit {
+		return strconv.FormatInt(n, 10) + " B"
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "kMGTPE"[exp])
 }
 
 // statusJSON is status's -json document.
@@ -313,7 +374,7 @@ type jobJSON struct {
 	Skipped   int64         `json:"skipped"`
 	Rate      int           `json:"rate"`
 	Paused    bool          `json:"paused"`
-	Waits     string        `json:"waits,omitzero"`
+	Scanned   int64         `json:"scanned_bytes,omitzero"` // what Athena scanned for an archive source
 	UpdatedAt time.Time     `json:"updated_at"`
 	Execution string        `json:"execution"`
 	Running   string        `json:"running,omitzero"` // the execution that runs the job
@@ -334,9 +395,29 @@ type streamJSON struct {
 	Mappings   []mappingJSON `json:"mappings,omitzero"`
 	Archive    string        `json:"archive,omitzero"`
 	FreshnessS *int64        `json:"archive_freshness_s,omitzero"`
+	Delivered  time.Time     `json:"archive_delivered_through,omitzero"`
 	FailedRows int64         `json:"archive_failed_rows,omitzero"`
+	Complete   *completeJSON `json:"archive_completeness,omitzero"`
 	Gaps       []gapJSON     `json:"gaps,omitzero"`
 	Units      []unitJSON    `json:"units,omitzero"`
+}
+
+// completeJSON is whether the region's archive of a stream with events: all is complete.
+type completeJSON struct {
+	Unread          bool      `json:"unread,omitzero"`
+	Complete        bool      `json:"complete"`
+	Since           time.Time `json:"since,omitzero"` // the origin's time
+	UncheckedBefore time.Time `json:"unchecked_before,omitzero"`
+	Rule            int       `json:"rule,omitzero"` // the rule that failed
+	Reason          string    `json:"reason,omitzero"`
+	At              time.Time `json:"at,omitzero"`
+	Suspect         bool      `json:"suspected_gap,omitzero"`
+}
+
+func (a *archiveCheck) json() *completeJSON {
+	v := a.verdict
+	return &completeJSON{Unread: a.unread, Complete: v.Complete, Since: a.since.UTC(), UncheckedBefore: a.unchecked.UTC(), Rule: v.Rule,
+		Reason: v.Reason, At: v.At.UTC(), Suspect: v.Suspect}
 }
 
 type mappingJSON struct {
@@ -428,8 +509,8 @@ func (r *regionStatus) jobJSON(job meta.Job) jobJSON {
 // jobJSONOf is job's item in -json output.
 func jobJSONOf(job meta.Job) jobJSON {
 	j := jobJSON{Version: job.Version, State: string(job.State), Phase: string(job.Phase), Attempt: job.Attempt, Split: string(job.Split),
-		Staged: job.Staged, Applied: job.Applied, Skipped: job.Skipped, Rate: job.Rate, Paused: job.Paused, Waits: string(job.Waits),
-		UpdatedAt: job.UpdatedAt.UTC(), Execution: job.Execution}
+		Staged: job.Staged, Applied: job.Applied, Skipped: job.Skipped, Rate: job.Rate, Paused: job.Paused,
+		Scanned: job.Archive.Scanned, UpdatedAt: job.UpdatedAt.UTC(), Execution: job.Execution}
 	if e := job.Error; e != nil {
 		j.Error = &jobErrorJSON{Phase: string(e.Phase), Message: e.Message, At: e.At.UTC()}
 	}
@@ -442,7 +523,10 @@ func (r *regionStatus) streamJSON(s streamStatus) streamJSON {
 		j.LagMS = new(s.lag.Milliseconds())
 	}
 	if s.freshness != nil {
-		j.FreshnessS = new(int64(s.freshness.Seconds()))
+		j.FreshnessS, j.Delivered = new(int64(s.freshness.Seconds())), s.delivered.UTC()
+	}
+	if s.check != nil {
+		j.Complete = s.check.json()
 	}
 	for _, m := range s.mappings {
 		j.Mappings = append(j.Mappings, mappingJSON{UUID: m.UUID, Function: m.Function, State: m.State, LastResult: m.LastResult})

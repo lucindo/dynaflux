@@ -6,9 +6,11 @@ package simulation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"maps"
 	"math/rand/v2"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -30,12 +32,26 @@ const (
 	attrFences   = "fences"
 )
 
-// Injected errors. Neither is a condition failure, so the code under test treats them as
+// Injected errors. None is a condition failure, so the code under test treats them as
 // transient.
 var (
-	errTransient = errors.New("simulation: injected throttling, not applied")
-	errAmbiguous = errors.New("simulation: injected timeout after the write applied")
+	errTransient        = fmt.Errorf("simulation: injected throttling, not applied: %w", store.ErrThrottled)
+	errAmbiguous        = errors.New("simulation: injected timeout after the write applied")
+	errConflict         = fmt.Errorf("simulation: injected conflict, not applied: %w", store.ErrConflict)
+	errHeld             = fmt.Errorf("simulation: a transaction in progress holds the item, not applied: %w", store.ErrConflict)
+	errAppliedConflict  = fmt.Errorf("simulation: injected conflict after the write applied: %w", store.ErrConflict)
+	errAppliedThrottled = fmt.Errorf("simulation: injected throttling after the write applied: %w", store.ErrThrottled)
 )
+
+// injected reports whether err is one the store's faults explain.
+func injected(err error) bool {
+	for _, class := range []error{errTransient, errAmbiguous, store.ErrConflict, store.ErrThrottled} {
+		if errors.Is(err, class) {
+			return true
+		}
+	}
+	return false
+}
 
 // invocation is one caller at the gates: a core invocation, or a harness actor such as a
 // writer, which has no deadline and never crashes.
@@ -49,8 +65,12 @@ type invocation struct {
 	stall    time.Duration // how long before the deadline the stalled response returns
 	skew     time.Duration // a writer's clock offset, which its appends' ingest_time carries
 	// taken is set when a writer's write of an event found another call's event at its key.
-	// Only the writer touches it.
-	taken bool
+	// skewed is the last item whose ingest_time skew shifted, so a resend of it isn't
+	// shifted again. called is when the writer's append call started. Only the writer
+	// touches them.
+	taken  bool
+	skewed store.Item
+	called time.Time
 
 	mu       sync.Mutex
 	requests int
@@ -142,20 +162,57 @@ type region struct {
 	written map[string]map[store.Key]bool
 	// delivered holds when the last invocation that delivered each record started, for P10.
 	delivered map[RecordID]time.Time
+	// held holds the items of the transactions in progress.
+	held map[tableKey]bool
+	// live holds the versions live in the region's meta, and liveUntil when each version
+	// last stopped being live, for P11b and P15.
+	live      map[string]bool
+	liveUntil map[string]time.Time
+	// waitable holds the INSERTs that appends here asked receipts for, by their receipts'
+	// partition keys, and landed when each receipt first landed, for P12, P13 and P15.
+	waitable map[string]waited
+	landed   map[string]time.Time
+	// off holds the streams that the region's functions don't archive, and gen counts its
+	// changes, which new containers take. It is replaced, never changed. The mappings stall
+	// from stallFrom to stallTo.
+	off                map[string]bool
+	gen                int
+	stallFrom, stallTo time.Time
+	// For P14: when each stream's origin landed; when the functions changed archiving it, and
+	// when progress passed a record of it a day old; the catalogs registered, in order; and
+	// when each actor last read each stream item, by actor and stream.
+	originAt   map[string]time.Time
+	changes    map[string][]time.Time
+	lagged     map[string][]time.Time
+	registered []registration
+	reads      map[string]time.Time
+	// listed holds when each actor last listed each stream's error prefix, by actor and stream.
+	listed map[string]time.Time
 }
 
 func newRegion(ctx context.Context, r *run, i int) (*region, error) {
 	rg := &region{
 		run:       r,
-		name:      "r" + strconv.Itoa(i),
+		name:      r.regionNames[i],
 		mem:       mem.New(),
-		archive:   &archive{cfg: r.sc.Archive},
+		archive:   newArchive(r.sc.Archive, r.actorRNG(r.regionNames[i]+" archive")),
 		runs:      backfill.NewMemRuns(),
 		streams:   map[string]*stream{},
 		unitIDs:   map[string]bool{},
 		units:     map[string]*unit{},
 		written:   map[string]map[store.Key]bool{},
 		delivered: map[RecordID]time.Time{},
+		held:      map[tableKey]bool{},
+		live:      map[string]bool{},
+		liveUntil: map[string]time.Time{},
+		waitable:  map[string]waited{},
+		landed:    map[string]time.Time{},
+		off:       map[string]bool{},
+		originAt:  map[string]time.Time{},
+		changes:   map[string][]time.Time{},
+		lagged:    map[string][]time.Time{},
+		reads:     map[string]time.Time{},
+		listed:    map[string]time.Time{},
 	}
 	rg.store = gated{rg}
 	rg.archiver = archiver{rg}
@@ -164,7 +221,7 @@ func newRegion(ctx context.Context, r *run, i int) (*region, error) {
 		rg.build = buildOld
 	}
 	if r.sc.Backfill.Together {
-		rg.backfillStart = between(r.actorRNG(rg.name+" backfill"), 0, r.sc.Backfill.Within)
+		rg.backfillStart = r.sc.History.Deployed + between(r.actorRNG(rg.name+" backfill"), 0, r.sc.Backfill.Within)
 	}
 	rg.mappings = []*mapping{{rg: rg, name: "m0", start: time.Now()}}
 	if r.sc.ESM.Replay > 0 {
@@ -183,7 +240,12 @@ func newRegion(ctx context.Context, r *run, i int) (*region, error) {
 	if _, err := meta.New(rg.mem, r.meta).RegisterCatalog(ctx, r.catalogData, "sim"); err != nil {
 		return nil, err
 	}
-	return rg, nil
+	if h, rng := r.sc.History, r.actorRNG(rg.name+" stall"); chance(rng, h.Stall) {
+		rg.stallFrom = time.Now().Add(between(rng, 0, h.StallWithin))
+		rg.stallTo = rg.stallFrom.Add(h.StallFor + between(rng, 0, time.Hour))
+		r.count(&r.stats.Stalls)
+	}
+	return rg, rg.openHistory(ctx)
 }
 
 // setLive makes every view version live but those a backfill fills.
@@ -202,9 +264,27 @@ func (rg *region) setLive(ctx context.Context) error {
 			if err := m.MakeLive(ctx, id, time.Time{}); err != nil {
 				return err
 			}
+			rg.noteState(id, meta.Live)
 		}
 	}
 	return nil
+}
+
+// noteState notes that version's state in the region's meta is now state, for P11b.
+func (rg *region) noteState(version string, state meta.State) {
+	switch {
+	case state == meta.Live:
+		rg.live[version] = true
+	case rg.live[version]:
+		rg.live[version] = false
+		rg.liveUntil[version] = time.Now()
+	}
+}
+
+// wasLive reports whether version was live in the region's meta at some moment from since
+// on.
+func (rg *region) wasLive(version string, since time.Time) bool {
+	return rg.live[version] || !rg.liveUntil[version].Before(since)
 }
 
 // backfills reports whether the run backfills version.
@@ -228,6 +308,7 @@ const (
 	kindWrite
 	kindCondWrite
 	kindArchive
+	kindTransact
 )
 
 type fault uint8
@@ -238,6 +319,10 @@ const (
 	faultAmbiguous
 	faultRetried
 	faultLate
+	faultConflict
+	faultInProgress
+	faultAppliedThrottled
+	faultAppliedConflict
 )
 
 // enter is a request's arrival: the gate, the kill check, then what happens to it. It
@@ -292,25 +377,61 @@ func (r *run) latency() time.Duration {
 	return lat
 }
 
+// fault draws a request's fault. A rate of 0 draws nothing, so a fault added here leaves
+// the draws of scenarios without it as they were.
 func (r *run) fault(k kind, core bool) fault {
 	f := r.sc.Faults
+	single := k == kindWrite || k == kindCondWrite
 	switch {
 	case r.draw(f.Transient):
 		r.count(&r.stats.Transient)
 		return faultTransient
 	case k == kindRead:
 		return faultNone
-	case core && k != kindArchive && r.draw(f.Late):
+	case core && single && r.draw(f.Late):
 		r.count(&r.stats.Late)
 		return faultLate
+	case k != kindArchive && r.draw(f.Conflict):
+		r.count(&r.stats.Conflicts)
+		return faultConflict
 	case r.draw(f.Ambiguous):
 		r.count(&r.stats.Ambiguous)
 		return faultAmbiguous
-	case k == kindCondWrite && r.draw(f.Retried):
+	case (k == kindCondWrite || k == kindTransact) && r.draw(f.Retried):
 		r.count(&r.stats.Retried)
 		return faultRetried
 	}
+	return r.appliedFault(k, single)
+}
+
+// appliedFault draws the faults that apply a write and fail its caller, after Retried.
+func (r *run) appliedFault(k kind, single bool) fault {
+	f := r.sc.Faults
+	switch {
+	case k == kindTransact && r.draw(f.InProgress):
+		return faultInProgress
+	case k != kindArchive && r.draw(f.AppliedThrottled):
+		r.count(&r.stats.AppliedThrottled)
+		return faultAppliedThrottled
+	case single && r.draw(f.AppliedConflict):
+		r.count(&r.stats.AppliedConflicts)
+		return faultAppliedConflict
+	}
 	return faultNone
+}
+
+// appliedError is what the caller of a write that applied sees under f.
+func appliedError(f fault) error {
+	switch f {
+	case faultAmbiguous:
+		return errAmbiguous
+	case faultAppliedThrottled:
+		return errAppliedThrottled
+	case faultAppliedConflict:
+		return errAppliedConflict
+	case faultNone, faultTransient, faultRetried, faultLate, faultConflict, faultInProgress:
+	}
+	return nil
 }
 
 // gated is a region's store as the code under test sees it.
@@ -321,6 +442,9 @@ func (g gated) Get(ctx context.Context, table string, k store.Key, consistent bo
 	defer time.Sleep(lat)
 	if f == faultTransient {
 		return nil, errTransient
+	}
+	if stream, ok := strings.CutPrefix(k.PK, streamPrefix); ok && table == g.rg.run.meta {
+		g.rg.reads[invocationOf(ctx).id+" "+stream] = time.Now()
 	}
 	return g.rg.mem.Get(ctx, table, k, consistent)
 }
@@ -429,36 +553,53 @@ func (g gated) Put(ctx context.Context, table string, it store.Item, c store.Con
 	case faultTransient:
 		time.Sleep(lat)
 		return errTransient
+	case faultConflict:
+		time.Sleep(lat)
+		return errConflict
 	case faultLate:
 		g.rg.landLate(ctx, table, it, c)
-	case faultNone, faultAmbiguous, faultRetried:
+	case faultNone, faultAmbiguous, faultRetried, faultInProgress, faultAppliedThrottled, faultAppliedConflict:
 	}
-	if skew := invocationOf(ctx).skew; skew != 0 && g.rg.streams[table] != nil {
-		g.rg.skew(it, skew)
+	if g.rg.held[tableKey{table, store.KeyOf(it)}] {
+		g.rg.run.count(&g.rg.run.stats.Conflicts)
+		time.Sleep(lat)
+		return errHeld
+	}
+	if g.rg.streams[table] != nil {
+		g.rg.skew(ctx, it)
 	}
 	err := g.rg.apply(ctx, table, it, c)
 	if g.rg.streams[table] != nil {
 		var ce *store.ConditionError
 		invocationOf(ctx).taken = errors.As(err, &ce)
+		if _, ok := it[catalog.AttrSync]; ok && err == nil {
+			g.rg.checkSync(ctx, []store.TxPut{{Table: table, Item: it, Cond: c}})
+		}
 	}
 	if err == nil && f == faultRetried {
 		// The SDK's retry finds the first attempt's write and fails its condition.
 		var cur store.Item
-		if cur, err = g.rg.mem.Get(ctx, table, keyOf(it), true); err == nil {
+		if cur, err = g.rg.mem.Get(ctx, table, store.KeyOf(it), true); err == nil {
 			err = &store.ConditionError{Current: cur}
 		}
 	}
 	time.Sleep(lat)
-	if err == nil && f == faultAmbiguous {
-		err = errAmbiguous
+	if err == nil {
+		err = appliedError(f)
 	}
 	return err
 }
 
-// skew shifts an append's ingest_time by its writer's clock offset. It changes the caller's
-// item, as the writer's clock would have written it, so the append still knows its event.
-func (rg *region) skew(it store.Item, by time.Duration) {
-	at := integer(it[catalog.AttrIngestTime]) + by.Microseconds()
+// skew shifts an append's ingest_time by its writer's clock offset, once per item. It
+// changes the caller's item, as the writer's clock would have written it, so the append
+// still knows its event.
+func (rg *region) skew(ctx context.Context, it store.Item) {
+	inv := invocationOf(ctx)
+	if inv.skew == 0 || inv.skewed != nil && reflect.ValueOf(inv.skewed).UnsafePointer() == reflect.ValueOf(it).UnsafePointer() {
+		return
+	}
+	inv.skewed = it
+	at := integer(it[catalog.AttrIngestTime]) + inv.skew.Microseconds()
 	it[catalog.AttrIngestTime] = store.Value{Type: store.N, Str: strconv.FormatInt(at, 10)}
 	rg.run.count(&rg.run.stats.Skewed)
 }
@@ -483,15 +624,20 @@ func (rg *region) landLate(ctx context.Context, table string, it store.Item, c s
 // apply writes an item, then checks the store's invariants against what it replaced.
 // Only gated code calls it.
 func (rg *region) apply(ctx context.Context, table string, it store.Item, c store.Cond) error {
+	return rg.write(ctx, table, it, c, false)
+}
+
+// write is apply, of a transaction's put when tx is set.
+func (rg *region) write(ctx context.Context, table string, it store.Item, c store.Cond, tx bool) error {
 	if s := rg.streams[table]; s != nil {
 		return s.append(ctx, it, c)
 	}
-	cur, getErr := rg.mem.Get(ctx, table, keyOf(it), true)
+	cur, getErr := rg.mem.Get(ctx, table, store.KeyOf(it), true)
 	if err := rg.mem.Put(ctx, table, it, c); err != nil {
 		return err
 	}
 	if getErr == nil {
-		rg.checkWrite(table, cur, it, invocationOf(ctx).lifetime())
+		rg.checkWrite(table, cur, it, invocationOf(ctx).lifetime(), tx)
 	}
 	switch {
 	case rg.run.views[table] != "":
@@ -499,19 +645,26 @@ func (rg *region) apply(ctx context.Context, table string, it store.Item, c stor
 		if rg.written[table] == nil {
 			rg.written[table] = map[store.Key]bool{}
 		}
-		rg.written[table][keyOf(it)] = true
+		rg.written[table][store.KeyOf(it)] = true
 	case table == rg.run.meta:
 		rg.sweeper.expire(table, it)
 		rg.noteTombstone(it)
+		rg.noteHistory(ctx, cur, it)
+		if k := store.KeyOf(it); k.PK == "view" {
+			rg.noteState(k.SK, meta.State(it["state"].Str))
+		} else if strings.HasPrefix(k.PK, receiptPrefix) {
+			rg.noteReceipt(ctx, it)
+		}
 	}
 	return nil
 }
 
 // checkWrite checks a write that replaced cur with next, sent by an invocation that lives
-// lifetime: the row version rises by exactly one, and a marker's owner, a unit's progress and
-// its fences never go back (P5); a row's high-water marks stay within the units that can
-// still deliver (P4).
-func (rg *region) checkWrite(table string, cur, next store.Item, lifetime time.Duration) {
+// lifetime, in a transaction when tx is set: the row version rises by exactly one, and a
+// marker's owner, a unit's progress and its fences never go back (P5); a row's high-water
+// marks stay within the units that can still deliver (P4), or, written by a transaction,
+// stay as they were (P11c).
+func (rg *region) checkWrite(table string, cur, next store.Item, lifetime time.Duration, tx bool) {
 	r := rg.run
 	where := rg.name + " " + table + " " + keyText(next)
 	if v, ok := next[catalog.AttrRowVersion]; ok {
@@ -526,20 +679,46 @@ func (rg *region) checkWrite(table string, cur, next store.Item, lifetime time.D
 	if o, ok := cur[catalog.AttrMarkerOwner]; ok && next[catalog.AttrMarkerOwner].Str != o.Str {
 		r.violatef("P5: %s: marker owner %q changed to %q", where, o.Str, next[catalog.AttrMarkerOwner].Str)
 	}
-	if table == r.meta && strings.HasPrefix(keyOf(next).PK, unitPrefix) {
-		if p, ok := cur[attrProgress]; ok && next[attrProgress].Str < p.Str {
-			r.violatef("P5: %s: progress %s went back to %q", where, p.Str, next[attrProgress].Str)
-		}
-		fences, stored := cur[attrFences].Map, next[attrFences].Map
-		for _, version := range slices.Sorted(maps.Keys(fences)) {
-			if stored[version].Str != fences[version].Str {
-				r.violatef("P5: %s: fence of %s changed from %s to %q", where, version, fences[version].Str, stored[version].Str)
-			}
-		}
+	if table == r.meta && strings.HasPrefix(store.KeyOf(next).PK, unitPrefix) {
+		rg.checkUnit(where, cur, next)
 	}
-	if hwm, ok := next[catalog.AttrHighWaterMarks]; ok {
+	hwm, ok := next[catalog.AttrHighWaterMarks]
+	switch {
+	case tx && marks(next) != marks(cur):
+		r.violatef("P11c: %s: a transaction wrote high-water marks {%s} over {%s}", where, marks(next), marks(cur))
+	case ok && !tx:
 		rg.checkMarks(where, table, cur[catalog.AttrHighWaterMarks].Map, hwm.Map, lifetime)
 	}
+}
+
+// checkUnit checks a write that replaced cur, a unit item, with next: its progress and
+// fences never go back (P5), and when its progress passed a record a day old, a lag was
+// recorded (P14).
+func (rg *region) checkUnit(where string, cur, next store.Item) {
+	r := rg.run
+	from, to := cur[attrProgress].Str, next[attrProgress].Str
+	if _, ok := cur[attrProgress]; ok && to < from {
+		r.violatef("P5: %s: progress %s went back to %q", where, from, to)
+	}
+	if to > from {
+		rg.checkLag(next[catalog.AttrPK].Str, from, to)
+	}
+	fences, stored := cur[attrFences].Map, next[attrFences].Map
+	for _, version := range slices.Sorted(maps.Keys(fences)) {
+		if stored[version].Str != fences[version].Str {
+			r.violatef("P5: %s: fence of %s changed from %s to %q", where, version, fences[version].Str, stored[version].Str)
+		}
+	}
+}
+
+// marks returns a row item's high-water marks as text, "" for none.
+func marks(it store.Item) string {
+	m := it[catalog.AttrHighWaterMarks].Map
+	parts := make([]string, 0, len(m))
+	for _, unit := range slices.Sorted(maps.Keys(m)) {
+		parts = append(parts, unit+"="+valueText(m[unit]))
+	}
+	return strings.Join(parts, " ")
 }
 
 // checkMarks checks P4 on a write to table, a view's, that replaced the high-water marks old
@@ -601,10 +780,12 @@ func (s *stream) liveUnits(since time.Time) int {
 	return n
 }
 
-// container is a warm container: its core, and the build the core runs.
+// container is a warm container: its core, the build the core runs, and the generation of
+// the region's archiving it took.
 type container struct {
 	core  Core
 	build int
+	gen   int
 }
 
 // acquire takes a warm container of the region's build, or of the full build for a backfill
@@ -618,13 +799,13 @@ func (rg *region) acquire(actor string, rng *rand.Rand, worker bool) container {
 	}
 	var idle []int
 	for i, c := range rg.pool {
-		if c.build == build {
+		if c.build == build && c.gen == rg.gen {
 			idle = append(idle, i)
 		}
 	}
 	if len(idle) == 0 {
 		r.count(&r.stats.Containers)
-		return container{core: r.sys.NewCore(rg.store, rg.archiver, r.builds[build]), build: build}
+		return container{core: r.sys.NewCore(rg.name, rg.store, archiving{rg.archiver, rg.off}, r.builds[build]), build: build, gen: rg.gen}
 	}
 	i := idle[rng.IntN(len(idle))]
 	c := rg.pool[i]

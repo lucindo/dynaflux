@@ -34,6 +34,7 @@ func TestNaming(t *testing.T) {
 		{"ArchiveStream", n.ArchiveStream("page_views"), "prod-analytics-archive-page_views"},
 		{"ArchiveDatabase", n.ArchiveDatabase(), "prod_analytics"},
 		{"ArchiveWorkGroup", n.ArchiveWorkGroup(), "prod-analytics"},
+		{"BackfillWorkGroup", n.BackfillWorkGroup(), "prod-analytics-backfill"},
 		{"ArchiveLogGroup", n.ArchiveLogGroup(), "/aws/kinesisfirehose/prod-analytics-archive"},
 		{"IcebergTable", catalog.IcebergTable("page_views"), "page_views"},
 		{"DedupView", catalog.DedupView("page_views"), "page_views_dedup"},
@@ -74,6 +75,8 @@ func TestResourceNameLimits(t *testing.T) {
 		{"Firehose at P + stream = 56", 46, false, catalog.ResourceArchiveStream, true},
 		{"Athena workgroup at P = 128", 128, false, catalog.ResourceArchiveWorkGroup, false},
 		{"Athena workgroup at P = 129", 129, false, catalog.ResourceArchiveWorkGroup, true},
+		{"backfill workgroup at P = 119", 119, false, catalog.ResourceBackfillWorkGroup, false},
+		{"backfill workgroup at P = 120", 120, false, catalog.ResourceBackfillWorkGroup, true},
 		{"state machine at P = 71", 71, false, catalog.ResourceBackfillStateMachine, false},
 		{"state machine at P = 72", 72, false, catalog.ResourceBackfillStateMachine, true},
 	}
@@ -110,6 +113,7 @@ func TestStoreResources(t *testing.T) {
 		{Kind: catalog.ResourceBackfillStateMachine, Name: "prod-analytics-backfill"},
 		{Kind: catalog.ResourceArchiveDatabase, Name: "prod_analytics"},
 		{Kind: catalog.ResourceArchiveWorkGroup, Name: "prod-analytics"},
+		{Kind: catalog.ResourceBackfillWorkGroup, Name: "prod-analytics-backfill"},
 	}
 	tests := []struct {
 		name      string

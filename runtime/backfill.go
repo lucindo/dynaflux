@@ -37,22 +37,30 @@ type backfillReply struct {
 }
 
 // backfillParts are what a backfill function reaches AWS with: the store, the adapters, and
-// the runs of the bucket a name gives.
+// the runs and the archive of the bucket a name gives.
 type backfillParts struct {
-	store  store.Backend
-	units  backfill.Lister
-	tables backfill.Tables
-	lag    backfill.Lag
-	runs   func(bucket string) backfill.Runs
+	store   store.Backend
+	units   backfill.Lister
+	tables  backfill.Tables
+	lag     backfill.Lag
+	runs    func(bucket string) backfill.Runs
+	archive func(bucket string) archiveReader
+}
+
+// archiveReader reads a region's archive and what AWS shows of its streams' history.
+type archiveReader interface {
+	backfill.Archive
+	backfill.Witness
 }
 
 // backfillFn serves DYNAFLUX_MODE=backfill: each invocation steps a job until its deadline
 // less backfill.Reserve (ADR 0011).
 type backfillFn struct {
-	env    backfill.Env // without Runs, whose bucket names the account
-	runs   func(bucket string) backfill.Runs
-	region string
-	log    *slog.Logger
+	env     backfill.Env // without Runs and Archive, whose bucket names the account
+	runs    func(bucket string) backfill.Runs
+	archive func(bucket string) archiveReader
+	region  string
+	log     *slog.Logger
 }
 
 // backfillRows is how many rows a step writes at once (ADR 0011).
@@ -70,11 +78,11 @@ func newBackfill(c *engine.Catalog, e env, p backfillParts, log *slog.Logger) (*
 	return &backfillFn{
 		env: backfill.Env{
 			Naming: naming, Catalog: cat, Hash: catalog.Hash(data), Meta: meta.New(p.store, naming.MetaTable()), Store: p.store,
-			Core:  projector.New(c.Projector(), p.store, nil, projector.Config{Naming: naming, BackfillRows: backfillRows}),
-			Units: p.units, Tables: p.tables,
+			Core:  projector.New(c.Projector(), p.store, nil, projector.Config{Naming: naming, BackfillRows: backfillRows, Region: e.region}),
+			Units: p.units, Tables: p.tables, Region: e.region,
 			Lag: p.lag, Bounds: meta.DefaultBounds, Memory: e.memory, Log: log,
 		},
-		runs: p.runs, region: e.region, log: log,
+		runs: p.runs, archive: p.archive, region: e.region, log: log,
 	}, nil
 }
 
@@ -92,8 +100,12 @@ func (f *backfillFn) Invoke(ctx context.Context, payload []byte) ([]byte, error)
 	if err != nil {
 		return nil, f.fail(ctx, ev, err)
 	}
-	env := f.env
-	env.Runs = f.runs(env.Naming.Bucket(account, f.region))
+	env, bucket := f.env, f.env.Naming.Bucket(account, f.region)
+	env.Runs = f.runs(bucket)
+	if f.archive != nil {
+		a := f.archive(bucket)
+		env.Archive, env.Witness = a, a
+	}
 	wait, done, err := backfill.Step(ctx, &env, ev.Job, ev.Attempt, ev.Execution)
 	if err != nil {
 		return nil, f.fail(ctx, ev, err)

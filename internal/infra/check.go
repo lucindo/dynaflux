@@ -9,6 +9,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/lucindo/dynaflux/internal/catalog"
 )
 
 // maxIDLen is the longest CloudFormation logical ID.
@@ -28,6 +30,7 @@ const (
 	kindStreamLookup     = "stream lookup"
 	kindMapping          = "mapping"
 	kindCatalog          = "catalog registration"
+	kindArchiveMode      = "archive mode"
 	kindStateMachine     = "state machine"
 	kindArchiveWorkGroup = "archive workgroup"
 	kindArchiveSchema    = "archive schema"
@@ -59,6 +62,9 @@ const (
 //  8. A catalog registration waits for every function of its scope but its handler, and
 //     every managed policy: the catalog becomes current once each function runs it with
 //     all its grants, and a managed policy attaches to its role, not to the function.
+//  9. Every projector waits for an archive mode of its scope, which no other resource does:
+//     the mode's hole is recorded before any projector changes (ADR 0017). The After of a
+//     function names resources of its scope, as invariant 4 says.
 func (m *Manifest) Check() error {
 	es := m.entries()
 	var errs []error
@@ -182,6 +188,9 @@ func (s *Scope) entries(scope string) []entry {
 	}
 	for _, x := range s.Catalogs {
 		add(kindCatalog, x.Common, "", nil, required("handler", x.Handler), required("meta table", x.MetaTable))
+	}
+	for _, x := range s.ArchiveModes {
+		add(kindArchiveMode, x.Common, "", nil, required("handler", x.Handler), required("meta table", x.MetaTable))
 	}
 	for _, x := range s.StateMachines {
 		add(kindStateMachine, x.Common, x.Name, []string{AttrARN}, required("name", x.Name), required("role", x.Role),
@@ -308,6 +317,23 @@ func (s *Scope) checkOrder(byID map[string]entry, scope string) []error {
 			check(x.Common, "after", id)
 		}
 		errs = append(errs, s.checkCatalogWaits(x)...)
+	}
+	for _, x := range s.Functions {
+		for _, id := range x.After {
+			check(x.Common, "after", id)
+		}
+	}
+	return append(errs, s.checkProjectorWaits(byID)...)
+}
+
+// checkProjectorWaits checks invariant 9 for s.
+func (s *Scope) checkProjectorWaits(byID map[string]entry) []error {
+	var errs []error
+	for _, f := range s.Functions {
+		waits := slices.ContainsFunc(f.After, func(id string) bool { return byID[id].kind == kindArchiveMode })
+		if projector := f.Mode == catalog.EnvModeProjector; projector != waits {
+			errs = append(errs, fmt.Errorf("%s, a function in mode %s, waits for an archive mode: %t", f.ID, f.Mode, waits))
+		}
 	}
 	return errs
 }

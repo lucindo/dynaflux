@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/esmlocal"
 	"github.com/lucindo/dynaflux/internal/projector"
 	"github.com/lucindo/dynaflux/internal/streamevent"
@@ -26,7 +27,10 @@ func (d *devRun) function(stream string) esmlocal.Function {
 		if err != nil {
 			return nil, err
 		}
-		res, err := d.core.Handle(ctx, projector.Batch{Stream: stream, Unit: ev.ShardID, Records: recs})
+		var res projector.Result
+		if err = d.ownRegion(recs); err == nil {
+			res, err = d.core.Handle(ctx, projector.Batch{Stream: stream, Unit: ev.ShardID, Records: recs})
+		}
 		line := fmt.Sprintf("%s: %d records", stream, len(recs))
 		if len(recs) == 1 {
 			line = stream + ": 1 record"
@@ -50,4 +54,22 @@ func (d *devRun) function(stream string) esmlocal.Function {
 		}
 		return json.Marshal(reply)
 	}
+}
+
+// regionError is an event that an application appended in another region than dev's.
+type regionError struct{ region, dev string }
+
+func (e *regionError) Error() string {
+	return fmt.Sprintf("an event was appended in region %s, but dynaflux dev runs %s, whose projector would apply its SYNC views again", e.region, e.dev)
+}
+
+// ownRegion refuses a batch with an INSERT that another region accepted: the projector skips
+// the SYNC versions that an append applied only for its own region's events (ADR 0014).
+func (d *devRun) ownRegion(recs []projector.Record) error {
+	for _, r := range recs {
+		if region := r.New[catalog.AttrOriginRegion].Str; r.Op == projector.Insert && region != d.region {
+			return &regionError{region: region, dev: d.region}
+		}
+	}
+	return nil
 }

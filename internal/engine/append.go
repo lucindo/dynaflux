@@ -20,10 +20,14 @@ import (
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-// AppendMode changes how Append checks events.
+// AppendMode changes how Append checks and writes events.
 type AppendMode struct {
-	// Import skips the ACCEPT window, to load past events.
+	// Import skips the ACCEPT window, to load past events, and never applies SYNC versions:
+	// the projector applies the events.
 	Import bool
+	// Receipt asks the projector of the engine's region for a receipt of each event once it
+	// has handled it, which [Engine.Wait] polls (ADR 0015).
+	Receipt bool
 }
 
 // Appended is the result of appending one event.
@@ -34,11 +38,21 @@ type Appended struct {
 	// SamePayload reports, with ErrDuplicate, that the event stored before has this event's
 	// declared values.
 	SamePayload bool
+	// Stored is the event stored at Key, which [Engine.Token] names: this call's, or with
+	// ErrDuplicate the one stored before. Nil with any other error.
+	Stored store.Item
 }
 
 // Append appends events to stream, each with its own conditional write, and returns their
 // results in order. An event holds the declared columns' values in catalog order, then
 // event_time, which NULL sets to the writer's clock. A failed check fails only its event.
+//
+// The stream's SYNC versions that are live in the engine's region, by the view states that
+// queries read, take each event in the event's own transaction, one event after another
+// (ADR 0014). The states are read for each event, so a long call follows their changes. The
+// event names the versions in _sync, so the region's projector skips them. An evaluation
+// error in one fails the event, which matches ErrEvaluation, and writes nothing. A state read
+// that fails fails the events not yet written.
 //
 // An event whose event_id an earlier event of the call has isn't written: it gets
 // ErrDuplicate, or that event's error when that event wasn't stored. When the write finds an
@@ -65,23 +79,51 @@ func (e *Engine) Append(ctx context.Context, cat *Catalog, stream string, events
 		if _, dup := first[out[i].Key]; !dup && out[i].Err == nil {
 			first[out[i].Key] = i
 		}
+		if items[i] != nil && m.Receipt {
+			items[i][catalog.AttrReceipt] = store.Value{Type: store.BOOL, Bool: true}
+		}
 	}
 	table := e.table(cat, s)
 	stored := make([]store.Item, len(events)) // the event at each key written, after the write
+	var stateErr error
 	for i, it := range items {
-		if it != nil && first[out[i].Key] == i {
+		if it == nil || first[out[i].Key] != i {
+			continue
+		}
+		var live []string
+		if stateErr == nil {
+			live, stateErr = e.liveSync(ctx, cat, s, m)
+		}
+		switch {
+		case stateErr != nil:
+			out[i].Err = fmt.Errorf("dynaflux: append to %s: %w", stream, stateErr)
+		case len(live) > 0:
+			it[catalog.AttrSync] = syncList(live)
+			stored[i], out[i].Err = e.putSync(ctx, cat, table, s, it, live, now)
+		default:
 			stored[i], out[i].Err = e.put(ctx, table, s, it)
 		}
 	}
+	s.results(out, first, items, stored)
+	return out, nil
+}
+
+// results completes out, the results of an Append whose events are items: the event that
+// first claimed each key is first's, and stored[j] the event stored at event j's key after
+// its write.
+func (s *stream) results(out []Appended, first map[store.Key]int, items, stored []store.Item) {
 	for i := range out {
 		j, ok := first[out[i].Key]
 		if ok && j != i && out[i].Err == nil {
 			// A copy of a stored event is a duplicate; a copy of one that failed fails with it.
 			out[i].Err = cmp.Or(out[j].Err, ErrDuplicate)
 		}
-		out[i].SamePayload = ok && errors.Is(out[i].Err, ErrDuplicate) && s.SamePayload(stored[j], items[i])
+		dup := errors.Is(out[i].Err, ErrDuplicate)
+		out[i].SamePayload = ok && dup && s.SamePayload(stored[j], items[i])
+		if ok && (out[i].Err == nil || dup) {
+			out[i].Stored = stored[j]
+		}
 	}
-	return out, nil
 }
 
 // window is the ACCEPT window: event_time from lo to hi, both inclusive.
@@ -240,22 +282,23 @@ func (e *Engine) put(ctx context.Context, table string, s *stream, it store.Item
 	case err == nil:
 		return it, nil
 	case errors.As(err, &ce):
-		if s.sameEvent(ce.Current, it) {
-			return it, nil
-		}
-		return ce.Current, ErrDuplicate
+		return s.claimed(ce.Current, it)
 	case errors.Is(err, store.ErrTooLarge):
 		return nil, fmt.Errorf("dynaflux: %w: the event is over DynamoDB's 400 KB item limit", ErrInvalidValue)
 	}
 	return nil, fmt.Errorf("dynaflux: append to %s: %w", s.Def.Name, err)
 }
 
-// sameEvent reports whether stored holds what sent does: the same origin_region,
-// ingest_time and payload.
-func (s *stream) sameEvent(stored, sent store.Item) bool {
-	return projector.SameValue(catalog.Type{Kind: catalog.KindString}, stored, sent, catalog.AttrOriginRegion) &&
+// claimed decides an append that found stored at its event's key: when stored holds what
+// sent does, the same origin_region, ingest_time and payload, an earlier attempt of the call
+// wrote it, which is success; any other event is ErrDuplicate.
+func (s *stream) claimed(stored, sent store.Item) (store.Item, error) {
+	if projector.SameValue(catalog.Type{Kind: catalog.KindString}, stored, sent, catalog.AttrOriginRegion) &&
 		projector.SameValue(catalog.EventTimeType(), stored, sent, catalog.AttrIngestTime) &&
-		s.SamePayload(stored, sent)
+		s.SamePayload(stored, sent) {
+		return sent, nil
+	}
+	return stored, ErrDuplicate
 }
 
 func rfc3339(us int64) string { return time.UnixMicro(us).UTC().Format(time.RFC3339Nano) }

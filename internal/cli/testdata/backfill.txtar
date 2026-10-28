@@ -38,6 +38,7 @@ store shop  prefix (none)  account 123456789012  region us-east-1
 A new job activates its version, which can't be undone: its source and split are fixed for its life.
 -- want/activating_without_a_job.stdout --
 us-east-1:
+  stream signups: origin recorded; the region's archive of it is complete from now on
   plan_counts@v1  start    table source, split by time, as activated
 us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
 -- want/all.stderr --
@@ -45,8 +46,9 @@ store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
 A new job activates its version, which can't be undone: its source and split are fixed for its life.
 -- want/all.stdout --
 us-east-1:
+  stream signups: origin recorded; the region's archive of it is complete from now on
   page_seen@v1    start    table source, no split; partial since about 1999-12-30
-  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+  plan_counts@v1  start    archive source, split by fences
 us-west-2:
   page_counts@v1  start    table source, split by time; partial since about 1999-12-30
   page_seen@v1    start    table source, no split; partial since about 1999-12-30
@@ -61,29 +63,28 @@ store shop  prefix (none)  account 123456789012  region us-east-1
 A new job activates its version, which can't be undone: its source and split are fixed for its life.
 -- want/all_skips_a_cancelled_job.stdout --
 us-east-1:
-  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+  stream signups: origin recorded; the region's archive of it is complete from now on
+  plan_counts@v1  start    archive source, split by fences
 us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
--- want/all_skips_a_job_that_waits.stderr --
-store shop  prefix (none)  account 123456789012  region us-east-1
-A new job activates its version, which can't be undone: its source and split are fixed for its life.
--- want/all_skips_a_job_that_waits.stdout --
-us-east-1:
-  page_seen@v1  start    table source, no split; partial since about 1999-12-30
-us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
--- want/archive_not_fresh.stderr --
+-- want/all_while_the_gaps_can't_be_read.stderr --
 store shop  prefix (none)  account 123456789012  region us-west-2
-us-west-2: error DF7503: the archive source isn't available: stream page_views isn't fresh in us-west-2, and this release reads the archive only of a stream without events
-  hint: fill it with -source table
--- want/archive_not_fresh.stdout --
-us-west-2:
-  page_counts@v1  refused
+dynaflux backfill: us-west-2: page_counts@v1: the completeness of the archive of stream page_views, which -source table doesn't need: backfill: the history of shop-stream-page_views: awsbackfill: the archive's gaps are unknown until the objects under s3://shop-123456789012-us-west-2-an/aws/lambda/ that aren't Lambda's on-failure records are removed (1 of them): deployed: read s3://shop-123456789012-us-west-2-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.00.00-x: invalid character 'o' in literal null (expecting 'u')
+-- want/all_while_the_gaps_can't_be_read.stdout --
 -- want/archive_of_a_fresh_stream.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 A new job activates its version, which can't be undone: its source and split are fixed for its life.
 -- want/archive_of_a_fresh_stream.stdout --
 us-east-1:
-  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+  stream signups: origin recorded; the region's archive of it is complete from now on
+  plan_counts@v1  start    archive source, split by fences
 us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+-- want/archive_without_an_origin.stderr --
+store shop  prefix (none)  account 123456789012  region us-west-2
+us-west-2: error DF7503: the archive of page_views in us-west-2 isn't complete: no origin was recorded
+  hint: fill it with -source table
+-- want/archive_without_an_origin.stdout --
+us-west-2:
+  page_counts@v1  refused
 -- want/broken.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
 us-west-2: error DF7502: page_seen@v1 is broken in us-west-2
@@ -104,6 +105,24 @@ us-east-1:
   page_seen@v1    cancel   attempt 1, phase activate, 0 of 0 records applied
   plan_counts@v1  refused
 us-east-1: page_seen@v1: cancelled
+-- want/cancel_a_listing.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/cancel_a_listing.stdout --
+us-east-1:
+  plan_counts@v1  cancel   attempt 1, phase stage, 0 of 0 records applied
+us-east-1: plan_counts@v1: cancelled; stopped the listing of the archive's partitions, Athena query q-0
+-- want/cancel_a_try_started_meanwhile.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/cancel_a_try_started_meanwhile.stdout --
+us-east-1:
+  plan_counts@v1  cancel   attempt 1, phase stage, 0 of 0 records applied
+us-east-1: plan_counts@v1: cancelled; stopped the archive export, Athena query q-2
+-- want/cancel_an_export.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/cancel_an_export.stdout --
+us-east-1:
+  plan_counts@v1  cancel   attempt 1, phase stage, 0 of 0 records applied
+us-east-1: plan_counts@v1: cancelled; stopped the archive export, Athena query q-1
 -- want/cancel_with_rate.stderr --
 dynaflux backfill: -cancel takes no -rate, -source or -watch
 Run 'dynaflux help backfill' for usage.
@@ -131,25 +150,23 @@ A new job activates its version, which can't be undone: its source and split are
 start 5 backfill jobs? [y/N] dynaflux backfill: nothing written
 -- want/declined.stdout --
 us-east-1:
+  stream signups: origin recorded; the region's archive of it is complete from now on
   page_seen@v1    start    table source, no split; partial since about 1999-12-30
-  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+  plan_counts@v1  start    archive source, split by fences
 us-west-2:
   page_counts@v1  start    table source, split by time; partial since about 1999-12-30
   page_seen@v1    start    table source, no split; partial since about 1999-12-30
   plan_counts@v1  start    table source, split by time; partial since about 1999-12-30
+-- want/default_source_while_the_gaps_can't_be_read.stderr --
+store shop  prefix (none)  account 123456789012  region us-west-2
+dynaflux backfill: us-west-2: page_seen@v1: the completeness of the archive of stream page_views, which -source table doesn't need: backfill: the history of shop-stream-page_views: awsbackfill: the archive's gaps are unknown until the objects under s3://shop-123456789012-us-west-2-an/aws/lambda/ that aren't Lambda's on-failure records are removed (1 of them): deployed: read s3://shop-123456789012-us-west-2-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.00.00-x: invalid character 'o' in literal null (expecting 'u')
+-- want/default_source_while_the_gaps_can't_be_read.stdout --
 -- want/interrupted.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/interrupted.stdout --
 us-east-1:
   page_seen@v1  resume   interrupted; attempt 2, table source, no split; partial since about 1999-12-30
 us-east-1: page_seen@v1: resumed as attempt 2 in execution page-seen-v1-0a1b2c-a2
--- want/job_waits.stderr --
-store shop  prefix (none)  account 123456789012  region us-east-1
-us-east-1: error DF7505: plan_counts@v1's job in us-east-1 waits for the archive read of a later release
-  hint: wait for that release, or fill a new version from the stream table: dynaflux generate -rebuild plan_counts, deploy regional.yaml, dynaflux backfill plan_counts, then dynaflux retire plan_counts@v1
--- want/job_waits.stdout --
-us-east-1:
-  plan_counts@v1  refused
 -- want/json_without_watch.stderr --
 dynaflux backfill: -json goes with -watch
 Run 'dynaflux help backfill' for usage.
@@ -183,8 +200,9 @@ dynaflux backfill: start 5 backfill jobs?: confirm with -yes when not on a termi
 Run 'dynaflux help backfill' for usage.
 -- want/no_terminal.stdout --
 us-east-1:
+  stream signups: origin recorded; the region's archive of it is complete from now on
   page_seen@v1    start    table source, no split; partial since about 1999-12-30
-  plan_counts@v1  start    archive source, split by fences; if signups gets an event before the job's check, the version waits for a later release
+  plan_counts@v1  start    archive source, split by fences
 us-west-2:
   page_counts@v1  start    table source, split by time; partial since about 1999-12-30
   page_seen@v1    start    table source, no split; partial since about 1999-12-30
@@ -259,14 +277,24 @@ store shop  prefix (none)  account 123456789012  region us-east-1
 dynaflux backfill: -source table: plan_counts@v1 is activating in us-east-1 with the archive source, which can't change
 -- want/source_of_an_activating_version.stdout --
 us-east-1:
+  stream signups: origin recorded; the region's archive of it is complete from now on
   plan_counts@v1  refused
 -- want/table_of_a_fresh_stream.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 A new job activates its version, which can't be undone: its source and split are fixed for its life.
 -- want/table_of_a_fresh_stream.stdout --
 us-east-1:
-  plan_counts@v1  start    table source, split by time
+  stream signups: origin recorded; the region's archive of it is complete from now on
+  plan_counts@v1  start    table source, split by time; the archive is complete, and a table source covers only the last 2 DAY
 us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+-- want/table_while_the_gaps_can't_be_read.stderr --
+store shop  prefix (none)  account 123456789012  region us-west-2
+dynaflux backfill: us-west-2: the completeness of the archive of stream page_views: backfill: the history of shop-stream-page_views: awsbackfill: the archive's gaps are unknown until the objects under s3://shop-123456789012-us-west-2-an/aws/lambda/ that aren't Lambda's on-failure records are removed (1 of them): deployed: read s3://shop-123456789012-us-west-2-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.00.00-x: invalid character 'o' in literal null (expecting 'u')
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/table_while_the_gaps_can't_be_read.stdout --
+us-west-2:
+  page_seen@v1  start    table source, no split; partial since about 1999-12-30
+us-west-2: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
 -- want/unknown_region.stderr --
 dynaflux backfill: -region eu-west-1 isn't in regions (us-east-1, us-west-2)
 Run 'dynaflux help backfill' for usage.
@@ -351,3 +379,14 @@ us-east-1  page_seen@v1  activate  0/0 applied
 us-east-1  page_seen@v1  apply  1000/3000 applied  200/s  ETA 10s
 us-east-1  page_seen@v1  apply  2000/3000 applied  200/s  ETA 5s
 us-east-1  page_seen@v1  live
+-- want/young_stream_with_an_event.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7217: the table of stream signups is less than 23 hours old and has no origin in us-east-1, which archives it with events: all; it holds events already, so the archive of it there is never complete
+  hint: backfills there read the table; to keep a new stream's whole history, run dynaflux backfill -all after the deploy that adds it, before its first event
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/young_stream_with_an_event.stdout --
+us-east-1:
+  page_seen@v1    start    table source, no split; partial since about 1999-12-30
+  plan_counts@v1  start    table source, split by time
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
+us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1

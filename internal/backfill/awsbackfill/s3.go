@@ -21,12 +21,12 @@ import (
 
 // Runs keeps a job's staged objects in a bucket: [backfill.Runs].
 type Runs struct {
-	c      s3API
+	c      S3
 	bucket string
 }
 
 // NewRuns returns the staged objects in bucket, which c reaches.
-func NewRuns(c s3API, bucket string) *Runs {
+func NewRuns(c S3, bucket string) *Runs {
 	return &Runs{c: c, bucket: bucket}
 }
 
@@ -55,35 +55,50 @@ func (r *Runs) ReadAt(ctx context.Context, name string, off, n int64) ([]byte, e
 	if off < 0 {
 		rng = fmt.Sprintf("bytes=-%d", n)
 	}
-	out, err := r.c.GetObject(ctx, &s3.GetObjectInput{Bucket: &r.bucket, Key: &name, Range: &rng})
+	body, err := get(ctx, r.c, r.bucket, name, &rng)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return readAll(name, body, n)
+}
+
+// get reads key from bucket, its range rng when that is set. A missing key fails with
+// [backfill.ErrStagingMissing].
+func get(ctx context.Context, c S3, bucket, key string, rng *string) (io.ReadCloser, error) {
+	out, err := c.GetObject(ctx, &s3.GetObjectInput{Bucket: &bucket, Key: &key, Range: rng})
 	if apiErr, ok := errors.AsType[smithy.APIError](err); ok && apiErr.ErrorCode() == "AccessDenied" {
 		// S3 answers a missing key so to a caller that can list the bucket only with a
 		// prefix condition, which a GetObject request doesn't carry.
-		if missing, lerr := r.missing(ctx, name); lerr == nil && missing {
+		if gone, lerr := missing(ctx, c, bucket, key); lerr == nil && gone {
 			err = &types.NoSuchKey{}
 		}
 	}
 	if _, ok := errors.AsType[*types.NoSuchKey](err); ok {
-		return nil, fmt.Errorf("%s: %w", name, backfill.ErrStagingMissing)
+		return nil, fmt.Errorf("%s: %w", key, backfill.ErrStagingMissing)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("awsbackfill: read %s: %w", name, err)
+		return nil, fmt.Errorf("awsbackfill: read %s: %w", key, err)
 	}
-	defer out.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(out.Body, n))
+	return out.Body, nil
+}
+
+// readAll reads at most n bytes of the object name from body.
+func readAll(name string, body io.Reader, n int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, n))
 	if err != nil {
 		return nil, fmt.Errorf("awsbackfill: read %s: %w", name, err)
 	}
 	return data, nil
 }
 
-// missing reports whether a listing of the bucket lacks name.
-func (r *Runs) missing(ctx context.Context, name string) (bool, error) {
-	out, err := r.c.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: &r.bucket, Prefix: &name, MaxKeys: aws.Int32(1)})
+// missing reports whether a listing of bucket lacks key.
+func missing(ctx context.Context, c S3, bucket, key string) (bool, error) {
+	out, err := c.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: &bucket, Prefix: &key, MaxKeys: aws.Int32(1)})
 	if err != nil {
 		return false, err
 	}
-	return !slices.ContainsFunc(out.Contents, func(o types.Object) bool { return aws.ToString(o.Key) == name }), nil
+	return !slices.ContainsFunc(out.Contents, func(o types.Object) bool { return aws.ToString(o.Key) == key }), nil
 }
 
 // DeletePrefix implements [backfill.Runs]: it deletes each page of a listing of prefix.

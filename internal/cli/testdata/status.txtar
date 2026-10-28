@@ -33,10 +33,16 @@ ORDER BY (plan)
 AS SELECT plan, count() AS signups
 FROM signups
 GROUP BY plan;
+-- want/FIPS_region.stderr --
+dynaflux status: -region "fips-us-east-1" is a FIPS pseudo-region; name the region, such as us-east-1, and set AWS_USE_FIPS_ENDPOINT=true to use FIPS endpoints
+Run 'dynaflux help status' for usage.
+-- want/FIPS_region.stdout --
 -- want/a_gap_record_unreadable.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T00:00:00Z: event e6 failed to evaluate: division by zero
   hint: fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e6'
+dynaflux status: us-east-1: the history of stream page_views couldn't be read: backfill: the history of shop-stream-page_views: awsbackfill: the archive's gaps are unknown until the objects under s3://shop-123456789012-us-east-1-an/aws/lambda/ that aren't Lambda's on-failure records are removed (1 of them): deployed: read s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-z: invalid character 'o' in literal null (expecting 'u')
+dynaflux status: us-east-1: the history of stream signups couldn't be read: backfill: the history of shop-stream-signups: awsbackfill: the archive's gaps are unknown until the objects under s3://shop-123456789012-us-east-1-an/aws/lambda/ that aren't Lambda's on-failure records are removed (1 of them): deployed: read s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-z: invalid character 'o' in literal null (expecting 'u')
 dynaflux status: us-east-1: 1 of Lambda's records under s3://shop-123456789012-us-east-1-an/aws/lambda/ couldn't be read, such as: deployed: read s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-z: invalid character 'o' in literal null (expecting 'u')
 -- want/a_gap_record_unreadable.stdout --
 version         us-east-1
@@ -45,8 +51,60 @@ page_seen@v1    broken
 plan_counts@v1  live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, completeness couldn't be read
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, completeness couldn't be read
+-- want/archive_job_can't_tell_Firehose_is_empty.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/archive_job_can't_tell_Firehose_is_empty.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T02:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive without recent data, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase watermark, 0 of 0 records applied; rate no limit; archive source, split by fences; Firehose shows no recent data, and the job can't tell that it holds nothing: CloudWatch doesn't list its data freshness, as after 14 days without records, or the delivery stream isn't ACTIVE; append an event to signups, or rebuild the view to fill it from the table; execution running
+-- want/archive_job_stages.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/archive_job_stages.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase stage, 0 of 0 records applied; rate no limit; archive source, split by fences; Athena scanned 1.2 GB; execution running
+-- want/archive_job_waits_for_Firehose.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/archive_job_waits_for_Firehose.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase watermark, 0 of 0 records applied; rate no limit; archive source, split by fences; waits for Firehose, delivered through 1999-12-31T23:57:00Z, to deliver the records taken before 2000-01-01T00:00:00Z; execution running
+-- want/archive_job_waits_for_an_idle_Firehose.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/archive_job_waits_for_an_idle_Firehose.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive without recent data, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase watermark, 0 of 0 records applied; rate no limit; archive source, split by fences; Firehose shows no recent data: the job waits until 2000-01-01T02:30:00Z to tell that it holds nothing; execution running
 -- want/blocked.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7209: the projector of stream page_views fails every batch: page_seen@v1 is live, and the deployed catalog neither defines nor retires it; records are lost from 2000-01-01T23:00:00Z to every view and the archive
@@ -62,8 +120,8 @@ page_seen@v1    live
 plan_counts@v1  live
 
 us-east-1: catalog 5e89ba4633eb (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 1h0m0s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 1h0m0s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 1h0m0s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 1h0m0s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/broken.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7201: page_counts@v1 broke at 2000-01-01T00:00:00Z: the record of unit shardId-0001 at sequence number 0000000000000000000000000000000000000007, event e1, failed to evaluate: division by zero
@@ -75,8 +133,8 @@ page_seen@v1    live
 plan_counts@v1  live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/broken_by_the_time_split.stderr --
 store shop  prefix (none)  account 123456789012  region us-west-2
 us-west-2: error DF7201: plan_counts@v1 broke at 2000-01-01T00:00:00Z: event e2 can't be placed by the time split: the event landed after the split's late bound
@@ -88,8 +146,8 @@ page_seen@v1    live
 plan_counts@v1  broken
 
 us-west-2: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/broken_retained_version.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7201: plan_counts@v1 broke at 2000-01-01T00:00:00Z: event e3 failed to evaluate: division by zero
@@ -104,8 +162,8 @@ plan_counts@v1  broken
 plan_counts@v2  pending_backfill
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/cancelled.stderr --
 store shop  prefix (none)  account 123456789012  region us-west-2
 us-west-2: warning DF7202: plan_counts@v2 needs a backfill; its job was cancelled
@@ -118,9 +176,9 @@ plan_counts@v1  live
 plan_counts@v2  pending_backfill
 
 us-west-2: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  backfill plan_counts@v2: cancelled, attempt 1, phase activate, 0 of 0 records applied; table source, split by time (the stream held events when the job started, or -source table chose it)
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: cancelled, attempt 1, phase activate, 0 of 0 records applied; table source, split by time (the archive wasn't complete when the job started, or -source table chose it)
 -- want/continuation_missing.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: warning DF7216: the backfill of plan_counts@v2 is interrupted: its execution arn:aws:states:us-east-1:123456789012:execution:shop-backfill:plan-counts-v2-0a1b2c-a1 ended without finishing
@@ -133,9 +191,9 @@ plan_counts@v1  live
 plan_counts@v2  pending_backfill
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the stream held events when the job started, or -source table chose it); interrupted
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the archive wasn't complete when the job started, or -source table chose it); interrupted
 -- want/continuing.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/continuing.stdout --
@@ -146,11 +204,13 @@ plan_counts@v1  live
 plan_counts@v2  activating
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  backfill plan_counts@v2: running, attempt 1, phase apply, 1200 of 5000 records applied; rate no limit; table source, split by time at 2000-01-01T00:06:30Z (the stream held events when the job started, or -source table chose it); continuing in plan-counts-v2-0a1b2c-a1-c1
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase apply, 1200 of 5000 records applied; rate no limit; table source, split by time at 2000-01-01T00:06:30Z (the archive wasn't complete when the job started, or -source table chose it); continuing in plan-counts-v2-0a1b2c-a1-c1
 -- want/delivery_problems.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7204: a gap is suspected in stream signups: no event source mapping reads the stream; plan_counts@v1 may miss its records
+  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts
 us-east-1: error DF7208: the event source mapping us-east-1-page_views-shop-projector-page_views of stream page_views reports PROBLEM: Function call failed
   hint: read why shop-projector-page_views fails with aws logs tail /aws/lambda/shop-projector-page_views --since 1h --region us-east-1
 us-east-1: warning DF7206: function audit also reads stream page_views, with event source mapping us-east-1-page_views-audit; a shard serves at most two readers
@@ -170,8 +230,8 @@ page_seen@v1    live
 plan_counts@v1  live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 20m0s; mapping us-east-1-page_views-shop-projector-page_views to shop-projector-page_views enabled, last result PROBLEM: Function call failed; mapping us-east-1-page_views-audit to audit enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector disabled, last result OK; archive 30m0s behind
+  stream page_views: lag 20m0s; mapping us-east-1-page_views-shop-projector-page_views to shop-projector-page_views enabled, last result PROBLEM: Function call failed; mapping us-east-1-page_views-audit to audit enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector disabled, last result OK; archive delivered through 1999-12-31T23:29:00Z, not complete: no event source mapping reads the stream
 -- want/delivery_problems_json.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/delivery_problems_json.stdout --
@@ -230,18 +290,40 @@ store shop  prefix (none)  account 123456789012  region us-east-1
           ],
           "archive": "shop-archive-page_views",
           "archive_freshness_s": 120,
-          "archive_failed_rows": 1
+          "archive_delivered_through": "1999-12-31T23:57:00Z",
+          "archive_failed_rows": 1,
+          "archive_completeness": {
+            "complete": true,
+            "since": "1999-12-29T01:00:00Z"
+          }
         },
         {
           "stream": "signups",
           "arn": "arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/2000-01-01T00:00:00.000",
           "archive": "shop-archive-signups",
-          "archive_freshness_s": 120
+          "archive_freshness_s": 120,
+          "archive_delivered_through": "1999-12-31T23:57:00Z",
+          "archive_completeness": {
+            "complete": false,
+            "since": "1999-12-29T01:00:00Z",
+            "rule": 3,
+            "reason": "no event source mapping reads the stream",
+            "suspected_gap": true
+          }
         }
       ]
     }
   ],
   "findings": [
+    {
+      "regions": [
+        "us-east-1"
+      ],
+      "code": "DF7204",
+      "severity": "warning",
+      "message": "a gap is suspected in stream signups: no event source mapping reads the stream; plan_counts@v1 may miss its records",
+      "hint": "run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts"
+    },
     {
       "regions": [
         "us-east-1"
@@ -275,13 +357,15 @@ page_seen@v1    broken
 plan_counts@v1  live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, not complete: Lambda discarded a batch of records arrived from 1999-12-31T22:59:00Z (aws/lambda/uuid/shardId-0001/1999/12/31/1999-12-31T23.00.00-b)
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, complete since 1999-12-29T01:00:00Z
   note: Lambda discarded 3 records of stream page_views in 1 batch from 1999-12-31T22:59:00Z to 1999-12-31T23:00:00Z, which no version misses; the region's archive misses them
 -- want/gaps_unreadable.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T00:00:00Z: event e6 failed to evaluate: division by zero
   hint: fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e6'
+dynaflux status: us-east-1: the history of stream page_views couldn't be read: backfill: the history of shop-stream-page_views: deployed: list s3://shop-123456789012-us-east-1-an/aws/lambda/: AccessDenied: s3:ListBucket
+dynaflux status: us-east-1: the history of stream signups couldn't be read: backfill: the history of shop-stream-signups: deployed: list s3://shop-123456789012-us-east-1-an/aws/lambda/: AccessDenied: s3:ListBucket
 dynaflux status: us-east-1: the gaps couldn't be read: deployed: list s3://shop-123456789012-us-east-1-an/aws/lambda/: AccessDenied: s3:ListBucket
 -- want/gaps_unreadable.stdout --
 version         us-east-1
@@ -290,8 +374,8 @@ page_seen@v1    broken
 plan_counts@v1  live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, completeness couldn't be read
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, completeness couldn't be read
   gaps couldn't be read from s3://shop-123456789012-us-east-1-an/aws/lambda/
 -- want/healthy.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
@@ -302,11 +386,11 @@ page_seen@v1    live       live
 plan_counts@v1  live       live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 us-west-2: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/healthy_json.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
 -- want/healthy_json.stdout --
@@ -364,7 +448,12 @@ store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
             }
           ],
           "archive": "shop-archive-page_views",
-          "archive_freshness_s": 120
+          "archive_freshness_s": 120,
+          "archive_delivered_through": "1999-12-31T23:57:00Z",
+          "archive_completeness": {
+            "complete": true,
+            "since": "1999-12-29T01:00:00Z"
+          }
         },
         {
           "stream": "signups",
@@ -379,7 +468,12 @@ store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
             }
           ],
           "archive": "shop-archive-signups",
-          "archive_freshness_s": 120
+          "archive_freshness_s": 120,
+          "archive_delivered_through": "1999-12-31T23:57:00Z",
+          "archive_completeness": {
+            "complete": true,
+            "since": "1999-12-29T01:00:00Z"
+          }
         }
       ]
     },
@@ -431,7 +525,12 @@ store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
             }
           ],
           "archive": "shop-archive-page_views",
-          "archive_freshness_s": 120
+          "archive_freshness_s": 120,
+          "archive_delivered_through": "1999-12-31T23:57:00Z",
+          "archive_completeness": {
+            "complete": true,
+            "since": "1999-12-29T01:00:00Z"
+          }
         },
         {
           "stream": "signups",
@@ -446,13 +545,33 @@ store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
             }
           ],
           "archive": "shop-archive-signups",
-          "archive_freshness_s": 120
+          "archive_freshness_s": 120,
+          "archive_delivered_through": "1999-12-31T23:57:00Z",
+          "archive_completeness": {
+            "complete": true,
+            "since": "1999-12-29T01:00:00Z"
+          }
         }
       ]
     }
   ],
   "findings": []
 }
+-- want/hole_after_the_origin.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7204: the archive of stream signups isn't complete: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z; plan_counts@v2 can't go live from it
+  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts
+-- want/hole_after_the_origin.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, not complete: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase apply, 0 of 0 records applied; rate no limit; archive source, split by fences; execution running
 -- want/interrupted.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: warning DF7216: the backfill of plan_counts@v2 is interrupted: its execution arn:aws:states:us-east-1:123456789012:execution:shop-backfill:plan-counts-v2-0a1b2c-a1 ended without finishing; its last error, in phase stage at 2000-01-01T00:00:00Z: AccessDenied: s3:PutObject
@@ -465,9 +584,9 @@ plan_counts@v1  live
 plan_counts@v2  pending_backfill
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the stream held events when the job started, or -source table chose it); interrupted; its last error, in phase stage at 2000-01-01T00:00:00Z: AccessDenied: s3:PutObject
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the archive wasn't complete when the job started, or -source table chose it); interrupted; its last error, in phase stage at 2000-01-01T00:00:00Z: AccessDenied: s3:PutObject
 -- want/jobs_gaps_and_units_json.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/jobs_gaps_and_units_json.stdout --
@@ -559,6 +678,14 @@ store shop  prefix (none)  account 123456789012  region us-east-1
           ],
           "archive": "shop-archive-page_views",
           "archive_freshness_s": 120,
+          "archive_delivered_through": "2000-01-01T00:57:00Z",
+          "archive_completeness": {
+            "complete": false,
+            "since": "1999-12-29T01:00:00Z",
+            "rule": 3,
+            "reason": "Lambda discarded a batch of records arrived from 2000-01-01T00:29:00Z (aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-a)",
+            "at": "2000-01-01T00:29:00Z"
+          },
           "gaps": [
             {
               "object": "aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-a",
@@ -596,6 +723,11 @@ store shop  prefix (none)  account 123456789012  region us-east-1
           ],
           "archive": "shop-archive-signups",
           "archive_freshness_s": 120,
+          "archive_delivered_through": "2000-01-01T00:57:00Z",
+          "archive_completeness": {
+            "complete": true,
+            "since": "1999-12-29T01:00:00Z"
+          },
           "units": [
             {
               "unit": "shardId-0003"
@@ -626,6 +758,38 @@ store shop  prefix (none)  account 123456789012  region us-east-1
     }
   ]
 }
+-- want/lag_after_a_hole.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7204: the archive of stream signups isn't complete: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z; plan_counts@v2 can't go live from it
+  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts
+us-east-1: warning DF7204: a gap is suspected in stream signups: a projector handled a record almost 24 hours old at 2000-01-01T01:00:00Z; plan_counts@v1 may miss its records
+  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts
+-- want/lag_after_a_hole.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, not complete: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase apply, 0 of 0 records applied; rate no limit; archive source, split by fences; execution running
+-- want/lag_without_an_origin.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7217: the table of stream signups is less than 23 hours old and has no origin in us-east-1, which archives it with events: all
+  hint: run dynaflux backfill -all -region us-east-1 before 2000-01-01T22:00:00Z and before the stream's first event; otherwise the archive of it in us-east-1 is never complete
+us-east-1: warning DF7204: a gap is suspected in stream signups: a projector handled a record almost 24 hours old at 2000-01-01T01:00:00Z; plan_counts@v1 may miss its records
+  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts
+-- want/lag_without_an_origin.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, not complete: the stream was re-created after the origin: it is arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/1999-12-31T23:00:00.000 now
 -- want/local.stderr --
 store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
 us-east-1: error DF7201: page_counts@v1 broke at 2000-01-01T00:00:00Z: event e5 failed to evaluate: division by zero
@@ -639,12 +803,12 @@ plan_counts@v2  pending_backfill
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
   mappings, metrics, gaps and the jobs' executions aren't available locally
-  stream page_views:
+  stream page_views: archive complete since 1999-12-29T01:00:00Z
     unit shardId-0001: no progress
     unit shardId-0002: no progress
-  stream signups:
+  stream signups: archive complete since 1999-12-29T01:00:00Z
     unit shardId-0003: no progress
-  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the stream held events when the job started, or -source table chose it); execution not available locally
+  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the archive wasn't complete when the job started, or -source table chose it); execution not available locally
 -- want/local_json.stderr --
 store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
 -- want/local_json.stdout --
@@ -691,11 +855,19 @@ store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
       "streams": [
         {
           "stream": "page_views",
-          "archive": "shop-archive-page_views"
+          "archive": "shop-archive-page_views",
+          "archive_completeness": {
+            "complete": true,
+            "since": "1999-12-29T01:00:00Z"
+          }
         },
         {
           "stream": "signups",
-          "archive": "shop-archive-signups"
+          "archive": "shop-archive-signups",
+          "archive_completeness": {
+            "complete": true,
+            "since": "1999-12-29T01:00:00Z"
+          }
         }
       ]
     }
@@ -706,6 +878,8 @@ store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T00:00:00Z: event e6 failed to evaluate: division by zero
   hint: fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e6'
+dynaflux status: us-east-1: the history of stream page_views couldn't be read: backfill: the history of shop-stream-page_views: deployed: list the event source mappings of arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-page_views/stream/2000-01-01T00:00:00.000: AccessDeniedException: lambda:ListEventSourceMappings
+dynaflux status: us-east-1: the history of stream signups couldn't be read: backfill: the history of shop-stream-signups: deployed: list the event source mappings of arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/2000-01-01T00:00:00.000: AccessDeniedException: lambda:ListEventSourceMappings
 dynaflux status: us-east-1: the mappings of stream page_views couldn't be read: deployed: list the event source mappings of arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-page_views/stream/2000-01-01T00:00:00.000: AccessDeniedException: lambda:ListEventSourceMappings
 dynaflux status: us-east-1: the mappings of stream signups couldn't be read: deployed: list the event source mappings of arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/2000-01-01T00:00:00.000: AccessDeniedException: lambda:ListEventSourceMappings
 -- want/mappings_unreadable.stdout --
@@ -715,13 +889,15 @@ page_seen@v1    broken
 plan_counts@v1  live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mappings couldn't be read; archive 2m0s behind
-  stream signups: lag 2s; mappings couldn't be read; archive 2m0s behind
+  stream page_views: lag 2s; mappings couldn't be read; archive delivered through 1999-12-31T23:57:00Z, completeness couldn't be read
+  stream signups: lag 2s; mappings couldn't be read; archive delivered through 1999-12-31T23:57:00Z, completeness couldn't be read
 -- want/metrics_and_executions_unreadable.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T00:00:00Z: event e6 failed to evaluate: division by zero
   hint: fix page_seen, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_seen; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e6'
 dynaflux status: us-east-1: the execution of the backfill of plan_counts@v2 couldn't be read: deployed: describe execution arn:aws:states:us-east-1:123456789012:execution:shop-backfill:plan-counts-v2-0a1b2c-a1: AccessDeniedException: states:DescribeExecution
+dynaflux status: us-east-1: the history of stream page_views couldn't be read: backfill: the history of shop-stream-page_views: awsbackfill: read metrics: ThrottlingException: Rate exceeded
+dynaflux status: us-east-1: the history of stream signups couldn't be read: backfill: the history of shop-stream-signups: awsbackfill: read metrics: ThrottlingException: Rate exceeded
 dynaflux status: us-east-1: the projectors' lag couldn't be read: awsbackfill: read the projectors' IteratorAge: ThrottlingException: Rate exceeded
 dynaflux status: us-east-1: the archive's metrics couldn't be read: deployed: read metrics: ThrottlingException: Rate exceeded
 -- want/metrics_and_executions_unreadable.stdout --
@@ -732,9 +908,9 @@ plan_counts@v1  live
 plan_counts@v2  pending_backfill
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag couldn't be read; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive couldn't be read
-  stream signups: lag couldn't be read; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive couldn't be read
-  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the stream held events when the job started, or -source table chose it); execution couldn't be read
+  stream page_views: lag couldn't be read; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive couldn't be read, completeness couldn't be read
+  stream signups: lag couldn't be read; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive couldn't be read, completeness couldn't be read
+  backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the archive wasn't complete when the job started, or -source table chose it); execution couldn't be read
 -- want/needs_a_backfill.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
 us-east-1: warning DF7202: plan_counts@v2 needs a backfill
@@ -749,11 +925,11 @@ plan_counts@v1  live              live
 plan_counts@v2  pending_backfill  pending_backfill
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 us-west-2: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/newer_catalog_format.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7001: the deployed catalog has format 2; this dynaflux reads formats 1 to 1
@@ -769,8 +945,8 @@ page_seen@v1    live       -
 plan_counts@v1  live       -
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 us-west-2: not deployed: no catalog in shop-meta
 -- want/older_gaps.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
@@ -781,8 +957,8 @@ page_seen@v1    live
 plan_counts@v1  live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, not complete: Lambda discarded a batch of records arrived from 1999-12-31T19:59:00Z (aws/lambda/uuid/shardId-0001/1999/12/31/1999-12-31T20.00.00-b)
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, complete since 1999-12-29T01:00:00Z
   note: 1 on-failure record in s3://shop-123456789012-us-east-1-an/aws/lambda/ predates every version's activation, so no version misses it
 -- want/one_region.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
@@ -793,8 +969,8 @@ page_seen@v1    live
 plan_counts@v1  live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/partial.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/partial.stdout --
@@ -805,9 +981,20 @@ plan_counts@v1  live
 plan_counts@v2  live
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
   note: plan_counts@v2 is partial since 1999-12-30T00:00:00Z: it misses the events before then
+-- want/past_CloudWatch's_hourly_data.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/past_CloudWatch's_hourly_data.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1998-08-19T00:00:00Z, not checked before 1998-10-03
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/paused.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/paused.stdout --
@@ -818,9 +1005,9 @@ plan_counts@v1  live
 plan_counts@v2  activating
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  backfill plan_counts@v2: running, attempt 1, phase apply, 1200 of 5000 records applied; rate no limit; table source, split by time at 2000-01-01T00:06:30Z (the stream held events when the job started, or -source table chose it); paused: the projector is more than 5 minutes behind; execution running
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase apply, 1200 of 5000 records applied; rate no limit; table source, split by time at 2000-01-01T00:06:30Z (the archive wasn't complete when the job started, or -source table chose it); paused: the projector is more than 5 minutes behind; execution running
 -- want/region_not_in_regions.stderr --
 dynaflux status: -region eu-west-1 isn't in regions (us-east-1, us-west-2)
 Run 'dynaflux help status' for usage.
@@ -835,62 +1022,25 @@ plan_counts@v1  live
 plan_counts@v2  activating
 
 us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  backfill plan_counts@v2: running, attempt 1, phase apply, 1200 of 5000 records applied; rate 100 records/s, about 37s left; table source, split by time at 2000-01-01T00:06:30Z (the stream held events when the job started, or -source table chose it); execution running
--- want/timeout_zero.stderr --
-dynaflux status: -timeout 0s: want a duration above 0, such as 5m
-Run 'dynaflux help status' for usage.
--- want/timeout_zero.stdout --
--- want/unexpected_argument.stderr --
-dynaflux status: unexpected arguments: page_counts
-Run 'dynaflux help status' for usage.
--- want/unexpected_argument.stdout --
--- want/unreachable.stderr --
-store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
-dynaflux status: us-west-2: read the deployed catalog: meta: read the current catalog: operation error DynamoDB: GetItem, dial tcp 10.0.0.1:443: i/o timeout
--- want/unreachable.stdout --
-version         us-east-1  us-west-2
-page_counts@v1  live       ?
-page_seen@v1    live       ?
-plan_counts@v1  live       ?
-
-us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-us-west-2: couldn't be read
--- want/verbose.stderr --
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: running, attempt 1, phase apply, 1200 of 5000 records applied; rate 100 records/s, about 37s left; table source, split by time at 2000-01-01T00:06:30Z (the archive wasn't complete when the job started, or -source table chose it); execution running
+-- want/suspected_gap.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
--- want/verbose.stdout --
+us-east-1: warning DF7204: a gap is suspected in stream page_views: a projector handled a record almost 24 hours old at 2000-01-01T01:00:00Z; page_counts@v1, page_seen@v1 may miss its records
+  hint: run dynaflux generate -rebuild page_counts, dynaflux generate -rebuild page_seen, deploy regional.yaml in every region, and run dynaflux backfill page_counts page_seen
+-- want/suspected_gap.stdout --
 version         us-east-1
 page_counts@v1  live
 page_seen@v1    live
 plan_counts@v1  live
 
 us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-    unit shardId-0001: progress 0000000000000000000000000000000000000250 at 2000-01-01T00:00:00Z; fences page_counts@v1 0000000000000000000000000000000000000250
-    unit shardId-0002: no progress
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-    unit shardId-0003: no progress
--- want/waits.stderr --
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, not complete: a projector handled a record almost 24 hours old at 2000-01-01T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, complete since 1999-12-29T01:00:00Z
+-- want/suspected_gap_json.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
-us-east-1: warning DF7217: the backfill of plan_counts@v2 waits for the archive read of a later release: stream signups got an event before the job checked that it had none; plan_counts@v2 stays activating, and queries return ErrViewNotReady
-  hint: to fill the view from the stream table now, run dynaflux generate -rebuild plan_counts, deploy regional.yaml, run dynaflux backfill plan_counts, and once it is live, dynaflux retire plan_counts@v2
--- want/waits.stdout --
-version         us-east-1
-page_counts@v1  live
-page_seen@v1    live
-plan_counts@v1  live
-plan_counts@v2  activating
-
-us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
-  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive 2m0s behind
-  backfill plan_counts@v2: running, attempt 1, phase watermark, 0 of 0 records applied; rate no limit; archive source, split by fences; waits for the archive read of a later release
--- want/waits_json.stderr --
-store shop  prefix (none)  account 123456789012  region us-east-1
--- want/waits_json.stdout --
+-- want/suspected_gap_json.stdout --
 {
   "format": 1,
   "store": "shop",
@@ -901,8 +1051,8 @@ store shop  prefix (none)  account 123456789012  region us-east-1
       "region": "us-east-1",
       "deployed": true,
       "catalog": {
-        "hash": "6a2c85d900921ffad6a2f5734b50a1b3e36be2ca0b22d8b79fe42f38e1d1b73d",
-        "generator": "v0.6.0",
+        "hash": "003db85e4f0e955b95138f843b54a45334d900db9cecb5c497118b4538dea5f5",
+        "generator": "v0.5.0",
         "format": 1,
         "registered_at": "2000-01-01T00:00:00Z"
       },
@@ -929,28 +1079,6 @@ store shop  prefix (none)  account 123456789012  region us-east-1
           "split": "time",
           "activated_at": "2000-01-01T00:00:00Z",
           "split_at": "2000-01-01T00:06:30Z"
-        },
-        {
-          "version": "plan_counts@v2",
-          "stream": "signups",
-          "state": "pending_backfill"
-        }
-      ],
-      "jobs": [
-        {
-          "version": "plan_counts@v2",
-          "state": "running",
-          "phase": "watermark",
-          "attempt": 1,
-          "split": "fence",
-          "staged": 0,
-          "applied": 0,
-          "skipped": 0,
-          "rate": 0,
-          "paused": false,
-          "waits": "archive_read",
-          "updated_at": "2000-01-01T00:00:00Z",
-          "execution": "local"
         }
       ],
       "streams": [
@@ -967,7 +1095,16 @@ store shop  prefix (none)  account 123456789012  region us-east-1
             }
           ],
           "archive": "shop-archive-page_views",
-          "archive_freshness_s": 120
+          "archive_freshness_s": 120,
+          "archive_delivered_through": "2000-01-01T00:57:00Z",
+          "archive_completeness": {
+            "complete": false,
+            "since": "1999-12-29T01:00:00Z",
+            "rule": 3,
+            "reason": "a projector handled a record almost 24 hours old at 2000-01-01T01:00:00Z",
+            "at": "2000-01-01T01:00:00Z",
+            "suspected_gap": true
+          }
         },
         {
           "stream": "signups",
@@ -982,7 +1119,12 @@ store shop  prefix (none)  account 123456789012  region us-east-1
             }
           ],
           "archive": "shop-archive-signups",
-          "archive_freshness_s": 120
+          "archive_freshness_s": 120,
+          "archive_delivered_through": "2000-01-01T00:57:00Z",
+          "archive_completeness": {
+            "complete": true,
+            "since": "1999-12-29T01:00:00Z"
+          }
         }
       ]
     }
@@ -992,10 +1134,58 @@ store shop  prefix (none)  account 123456789012  region us-east-1
       "regions": [
         "us-east-1"
       ],
-      "code": "DF7217",
+      "code": "DF7204",
       "severity": "warning",
-      "message": "the backfill of plan_counts@v2 waits for the archive read of a later release: stream signups got an event before the job checked that it had none; plan_counts@v2 stays activating, and queries return ErrViewNotReady",
-      "hint": "to fill the view from the stream table now, run dynaflux generate -rebuild plan_counts, deploy regional.yaml, run dynaflux backfill plan_counts, and once it is live, dynaflux retire plan_counts@v2"
+      "message": "a gap is suspected in stream page_views: a projector handled a record almost 24 hours old at 2000-01-01T01:00:00Z; page_counts@v1, page_seen@v1 may miss its records",
+      "hint": "run dynaflux generate -rebuild page_counts, dynaflux generate -rebuild page_seen, deploy regional.yaml in every region, and run dynaflux backfill page_counts page_seen"
     }
   ]
 }
+-- want/timeout_zero.stderr --
+dynaflux status: -timeout 0s: want a duration above 0, such as 5m
+Run 'dynaflux help status' for usage.
+-- want/timeout_zero.stdout --
+-- want/unexpected_argument.stderr --
+dynaflux status: unexpected arguments: page_counts
+Run 'dynaflux help status' for usage.
+-- want/unexpected_argument.stdout --
+-- want/unreachable.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+dynaflux status: us-west-2: read the deployed catalog: meta: read the current catalog: operation error DynamoDB: GetItem, dial tcp 10.0.0.1:443: i/o timeout
+-- want/unreachable.stdout --
+version         us-east-1  us-west-2
+page_counts@v1  live       ?
+page_seen@v1    live       ?
+plan_counts@v1  live       ?
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+us-west-2: couldn't be read
+-- want/verbose.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/verbose.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+    unit shardId-0001: progress 0000000000000000000000000000000000000250 at 2000-01-01T00:00:00Z; fences page_counts@v1 0000000000000000000000000000000000000250
+    unit shardId-0002: no progress
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+    unit shardId-0003: no progress
+-- want/young_stream_without_an_origin.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7217: the table of stream signups is less than 23 hours old and has no origin in us-east-1, which archives it with events: all
+  hint: run dynaflux backfill -all -region us-east-1 before 2000-01-01T22:00:00Z and before the stream's first event; otherwise the archive of it in us-east-1 is never complete
+-- want/young_stream_without_an_origin.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, not complete: the stream was re-created after the origin: it is arn:aws:dynamodb:us-east-1:123456789012:table/shop-stream-signups/stream/1999-12-31T23:00:00.000 now

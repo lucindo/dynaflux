@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/projector"
+	"github.com/lucindo/dynaflux/internal/store"
 )
 
 const (
@@ -54,7 +55,7 @@ func (m *mapping) poll(l *lane) {
 		if l.acked == len(l.recs) {
 			return
 		}
-		if quiet := time.Until(l.unit.quiet); quiet > 0 {
+		if quiet := max(time.Until(l.unit.quiet), m.rg.stalled()); quiet > 0 {
 			time.Sleep(quiet)
 			continue
 		}
@@ -163,7 +164,7 @@ func (m *mapping) invoke(l *lane, id string, rng *rand.Rand, recs []projector.Re
 func (r *run) checkReported(id string, b projector.Batch, res projector.Result) {
 	table, held := r.cfg.Naming.StreamTable(b.Stream), 0
 	for _, rec := range b.Records {
-		if rec.Op == projector.Modify && r.isDivergent(tableKey{table, keyOf(rec.New)}) {
+		if rec.Op == projector.Modify && r.isDivergent(tableKey{table, store.KeyOf(rec.New)}) {
 			held++
 		}
 	}

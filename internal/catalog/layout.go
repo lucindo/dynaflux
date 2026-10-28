@@ -12,9 +12,11 @@ const (
 	AttrSK  = "sk"   // Sort key of every table.
 	AttrTTL = "_ttl" // Expiry in epoch seconds, in every table that expires items.
 
-	AttrOriginRegion = "_r"   // Event: the region that accepted it.
-	AttrIngestTime   = "_it"  // Event: ingest_time in microseconds.
-	AttrEventVersion = "_ver" // Event: reserved for consistent streams.
+	AttrOriginRegion = "_r"    // Event: the region that accepted it.
+	AttrIngestTime   = "_it"   // Event: ingest_time in microseconds.
+	AttrEventVersion = "_ver"  // Event: reserved for consistent streams.
+	AttrSync         = "_sync" // Event: the SYNC view versions its append's transaction applied.
+	AttrReceipt      = "_rcpt" // Event: its append asked for a receipt (dynaflux.Waitable).
 
 	AttrRowVersion     = "_v"   // View row: version for the conditional read-modify-write.
 	AttrHighWaterMarks = "_hwm" // View row: last applied sequence number per delivery unit.

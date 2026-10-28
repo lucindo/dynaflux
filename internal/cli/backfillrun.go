@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/athena"
 	"github.com/aws/aws-sdk-go-v2/service/sfn"
 
 	"github.com/lucindo/dynaflux/internal/backfill"
@@ -83,18 +84,46 @@ func (c *cli) actOn(f *fleet, d *deployment, o backfillOptions, it *planItem) (s
 		}
 		return "rate set to " + rateText(o.rate.value), backfill.SetRate(c.ctx, d.meta, it.version, o.rate.value)
 	case actCancel:
-		if _, err := backfill.Cancel(c.ctx, d.meta, it.version); err != nil {
-			return "", err
-		}
-		for _, arn := range it.stop {
-			if _, err := d.clients.sfn.StopExecution(c.ctx, &sfn.StopExecutionInput{ExecutionArn: &arn}); err != nil {
-				return "", fmt.Errorf("stop execution %s: %w", arn, err)
-			}
-		}
-		return string(meta.JobCancelled), nil
+		return c.cancel(d, it)
 	case actLive, actRefuse, actNone:
 	}
 	return "", nil
+}
+
+// cancel cancels the job of it, then stops its executions and the Athena query that the job,
+// as cancelled, last recorded: no step records another after.
+func (c *cli) cancel(d *deployment, it *planItem) (string, error) {
+	j, err := backfill.Cancel(c.ctx, d.meta, it.version)
+	if err != nil {
+		return "", err
+	}
+	for _, arn := range it.stop {
+		if _, err = d.clients.sfn.StopExecution(c.ctx, &sfn.StopExecutionInput{ExecutionArn: &arn}); err != nil {
+			return "", fmt.Errorf("stop execution %s: %w", arn, err)
+		}
+	}
+	id, what := runningQuery(j)
+	if id == "" {
+		return string(meta.JobCancelled), nil
+	}
+	if _, err = d.clients.athena.StopQueryExecution(c.ctx, &athena.StopQueryExecutionInput{QueryExecutionId: &id}); err != nil {
+		return "", fmt.Errorf("stop %s, Athena query %s: %w", what, id, err)
+	}
+	return "cancelled; stopped " + what + ", Athena query " + id, nil
+}
+
+// runningQuery returns the Athena query that j's stage holds and may still run, and what it
+// does: the listing of the partitions before the plan, or a slice's try before its files.
+func runningQuery(j meta.Job) (string, string) {
+	a := j.Archive
+	switch {
+	case j.Split != meta.SplitFence:
+	case a.Plan == "" && a.PlanQuery != "":
+		return a.PlanQuery, "the listing of the archive's partitions"
+	case a.Export.ID != "" && a.Query == "":
+		return a.Export.ID, "the archive export"
+	}
+	return "", ""
 }
 
 func attemptName(name string, attempt int) string { return name + "-a" + strconv.Itoa(attempt) }
@@ -155,8 +184,8 @@ type watchLine struct {
 
 // watch follows the jobs that the run started, resumed or left running, printing a line
 // when one moves, until each has ended. It returns exitOK when every version is live, and
-// exitErrors when one broke, was cancelled, waits, or its job's executions ended without it,
-// or when the watch was interrupted, which stops only the watching. A poll that fails is
+// exitErrors when one broke, was cancelled, or its job's executions ended without it, or
+// when the watch was interrupted, which stops only the watching. A poll that fails is
 // reported in place, and tried again.
 func (c *cli) watch(f *fleet, plans []*regionPlan, asJSON bool) int {
 	var ws []*watched
@@ -213,7 +242,7 @@ func (c *cli) pollAll(f *fleet, ws []*watched, executions, asJSON bool) int {
 // prints a line when it changed.
 func (c *cli) poll(f *fleet, w *watched, executions, asJSON bool) {
 	j, err := w.read(c.ctx)
-	executions = executions && err == nil && j.State == meta.JobRunning && j.Waits == ""
+	executions = executions && err == nil && j.State == meta.JobRunning
 	if executions {
 		w.exec, err = deployed.Running(c.ctx, w.d.clients.sfn, f.machine(w.d.region), j)
 		w.checked = err == nil
@@ -279,8 +308,6 @@ func (w *watched) observe(j meta.Job, executions bool, err error) (string, watch
 		w.applied, w.at = j.Applied, time.Now()
 		line += jobActivity(j)
 		switch {
-		case j.Waits != "":
-			w.ended = true
 		case executions && w.checked && w.exec.ARN == "":
 			w.ended, line = true, "interrupted: its execution ended; run dynaflux backfill "+w.version+" again to resume it"
 			wl.Job.Status = statusInterrupted

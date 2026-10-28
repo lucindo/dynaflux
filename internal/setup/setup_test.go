@@ -99,7 +99,7 @@ func props(t *testing.T, data string) map[string]any {
 // A delete never calls AWS: the handler's nil interfaces would panic.
 func TestDeleteDoesNothing(t *testing.T) {
 	t.Parallel()
-	for _, typ := range []string{setup.TypeStreamARN, setup.TypeArchiveSchema, "Custom::Other"} {
+	for _, typ := range []string{setup.TypeStreamARN, setup.TypeArchiveSchema, setup.TypeArchiveMode, "Custom::Other"} {
 		h := setup.Handler{}
 		resp, err := h.Handle(t.Context(), setup.Request{Type: typ, Action: setup.ActionDelete, PhysicalID: "id-1"})
 		if err != nil || resp.PhysicalID != "id-1" || resp.Data != nil {

@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/keys"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/projector"
@@ -45,7 +44,8 @@ func Step(ctx context.Context, env *Env, version string, attempt int, execution 
 	case !ok:
 		return 0, false, errors.New("backfill: a step needs a context with a deadline")
 	case env.Meta == nil || env.Store == nil || env.Core == nil || env.Units == nil || env.Tables == nil ||
-		env.Runs == nil || env.Lag == nil || env.Catalog == nil || env.Log == nil || env.Memory <= 0:
+		env.Runs == nil || env.Lag == nil || env.Catalog == nil || env.Log == nil || env.Memory <= 0 ||
+		env.Archive != nil && (env.Witness == nil || env.Region == ""):
 		return 0, false, errors.New("backfill: the step's environment lacks a part")
 	case version == "" || attempt < 1:
 		return 0, false, fmt.Errorf("backfill: step version %q attempt %d", version, attempt)
@@ -88,7 +88,11 @@ type step struct {
 	unit, fence string
 	fenced      bool
 	lagAt       time.Time // the step's last lag check
+	born        time.Time // the stream table's creation, once bornAt read it
 	pace        pacer
+	// planName and slices are the last archive plan the step read.
+	planName string
+	slices   []slice
 }
 
 func (s *step) left() bool { return time.Now().Before(s.cutoff) }
@@ -148,11 +152,7 @@ func (s *step) activate(ctx context.Context, j meta.Job) error {
 
 // wait waits until the table source may read: until read_after, by the host's clock.
 func (s *step) wait(ctx context.Context, j meta.Job) (time.Duration, bool, error) {
-	now := time.Now
-	if s.env.Now != nil {
-		now = s.env.Now
-	}
-	if left := j.ReadAfter.Sub(now()); left > 0 {
+	if left := j.ReadAfter.Sub(s.env.now()); left > 0 {
 		return left, false, nil
 	}
 	return 0, false, s.advance(ctx, meta.PhaseWait, meta.PhaseStage, nil)
@@ -164,19 +164,9 @@ func (s *step) deployed(ctx context.Context) error {
 	if _, ok := s.env.Catalog.Version(s.version); !ok {
 		return fmt.Errorf("backfill: %s isn't in this build's catalog", s.version)
 	}
-	reg, ok, err := s.env.Meta.Current(ctx)
+	_, def, ok, err := deployedCatalog(ctx, s.env)
 	if err != nil {
 		return err
-	}
-	def := s.env.Catalog
-	if ok && reg.Hash != s.env.Hash {
-		var data []byte
-		if data, err = s.env.Meta.ReadCatalog(ctx, reg.Hash); err != nil {
-			return err
-		}
-		if def, err = catalog.Unmarshal(data); err != nil {
-			return fmt.Errorf("backfill: the region's deployed catalog: %w", err)
-		}
 	}
 	if _, defined := def.Version(s.version); !ok || !defined {
 		return fmt.Errorf("backfill: %s isn't in the region's deployed catalog; deploy regional.yaml there first", s.version)
@@ -238,17 +228,10 @@ func zeroFences(fences map[string]string) bool {
 }
 
 // watermark waits until the archive holds every record put before the cut: then it holds
-// every record at or below a fence. Where the archive can't be read yet, the job waits for a
-// later release with its steps ended, so its execution neither fails nor runs on.
+// every record at or below a fence. A stream that wasn't fresh needs the region's archive.
 func (s *step) watermark(ctx context.Context, j meta.Job) (time.Duration, bool, error) {
 	if s.env.Archive == nil {
-		s.env.Log.WarnContext(ctx, "backfill: the job waits for the archive read of a later release", slog.String("version", s.version))
-		_, err := s.update(ctx, meta.PhaseWatermark, func(j *meta.Job) (bool, error) {
-			write := j.Waits != meta.WaitArchive
-			j.Waits = meta.WaitArchive
-			return write, nil
-		})
-		return 0, err == nil, err
+		return 0, false, fmt.Errorf("backfill: %s: the stream has events, and this environment can't read its archive", s.version)
 	}
 	ok, err := s.env.Archive.Complete(ctx, j.Stream, j.Cut)
 	switch {
@@ -256,6 +239,10 @@ func (s *step) watermark(ctx context.Context, j meta.Job) (time.Duration, bool, 
 		return 0, false, err
 	case !ok:
 		return watermarkPoll, false, nil
+	}
+	// Before the job pays for an export: a job that an older build left here has no origin.
+	if err = s.checkArchive(ctx, j); err != nil {
+		return 0, false, err
 	}
 	return 0, false, s.advance(ctx, meta.PhaseWatermark, meta.PhaseStage, nil)
 }
@@ -417,8 +404,14 @@ func (s *step) moveCursor(ctx context.Context, c chunk) error {
 }
 
 // live makes the version live, partial when it was filled from a table that may have lost
-// events, and deletes the staged objects.
+// events, and deletes the staged objects. From the archive, it checks first that the archive
+// is still complete.
 func (s *step) live(ctx context.Context, j meta.Job) error {
+	if j.Split == meta.SplitFence {
+		if err := s.checkArchive(ctx, j); err != nil {
+			return err
+		}
+	}
 	since, err := s.partialSince(ctx, j)
 	if err != nil {
 		return err
@@ -439,6 +432,11 @@ func (s *step) restage(ctx context.Context, j meta.Job) error {
 	s.env.Log.WarnContext(ctx, "backfill: a staged object is missing; staging again", slog.String("version", s.version))
 	_, err := s.update(ctx, j.Phase, func(j *meta.Job) (bool, error) {
 		j.Phase, j.Runs, j.Merge, j.Stage = meta.PhaseStage, nil, nil, meta.Stage{}
+		j.Archive = meta.ArchiveStage{Scanned: j.Archive.Scanned, Tries: j.Archive.Tries}
+		if j.Split == meta.SplitFence {
+			// A new count gives the partitions a new listing: the old one's results may be gone.
+			j.Archive.Tries++
+		}
 		return true, nil
 	})
 	return err
@@ -551,7 +549,7 @@ func (s *step) fail(ctx context.Context, phase meta.Phase, err error) (time.Dura
 	switch {
 	case errors.Is(err, errNotOwner):
 		return 0, true, nil
-	case errors.Is(err, projector.ErrBroken):
+	case errors.Is(err, projector.ErrBroken), errors.Is(err, ErrIncomplete):
 		return 0, true, s.stop(ctx, meta.JobBroken, phase, err)
 	case errors.Is(err, meta.ErrTransition), errors.Is(err, meta.ErrNotActivating):
 		states, serr := s.env.Meta.ViewStates(ctx)

@@ -31,12 +31,15 @@ const (
 	backfill      = "internal/projector/backfill.go"
 	eval          = "internal/projector/eval.go"
 	handle        = "internal/projector/handle.go"
+	receiptGo     = "internal/projector/receipt.go"
 	unit          = "internal/meta/unit.go"
 	cache         = "internal/meta/cache.go"
 	metaPackage   = "./internal/meta"
 	appendGo      = "internal/engine/append.go"
 	step          = "internal/backfill/step.go"
 	backfillPkg   = "./internal/backfill"
+	engineSync    = "internal/engine/sync.go"
+	planSync      = "internal/projector/sync.go"
 	core          = "./internal/projector"
 	region        = "internal/simulation/region.go"
 	killBoundary  = "TestKillBoundary"
@@ -57,7 +60,8 @@ const (
 	advance       = "c.advance(progressCtx, rc, recs, failed, deadline)"
 	archive       = "\tif err = c.archive(ctx, b, recs); err != nil {\n\t\treturn err\n\t}"
 	applies       = "if r := &recs[i]; r.Op == Insert {"
-	noInsert      = "if inserts == 0 {" // a batch without an INSERT returns early
+	noInsert      = "if inserts == 0 {"                  // a batch without an INSERT returns early
+	onlyRemoves   = "if inserts == 0 && modifies == 0 {" // a batch of REMOVEs returns earlier
 	stateCache    = "states *meta.StateCache"
 	stampedAhead  = "TestStateCacheRereadsStatesStampedAhead"
 	g3            = `if unknown != "" {`
@@ -91,22 +95,46 @@ const (
 	resume      = "resume"
 	timesplit   = "timesplit"
 	splitLate   = "timesplit-late"
+	syncSc      = "sync"
+	syncFill    = "sync-backfill"
+	syncRegions = "sync-regions"
+	waitSc      = "wait"
+	holesSc     = "holes"
+	gapsSc      = "gaps"
+	complete    = "internal/backfill/complete.go"
+	exportGo    = "internal/backfill/export.go"
+	slicesSc    = "slices"
+	markLag     = "\tif err = c.markLag(rowCtx, b, recs, start); err != nil {\n\t\treturn Result{Stats: res.Stats}, err\n\t}\n"
+	// lateLag is markLag in apply, where the view states and the unit were read.
+	lateLag = "\tif err = c.markLag(ctx, b, recs, start); err != nil {\n\t\treturn err\n\t}\n"
+	synced  = "if !fromHere || !has || region.Type != store.S || region.Str != c.region {"
+	counts  = "\t\t\tif read[TableKey{r.table, m.key}] == nil {\n\t\t\t\tcounted[m.agg] = append(counted[m.agg], m.val)\n"
 )
 
 // The properties that controls break.
 const (
-	p1  = "P1:"
-	p3  = "P3:"
-	p4  = "P4:"
-	p6  = "P6:"
-	p7  = "P7:"
-	p10 = "P10:"
+	p0     = "P0:"
+	p1     = "P1:"
+	p3     = "P3:"
+	p4     = "P4:"
+	p6     = "P6:"
+	p7     = "P7:"
+	p10    = "P10:"
+	p11a   = "P11a:"
+	p11b   = "P11b:"
+	p11c   = "P11c:"
+	p12    = "P12:"
+	p13    = "P13:"
+	p14    = "P14:"
+	p15    = "P15:"
+	events = "events:"
 )
 
 func table() []control {
 	cs := slices.Concat(liveControls(), regionControls(), fenceControls(), handoffControls(), backfillControls(),
 		orderControls(), applyControls(), pruneControls(), progressControls(), guardControls(), jobControls(),
-		tableControls(), replayControls())
+		tableControls(), syncControls(), syncAppendControls(), waitControls(), replayControls(), historyControls(),
+		exportControls())
 	return append(cs, rerunOnD23a(cs)...)
 }
 
@@ -188,9 +216,10 @@ func liveControls() []control {
 		{
 			ID:   "C24a", // an evaluation error fails the batch
 			File: handle,
-			Old:  "if err = rs.add(v, r, vals, bad); err != nil {",
+			Old:  "err = rs.add(v, r, vals, bad)\n\t\t}\n\t\tif err != nil {",
 			New: `if err = rs.add(v, r, vals, bad); err != nil {
-			return err
+				return err
+			}
 		}
 		if false {`,
 			Scenario: poison,
@@ -226,7 +255,9 @@ func liveControls() []control {
 
 // everyBatch is the More of a mutant that applies or archives records other than INSERTs:
 // batches without an INSERT reach it too.
-func everyBatch() [][2]string { return [][2]string{{noInsert, "if inserts < 0 {"}} }
+func everyBatch() [][2]string {
+	return [][2]string{{noInsert, "if inserts < 0 {"}, {onlyRemoves, "if inserts < 0 && modifies == 0 {"}}
+}
 
 // regionControls returns the controls of what a region's change stream holds besides its
 // own appends, of an append that finds its event stored, and of a batch's rows and unit
@@ -273,6 +304,15 @@ func regionControls() []control {
 			Want:     p1,
 		},
 		{
+			ID:       "C74", // a row write that met a transaction is retried with the item it built
+			File:     apply,
+			Old:      "\t\tif cur, err = c.readRow(ctx, g); err != nil {\n\t\t\treturn err\n\t\t}\n",
+			New:      "",
+			Scenario: faults,
+			Seeds:    20,
+			Want:     p1,
+		},
+		{
 			ID:       "C26", // Handle returns with row writes in flight
 			File:     apply,
 			Old:      "\trows := logicalRows(groups)\n\tfanOut(len(rows), parallel, func(r int) {",
@@ -284,8 +324,8 @@ func regionControls() []control {
 		{
 			ID:       "C45", // an event that another call stored is taken for the call's own
 			File:     appendGo,
-			Old:      "if s.sameEvent(ce.Current, it) {",
-			New:      always,
+			Old:      "return s.claimed(ce.Current, it)",
+			New:      "return it, nil",
 			Scenario: regions,
 			Seeds:    20,
 			Want:     "events:",
@@ -518,10 +558,10 @@ func backfillControls() []control {
 			Want:     p1,
 		},
 		{
-			ID:       "C68", // the archive read skips the error prefix
+			ID:       "C68", // the archive read skips the error prefix's records
 			File:     "internal/simulation/archive.go",
-			Old:      "for _, prefix := range []string{prefixDelivered, prefixErrors} {",
-			New:      "for _, prefix := range []string{prefixDelivered} {",
+			Old:      "if o.stream == stream && !o.due.After(now) && name > after {",
+			New:      "if o.stream == stream && !o.due.After(now) && name > after && o.failed {",
 			Scenario: handoff,
 			Seeds:    100,
 			Want:     p1,
@@ -901,8 +941,8 @@ func jobControls() []control {
 		},
 		{
 			ID:      "C69", // a staged run claims export files whose runs a restage dropped
-			File:    "internal/backfill/archive.go",
-			Old:     "if slices.ContainsFunc(*held, func(name string) bool { return !listed(name) }) {",
+			File:    exportGo,
+			Old:     "if j.Archive != from {",
 			New:     never,
 			Test:    "TestStepStagesAgainAfterARestageItDidNotSee",
 			Package: backfillPkg,
@@ -1039,11 +1079,231 @@ func tableControls() []control {
 		{
 			ID:       "C65", // runs named by their input and rewritten, not committed
 			File:     "internal/backfill/merge.go",
-			Old:      `return fmt.Sprintf("runs/%d-%s%s", j.Attempt, hex.EncodeToString(b[:]), suffix), nil`,
-			New:      `return fmt.Sprintf("runs/%d-%d%s%.0s", j.Attempt, len(j.Runs), suffix, hex.EncodeToString(b[:])), nil`,
+			Old:      `return fmt.Sprintf("runs/%d-%s", j.Attempt, nonce), err`,
+			New:      `return fmt.Sprintf("runs/%d-%d%.0s", j.Attempt, len(j.Runs), nonce), err`,
 			Scenario: "table",
 			Seeds:    100,
 			Want:     p1,
+		},
+	}
+}
+
+// syncControls returns the controls of SYNC views in the projector (ADR 0014). With
+// syncAppendControls', their IDs are m6-plan's C66–C76 and C93 plus 9, after the controls
+// M5 and the projector's conflict retry took, then C107 and C108.
+func syncControls() []control {
+	return []control{
+		{
+			ID:       "C75", // the projector ignores _sync
+			File:     planSync,
+			Old:      synced,
+			New:      "if true || " + synced[len("if "):],
+			Scenario: syncSc,
+			Seeds:    20,
+			Want:     p1,
+		},
+		{
+			ID:       "C76", // the projector skips the versions it reads as SYNC and live, not those _sync names
+			File:     handle,
+			Old:      "broken[v] || synced[v.id] || fenced",
+			New:      "broken[v] || v.def.Mode == catalog.ModeSync && rc.states[v.id].State == meta.Live && r.New[catalog.AttrOriginRegion].Str == c.region && synced != nil || fenced",
+			Scenario: syncSc,
+			Seeds:    20,
+			Want:     p1,
+		},
+		{
+			ID:       "C77", // the projector skips what _sync names in every region
+			File:     planSync,
+			Old:      synced,
+			New:      "if !fromHere || !has || region.Type != store.S {",
+			Scenario: syncRegions,
+			Seeds:    20,
+			Want:     p1,
+		},
+		{
+			ID:       "C80", // row puts without the _v condition
+			File:     planSync,
+			Old:      "\t\tcond := store.IfAbsent()\n\t\tif cur.version > 0 {\n\t\t\tcond = store.IfVersion(cur.version)\n\t\t}\n",
+			New:      "\t\tcond := store.Cond{}\n",
+			Scenario: syncSc,
+			Seeds:    20,
+			Want:     p1,
+		},
+		{
+			ID:       "C84", // a uniqExact value counts when its marker exists, whatever its owner
+			File:     planSync,
+			Old:      counts,
+			New:      "\t\t\tcounted[m.agg] = append(counted[m.agg], m.val)\n\t\t\tif read[TableKey{r.table, m.key}] == nil {\n",
+			Scenario: syncSc,
+			Seeds:    20,
+			Want:     p1,
+		},
+		{
+			ID:       "C85", // a transaction's row writes drop _hwm
+			File:     planSync,
+			Old:      "\t\tcur.version++\n",
+			New:      "\t\tcur.hwm = keys.HWM{Units: map[string]string{}}\n\t\tcur.version++\n",
+			Scenario: syncSc,
+			Seeds:    20,
+			Want:     p11c,
+		},
+		{
+			ID:   "C102", // a value counts when its marker's owner is E and this event_id
+			File: planSync,
+			Old:  counts,
+			New: "\t\t\tif mk := read[TableKey{r.table, m.key}]; mk == nil || mk[catalog.AttrMarkerOwner].Str == p.owner {\n" +
+				"\t\t\t\tcounted[m.agg] = append(counted[m.agg], m.val)\n\t\t\t}\n\t\t\tif read[TableKey{r.table, m.key}] == nil {\n",
+			Scenario: syncSc,
+			Seeds:    50,
+			Want:     p1,
+		},
+	}
+}
+
+// syncAppendControls returns the controls of the engine's SYNC appends (ADR 0014).
+func syncAppendControls() []control {
+	return []control{
+		{
+			ID:       "C78", // an append applies activating versions too (Q34)
+			File:     engineSync,
+			Old:      "if states[id].State == meta.Live {",
+			New:      "if states[id].State == meta.Live || states[id].State == meta.Activating {",
+			Scenario: syncFill,
+			Seeds:    50,
+			Want:     p11b,
+		},
+		{
+			ID:       "C79", // _sync names every SYNC version of the catalog
+			File:     appendGo,
+			Old:      "it[catalog.AttrSync] = syncList(live)",
+			New:      "it[catalog.AttrSync] = syncList(s.sync)",
+			Scenario: syncFill,
+			Seeds:    50,
+			Want:     p1,
+		},
+		{
+			ID:       "C81", // the event put and the rows in two requests
+			File:     engineSync,
+			Old:      "\t\terr = e.b.Transact(ctx, puts)\n",
+			New:      "\t\tif err = e.b.Put(ctx, table, it, store.IfAbsent()); err == nil {\n\t\t\terr = e.b.Transact(ctx, rows)\n\t\t}\n",
+			Scenario: syncSc,
+			Seeds:    20,
+			Want:     p11a,
+		},
+		{
+			ID:       "C82", // an event condition failure is always ErrDuplicate
+			File:     engineSync,
+			Old:      "return s.claimed(tx.Conds[0].Current, it)",
+			New:      "return tx.Conds[0].Current, ErrDuplicate",
+			Scenario: syncSc,
+			Seeds:    20,
+			Want:     events,
+		},
+		{
+			ID:       "C83", // an event condition failure is always success
+			File:     engineSync,
+			Old:      "return s.claimed(tx.Conds[0].Current, it)",
+			New:      "return it, nil",
+			Scenario: syncRegions,
+			Seeds:    20,
+			Want:     events,
+		},
+		{
+			ID:       "C107", // a throttled transaction taken as applied
+			File:     engineSync,
+			Old:      "\t\tcase errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrThrottled):\n",
+			New:      "\t\tcase errors.Is(err, store.ErrThrottled):\n\t\t\treturn it, nil\n\t\tcase errors.Is(err, store.ErrConflict):\n",
+			Scenario: syncSc,
+			Seeds:    20,
+			Want:     p0,
+		},
+		{
+			ID:       "C108", // an event put alone though it reaches rows of the versions it names
+			File:     engineSync,
+			Old:      "if len(plan.Reads()) == 0 {",
+			New:      always,
+			Scenario: syncSc,
+			Seeds:    20,
+			Want:     p11a,
+		},
+	}
+}
+
+// waitControls returns the controls of wait tokens (ADR 0015). Their IDs are m6-plan's
+// C77–C80, C94 and C95 plus 9, as syncControls' are.
+func waitControls() []control {
+	receipts := "\tc.receipts(ctx, b.Stream, waitable, failed, res)\n"
+	return []control{
+		{
+			ID:       "C86", // receipts written right after the archive, before the rows
+			File:     handle,
+			Old:      archive,
+			New:      archive + "\n\tc.receipts(ctx, b.Stream, waitable, \"\", res)",
+			More:     [][2]string{{receipts, ""}},
+			Scenario: waitSc,
+			Seeds:    20,
+			Want:     p12,
+		},
+		{
+			ID:       "C87", // receipts for every record, ignoring FailedSeq
+			File:     receiptGo,
+			Old:      "\tif failed != \"\" {\n\t\twaitable = slices.DeleteFunc(",
+			New:      "\tif false {\n\t\twaitable = slices.DeleteFunc(",
+			Scenario: waitSc,
+			Seeds:    20,
+			Want:     p12,
+		},
+		{
+			ID:       "C88", // no receipts for records at or below progress, so none after a crash past the progress write
+			File:     handle,
+			Old:      "waitable := c.waitable(recs)",
+			New:      "waitable := c.waitable(slices.DeleteFunc(slices.Clone(recs), func(r record) bool { return r.seq <= rc.unit.Progress }))",
+			Scenario: waitSc,
+			Seeds:    20,
+			Want:     p13,
+		},
+		{
+			ID:       "C89", // receipts in every region
+			File:     receiptGo,
+			Old:      "origin.Type == store.S && origin.Str == c.region",
+			New:      "origin.Type == store.S",
+			Scenario: waitSc,
+			Seeds:    20,
+			Want:     p13,
+		},
+		{
+			ID:       "C103", // receipts keyed by event_id alone
+			File:     "internal/meta/receipt.go",
+			Old:      `+ "#" + strconv.FormatInt(k.It, 10)`,
+			New:      `+ strconv.FormatInt(k.It, 10)[:0]`,
+			Scenario: waitSc,
+			Seeds:    100,
+			Want:     p15,
+		},
+		{
+			ID:      "C104", // a wait checks readiness with the cached states
+			File:    "internal/engine/query.go",
+			Old:     "e.ready(ctx, cat, q.viewID, waiting)",
+			New:     "e.ready(ctx, cat, q.viewID, false)",
+			Test:    "TestWaitReadsTheStateAgain",
+			Package: "./internal/engine",
+		},
+		{
+			ID:       "C105", // receipts between the rows and advance
+			File:     handle,
+			Old:      "\tif err = " + advance + "; err != nil {\n\t\treturn err\n\t}\n" + receipts,
+			New:      receipts + "\tif err = " + advance + "; err != nil {\n\t\treturn err\n\t}\n",
+			Scenario: waitSc,
+			Seeds:    20,
+			Want:     p12,
+		},
+		{
+			ID:      "C106", // FailedSeq at the highest failed receipt, not the lowest
+			File:    receiptGo,
+			Old:     "waitable[i].name(), err))\n\t\t\treturn\n",
+			New:     "waitable[i].name(), err))\n",
+			Test:    "TestHandleFailsTheRecordOfAFailedReceipt",
+			Package: core,
 		},
 	}
 }
@@ -1065,6 +1325,167 @@ func replayControls() []control {
 			Old:  "newRun(t.Context(), sc, sys, seed)",
 			New:  "newRun(t.Context(), sc, sys, 0)",
 			Test: "TestDeterministic",
+		},
+	}
+}
+
+// historyControls returns the controls of the archive's history (ADR 0017). Their IDs are
+// m6-plan's C85–C88 and C90–C92 plus 9, as syncControls' are.
+func historyControls() []control {
+	advanced := "\tif err = c.advance(progressCtx, rc, recs, failed, deadline); err != nil {\n\t\treturn err\n\t}\n"
+	return []control{
+		{
+			ID:       "C94", // no check of the archive after its last read
+			File:     exportGo,
+			Old:      "\tif err = s.checkArchive(ctx, j); err != nil {\n\t\treturn 0, false, err\n\t}\n",
+			New:      "",
+			Scenario: holesSc,
+			Seeds:    20,
+			Want:     p14,
+		},
+		{
+			ID:       "C95", // an origin recorded without the mode condition
+			File:     "internal/meta/stream.go",
+			Old:      "case read.Mode != ArchiveAll:",
+			New:      "case false:",
+			Scenario: holesSc,
+			Seeds:    100,
+			Want:     p14,
+		},
+		{
+			ID:       "C96", // the hole written after the functions change
+			File:     "internal/simulation/history.go",
+			Old:      "\tif !rg.recordModes(ctx, old, off, clock) {\n\t\treturn false\n\t}\n\trg.changeFunctions(stream, off)\n",
+			New:      "\trg.changeFunctions(stream, off)\n\tif !rg.recordModes(ctx, old, off, clock) {\n\t\treturn false\n\t}\n",
+			Scenario: holesSc,
+			Seeds:    20,
+			Want:     p14,
+		},
+		{
+			ID:       "C97", // lag holes ignored
+			File:     complete,
+			Old:      "\t\tcase meta.HoleLag:\n\t\t\treturn lagged(h)\n",
+			New:      "",
+			Scenario: gapsSc,
+			Seeds:    20,
+			Want:     p14,
+		},
+		{
+			ID:       "C99", // the lag recorded after progress moved
+			File:     handle,
+			Old:      markLag,
+			New:      "",
+			More:     [][2]string{{advanced, advanced + lateLag}},
+			Scenario: gapsSc,
+			Seeds:    20,
+			Want:     p14,
+		},
+		{
+			ID:       "C100", // a lag that can't be recorded is ignored
+			File:     handle,
+			Old:      markLag,
+			New:      "\t_ = c.markLag(rowCtx, b, recs, start)\n",
+			Scenario: gapsSc,
+			Seeds:    40,
+			Want:     p14,
+		},
+		{
+			ID:      "C109", // the lag checked after the view states, which fail every batch under G3
+			File:    handle,
+			Old:     markLag,
+			New:     "",
+			More:    [][2]string{{"\trc.start = start\n", "\trc.start = start\n" + lateLag}},
+			Test:    "TestHandleRecordsALagBeforeTheViewStates",
+			Package: core,
+		},
+		{
+			ID:      "C110", // failed projector invocations counted as runs
+			File:    "internal/backfill/awsbackfill/witness.go",
+			Old:     "\t\t\tcase 'e':\n\t\t\t\tsucceeded[h] -= p.value\n",
+			New:     "",
+			Test:    "TestArchiveFacts",
+			Package: "./internal/backfill/awsbackfill",
+		},
+		{
+			ID:       "C111", // the origin's wait from the registration only, which a rollback doesn't write
+			File:     "internal/backfill/origin.go",
+			Old:      "return later(last, reg.At).Add(OriginWait)",
+			New:      "return reg.At.Add(OriginWait)",
+			Scenario: holesSc,
+			Seeds:    100,
+			Want:     p14,
+		},
+		{
+			ID:       "C101", // holes ordered by their times against the origin's, not by their place
+			File:     complete,
+			Old:      "\tfor _, h := range e.Stream.After() {\n",
+			New:      "\tfor _, h := range e.Stream.Holes {\n\t\tif !h.At.After(o.At) {\n\t\t\tcontinue\n\t\t}\n",
+			Scenario: holesSc,
+			Seeds:    100,
+			Want:     p14,
+		},
+	}
+}
+
+// exportControls returns the controls of the archive's export by slices (ADR 0016). Their IDs
+// are m6-plan's C81–C84 and C89 plus 9, as syncControls' are.
+func exportControls() []control {
+	return []control{
+		{
+			ID:   "C90", // fences read before the last slice ended: a unit unseen when the first slice was staged counts as unfenced
+			File: exportGo,
+			Old:  "\t\t\tif !r.older(born) {\n\t\t\t\tbuf, size = append(buf, r), size+r.size\n\t\t\t}\n",
+			New: `			if key := fmt.Sprintf("%p %s %s", s.env.Meta, s.version, r.unit); to.Slice == 0 {
+				early.Store(key, true)
+			} else if _, seen := early.Load(key); !seen {
+				r.unit = ""
+			}
+			if !r.older(born) {
+				buf, size = append(buf, r), size+r.size
+			}
+`,
+			More: [][2]string{
+				{"// sliceJSON is a slice in a plan object.", "var early sync.Map\n\n// sliceJSON is a slice in a plan object."},
+				{"\t\"strconv\"\n\t\"time\"\n", "\t\"strconv\"\n\t\"sync\"\n\t\"time\"\n"},
+			},
+			Scenario: slicesSc,
+			Seeds:    100,
+			Want:     p1,
+		},
+		{
+			ID:       "C91", // the slice plan taken before the watermark, which the reads after it still wait for
+			File:     step,
+			Old:      "\tok, err := s.env.Archive.Complete(ctx, j.Stream, j.Cut)\n",
+			New:      "\tif j.Archive.Plan == \"\" {\n\t\treturn s.plan(ctx, j)\n\t}\n\tok, err := s.env.Archive.Complete(ctx, j.Stream, j.Cut)\n",
+			Scenario: slicesSc,
+			Seeds:    50,
+			Want:     p1,
+		},
+		{
+			ID:       "C92", // a failed try's files read, and the slice not tried again
+			File:     exportGo,
+			Old:      "\tcase QueryFailed, QueryCancelled:\n\t}\n\treturn s.failedTry(ctx, j, plan, st)",
+			New:      "\tcase QueryFailed, QueryCancelled:\n\t}\n\tif st.State == QueryFailed && st.Failure == FailureOther {\n\t\treturn 0, false, s.exported(ctx, j, sl, st)\n\t}\n\treturn s.failedTry(ctx, j, plan, st)",
+			Scenario: slicesSc,
+			Seeds:    100,
+			Want:     p1,
+		},
+		{
+			ID:      "C93", // the watermark by the period's end: t + 60 s − f
+			File:    "internal/backfill/watermark.go",
+			Old:     "if p.At.Add(-p.Freshness).After(cut.Add(margin)) {",
+			New:     "if p.At.Add(time.Minute - p.Freshness).After(cut.Add(margin)) {",
+			Test:    "TestDelivered",
+			Package: backfillPkg,
+		},
+		{
+			ID:       "C98", // the data files of a commit that failed skipped, not failing the job
+			File:     "internal/backfill/errors.go",
+			Old:      "return nil, \"a line holds no record: the data files of a commit that failed, or something else\"",
+			New:      "return nil, \"\"",
+			Scenario: slicesSc,
+			Seeds:    50,
+			Want:     p14,
 		},
 	}
 }

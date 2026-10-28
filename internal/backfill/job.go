@@ -92,7 +92,7 @@ func Start(ctx context.Context, m *meta.Meta, r Request) (meta.Job, error) {
 			// Not activated yet: nothing the job did depends on its split.
 			j.Split = split
 		}
-		j.State, j.Attempt, j.Execution, j.Waits = meta.JobRunning, next, r.Execution(next), ""
+		j.State, j.Attempt, j.Execution = meta.JobRunning, next, r.Execution(next)
 		return true, nil
 	})
 }

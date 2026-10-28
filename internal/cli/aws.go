@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/athena"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
@@ -66,11 +67,17 @@ type regionClients struct {
 	sfn      stepFunctions   // the backfill state machine's executions; nil on DynamoDB Local
 	tables   backfill.Tables // the stream tables' replicas; nil on DynamoDB Local
 	units    backfill.Lister // the stream tables' shards
-	// What status reads besides the tables; nil on DynamoDB Local.
+	// What status and backfill read besides the tables; nil on DynamoDB Local.
 	describe awsbackfill.DynamoDB
 	lambda   deployed.Lambda
 	metrics  deployed.CloudWatch
 	bucket   deployed.S3
+	athena   queryStopper // stops a job's archive export; nil on DynamoDB Local
+}
+
+// queryStopper stops Athena queries.
+type queryStopper interface {
+	StopQueryExecution(ctx context.Context, in *athena.StopQueryExecutionInput, opts ...func(*athena.Options)) (*athena.StopQueryExecutionOutput, error)
 }
 
 type stepFunctions interface {
@@ -132,6 +139,7 @@ func (s sdkCloud) clients(region string) regionClients {
 		data: dynamo.New(ddb), identity: sts.NewFromConfig(cfg), clock: date,
 		sfn: sfn.NewFromConfig(cfg), tables: awsbackfill.NewReplicas(cfg), units: awsbackfill.NewUnits(ddb, dynamodbstreams.NewFromConfig(cfg)),
 		describe: ddb, lambda: lambda.NewFromConfig(cfg), metrics: cloudwatch.NewFromConfig(cfg), bucket: s3.NewFromConfig(cfg),
+		athena: athena.NewFromConfig(cfg),
 	}
 }
 

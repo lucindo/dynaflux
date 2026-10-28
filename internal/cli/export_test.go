@@ -45,18 +45,19 @@ type Env struct {
 	// replicas of its stream tables.
 	StepFunctions map[string]StepFunctions
 	Tables        map[string]backfill.Tables
-	// AWS answers the other calls of status in each region, and Units lists the shards of
-	// its stream tables.
+	// AWS answers the other calls of status and backfill in each region, and Units lists
+	// the shards of its stream tables.
 	AWS   map[string]AWS
 	Units map[string]backfill.Lister
 }
 
-// AWS is the services that status reads in a region besides DynamoDB's tables.
+// AWS is the services that status and backfill call in a region besides DynamoDB's tables.
 type AWS interface {
 	awsbackfill.DynamoDB
 	deployed.Lambda
 	deployed.CloudWatch
 	deployed.S3
+	queryStopper
 }
 
 // StepFunctions is the Step Functions client of a region.
@@ -88,7 +89,7 @@ func (f fakeCloud) clients(region string) regionClients {
 	return regionClients{
 		data: f.Backends[region], identity: fakeIdentity(f.Account), clock: fakeClock(f.ClockAhead),
 		sfn: f.StepFunctions[region], tables: f.Tables[region], units: f.Units[region],
-		describe: a, lambda: a, metrics: a, bucket: a,
+		describe: a, lambda: a, metrics: a, bucket: a, athena: a,
 	}
 }
 

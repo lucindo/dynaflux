@@ -20,10 +20,14 @@ import (
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-// check runs the properties checked at quiescence: P0 on every change stream; P1, P3, P10
-// and the backfills' end states (P6) per region; P2 across regions. The rest of P4–P9 was
-// checked as the run went.
+// check runs the properties checked at quiescence: P0 on the acknowledged appends and on
+// every change stream; P1, P3, P10, the jobs that the archive broke (P14) and the backfills'
+// end states (P6) per region; P2 across regions; P13. The rest of P4–P9 was checked as the
+// run went. A version whose job an incomplete archive broke stays activating, so P1, P2 and
+// P6 leave it out.
 func (r *run) check(ctx context.Context) {
+	r.checkAcked()
+	r.checkReceipts(ctx)
 	divergent := r.divergentRows()
 	states := make([]*State, len(r.regions))
 	for i, rg := range r.regions {
@@ -33,6 +37,7 @@ func (r *run) check(ctx context.Context) {
 			r.violatef("P6: %s: read the view states: %v", rg.name, err)
 			continue
 		}
+		r.incomplete[rg.name] = r.checkIncomplete(ctx, rg, vs)
 		r.checkBackfills(rg.name, vs)
 		st, err := r.sys.Read(ctx, rg.mem)
 		if err != nil {
@@ -203,7 +208,9 @@ func valueText(v store.Value) string {
 func (r *run) divergentRows() map[RowID]bool {
 	o := newOracle()
 	for _, rg := range r.regions {
-		r.feed(o, rg, "P2", func(s *stream, rec projector.Record) bool { return r.divergent[tableKey{s.table, keyOf(rec.New)}] })
+		r.feed(o, rg, "P2", func(s *stream, rec projector.Record) bool {
+			return r.divergent[tableKey{s.table, store.KeyOf(rec.New)}]
+		})
 	}
 	return o.rows
 }
@@ -241,6 +248,7 @@ func (r *run) checkBackfills(region string, states map[string]meta.ViewState) {
 	for _, v := range r.cfg.Backfill {
 		vs := states[v]
 		switch {
+		case r.incomplete[region][v]:
 		case vs.State != meta.Live && vs.State != meta.Broken:
 			r.violatef("P6: %s: the backfill of %s ended %s", region, v, cmp.Or(vs.State, meta.PendingBackfill))
 		case vs.Split != meta.SplitTime:
@@ -383,9 +391,11 @@ func (r *run) poisoned(rg *region, b projector.Batch, recs []projector.Record) m
 	return views
 }
 
-// checkStream checks P0 on a region's change stream: every applied append is in it once
-// as an INSERT, and once some region deleted the item, once as a REMOVE after it; an item
-// appended in n regions has fewer than n MODIFY records. Nothing else is.
+// checkStream checks P0 on a region's change stream, for each life of each item: every
+// applied append is in it once as an INSERT, and once some region deleted the item, once as
+// a REMOVE after it, which ends the life, so a REMOVE before the INSERT leaves a life
+// without one; an item appended in n regions has fewer than n MODIFY records. Nothing else
+// is.
 func (r *run) checkStream(rg *region) {
 	for k, h := range r.histories(rg) {
 		appends, expired := r.applied[k], 0
@@ -399,31 +409,48 @@ func (r *run) checkStream(rg *region) {
 			r.violatef("P0: %s: %s %s is in the change stream as an INSERT %d times", rg.name, k.table, k.key, len(h.ins))
 		case h.mods >= appends:
 			r.violatef("P0: %s: %s %s has %d MODIFY records, but %d appends wrote it", rg.name, k.table, k.key, h.mods, appends)
-		case len(h.rem) != expired:
-			r.violatef("P0: %s: %s %s has %d REMOVE records, want %d", rg.name, k.table, k.key, len(h.rem), expired)
-		case len(h.rem) == 1 && compareSeq(h.rem[0], h.ins[0]) < 0:
-			r.violatef("P0: %s: %s %s is removed at %s, before its INSERT at %s", rg.name, k.table, k.key, h.rem[0], h.ins[0])
+		case h.rem != expired:
+			r.violatef("P0: %s: %s %s has %d REMOVE records, want %d", rg.name, k.table, k.key, h.rem, expired)
 		}
 	}
 }
 
-// history is what a region's change stream holds of one item.
-type history struct {
-	ins, rem []string // sequence numbers
-	mods     int
+// checkAcked checks P0 on the appends acknowledged as stored: each wrote its event.
+func (r *run) checkAcked() {
+	for _, a := range r.acked {
+		if !r.written[a] {
+			r.violatef("P0: %s %s %s: an append in %s was acknowledged as stored, but no append wrote its event of ingest_time %d",
+				a.table, a.key.PK, a.key.SK, a.origin, a.at)
+		}
+	}
 }
 
-// histories returns the history of each item an append applied or the region's change
-// stream holds.
-func (r *run) histories(rg *region) map[tableKey]*history {
-	hist := map[tableKey]*history{}
+// history is what a region's change stream holds of one life of an item.
+type history struct {
+	ins  []string // sequence numbers
+	rem  int
+	mods int
+}
+
+// histories returns the history of each life of an item that an append applied or the
+// region's change stream holds. A REMOVE ends a life, so the records of an item, in
+// sequence order, fall into its lives.
+func (r *run) histories(rg *region) map[lifeKey]*history {
+	hist := map[lifeKey]*history{}
 	for k := range r.applied {
 		hist[k] = &history{}
 	}
 	for _, s := range rg.order {
+		byItem := map[store.Key][]projector.Record{}
 		for _, u := range s.units {
 			for _, rec := range u.recs {
-				k := tableKey{s.table, recordKey(rec)}
+				byItem[recordKey(rec)] = append(byItem[recordKey(rec)], rec)
+			}
+		}
+		for key, recs := range byItem {
+			slices.SortFunc(recs, func(a, b projector.Record) int { return compareSeq(a.Seq, b.Seq) })
+			k := lifeKey{tableKey{s.table, key}, 0}
+			for _, rec := range recs {
 				h := hist[k]
 				if h == nil {
 					h = &history{}
@@ -435,7 +462,8 @@ func (r *run) histories(rg *region) map[tableKey]*history {
 				case projector.Modify:
 					h.mods++
 				case projector.Remove:
-					h.rem = append(h.rem, rec.Seq)
+					h.rem++
+					k.life++
 				}
 			}
 		}
@@ -455,7 +483,7 @@ func compareSeq(a, b string) int {
 func (r *run) checkRegion(region string, o *Oracle, st State, timeSplit map[string]bool, divergent map[RowID]bool) {
 	broken := func(id RowID) bool {
 		_, ok := st.Broken[id.View]
-		return ok || r.retiredIn(region, id.View) || timeSplit[id.View] && divergent[id]
+		return ok || r.retiredIn(region, id.View) || r.incomplete[region][id.View] || timeSplit[id.View] && divergent[id]
 	}
 	inexact := map[string]bool{}
 	for _, d := range diffRows(st.Rows, o.result(), broken) {
@@ -479,6 +507,8 @@ func (r *run) checkRegion(region string, o *Oracle, st State, timeSplit map[stri
 		switch {
 		case b.Split:
 			// P10 checks why.
+		case !isBroken && r.incomplete[region][view]:
+			// Its backfill evaluated none of the records at or below its fences.
 		case isBroken && len(failing) == 0:
 			r.violatef("P3: %s: view %s is broken by %v, but no record fails it", region, view, b.Record)
 		case !isBroken:
@@ -495,7 +525,8 @@ func (r *run) checkConvergence(ra, rb string, a, b State, skip map[RowID]bool) {
 	broken := func(id RowID) bool {
 		_, inA := a.Broken[id.View]
 		_, inB := b.Broken[id.View]
-		return inA || inB || skip[id] || r.retiredIn(ra, id.View) || r.retiredIn(rb, id.View)
+		return inA || inB || skip[id] || r.retiredIn(ra, id.View) || r.retiredIn(rb, id.View) ||
+			r.incomplete[ra][id.View] || r.incomplete[rb][id.View]
 	}
 	for _, d := range diffRows(a.Rows, b.Rows, broken) {
 		r.violatef("P2: %s vs %s %s", ra, rb, d.text)

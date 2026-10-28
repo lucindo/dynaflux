@@ -6,6 +6,7 @@ package runtime_test
 import (
 	"bytes"
 	"context"
+	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambdacontext"
 
 	"github.com/lucindo/dynaflux/internal/backfill"
+	"github.com/lucindo/dynaflux/internal/backfill/awsbackfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/runtime"
@@ -39,11 +41,12 @@ func (noUnits) Units(context.Context, string) ([]string, error) { return nil, ni
 type backfillRig struct {
 	*rig
 
-	m       *meta.Meta
-	runs    *backfill.MemRuns
-	buckets []string // the bucket of each invocation's runs
-	logs    *bytes.Buffer
-	invoke  func(context.Context, []byte) ([]byte, error)
+	m        *meta.Meta
+	runs     *backfill.MemRuns
+	buckets  []string // the bucket of each invocation's runs
+	archives []string // and of its archive
+	logs     *bytes.Buffer
+	invoke   func(context.Context, []byte) ([]byte, error)
 }
 
 func newBackfillRig(t *testing.T) *backfillRig {
@@ -62,6 +65,10 @@ func newBackfillRig(t *testing.T) *backfillRig {
 		Runs: func(bucket string) backfill.Runs {
 			r.buckets = append(r.buckets, bucket)
 			return r.runs
+		},
+		Archive: func(bucket string) runtime.ArchiveReader {
+			r.archives = append(r.archives, bucket)
+			return awsbackfill.NewArchive(awsbackfill.Clients{}, catalog.Naming{Store: "app"}, r.cat.Catalog(), bucket)
 		},
 	}, r.logs)
 	if err != nil {
@@ -82,7 +89,8 @@ func (r *backfillRig) step(t *testing.T, event, arn string) (string, error) {
 
 // Each invocation steps the job until it waits or ends, and tells the state machine so: a
 // time split waits until every event at or before the split can have landed, then the job
-// reads the table and fills the version. The staged runs are in the account's bucket.
+// reads the table and fills the version. The staged runs and the archive are in the
+// account's bucket.
 func TestBackfillSteps(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -114,8 +122,9 @@ func TestBackfillSteps(t *testing.T) {
 		if err != nil || j.State != meta.JobDone || j.Execution != "arn:aws:states:us-east-1:123456789012:execution:app-backfill:page_totals-v1-0a1b2c-a1" {
 			t.Errorf("job %+v, %v; want done by the execution", j, err)
 		}
-		if want := "app-123456789012-us-east-1-an"; len(r.buckets) != 2 || r.buckets[0] != want || r.buckets[1] != want {
-			t.Errorf("runs in buckets %q, want %s", r.buckets, want)
+		if want := []string{"app-123456789012-us-east-1-an", "app-123456789012-us-east-1-an"}; !slices.Equal(r.buckets, want) ||
+			!slices.Equal(r.archives, want) {
+			t.Errorf("runs in buckets %q and the archive in %q, want %q", r.buckets, r.archives, want)
 		}
 	})
 }

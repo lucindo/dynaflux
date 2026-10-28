@@ -29,36 +29,24 @@ func SourceOf(split meta.Split) Source {
 	return SourceTable
 }
 
-// ErrArchiveSource is a request for the archive source where this release can't serve it
-// (lifecycle.md §5.2, DF7503).
-var ErrArchiveSource = errors.New("backfill: the archive source isn't available")
-
 // ErrJobEnded is a cancel or a rate change of a job that is done or broken.
 var ErrJobEnded = errors.New("backfill: the job has ended")
 
-// Choose returns the split of a new job of version in region, whose deployed catalog is cat
-// (lifecycle.md §5.2). An additive version splits by fences, reading the archive, when the
-// stream is fresh, as CheckStream reports it, and the region archives it with events: all:
-// the fresh rule then most likely makes the version live without a read. Otherwise it reads
-// the table, split by time for an additive version and not split for an idempotent one,
-// which goes live as soon from an empty table and needs no archive when an event comes
-// first. want "" chooses so; SourceTable takes the table; SourceArchive takes the archive
-// where it can serve, and otherwise fails with ErrArchiveSource, naming the condition that
-// failed.
-func Choose(cat *catalog.Catalog, region, version string, fresh bool, want Source) (meta.Split, error) {
+// Choose returns the split of a new job of version in region, whose deployed catalog is cat,
+// given v, the completeness of the region's archive of the version's stream (lifecycle.md
+// §5.2): the fence split, reading the archive, whenever it is complete. Otherwise it reads the
+// table, split by time for an additive version and not split for an idempotent one. want ""
+// chooses so; SourceTable takes the table; SourceArchive takes the archive, and fails with
+// ErrIncomplete, naming the rule that failed, when it isn't complete.
+func Choose(cat *catalog.Catalog, region, version string, v Verdict, want Source) (meta.Split, error) {
 	vv, ok := cat.Version(version)
-	if !ok {
-		return "", fmt.Errorf("backfill: %s isn't in the catalog", version)
-	}
-	archived := cat.ExactHandoff(region, vv.Stream)
 	switch {
-	case fresh && archived && (want == SourceArchive || want == "" && vv.FencedHandoff()):
+	case !ok:
+		return "", fmt.Errorf("backfill: %s isn't in the catalog", version)
+	case v.Complete && want != SourceTable:
 		return meta.SplitFence, nil
-	case want == SourceArchive && !archived:
-		return "", fmt.Errorf("%w: %s doesn't archive stream %s with events: all", ErrArchiveSource, region, vv.Stream)
 	case want == SourceArchive:
-		return "", fmt.Errorf("%w: stream %s isn't fresh in %s, and this release reads the archive only of a stream without events",
-			ErrArchiveSource, vv.Stream, region)
+		return "", fmt.Errorf("%w: %s in %s: rule %d: %s", ErrIncomplete, vv.Stream, region, v.Rule, v.Reason)
 	case vv.FencedHandoff():
 		return meta.SplitTime, nil
 	}

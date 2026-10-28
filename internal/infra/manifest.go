@@ -43,6 +43,7 @@ type Scope struct {
 	StreamLookups     []StreamLookup
 	Mappings          []Mapping
 	Catalogs          []CatalogRegistration
+	ArchiveModes      []ArchiveMode
 	StateMachines     []StateMachine
 	ArchiveWorkGroups []ArchiveWorkGroup
 	ArchiveSchemas    []ArchiveSchema
@@ -307,6 +308,9 @@ type Function struct {
 	// templates are.
 	Code string
 	Env  map[string]Text
+	// After lists the IDs of the resources of its scope that it is created and updated
+	// after: a projector's, the archive mode.
+	After []string
 }
 
 // Fixed values of functions.
@@ -391,14 +395,35 @@ type CatalogRegistration struct {
 	After []string
 }
 
-// ArchiveWorkGroup is the Athena workgroup that runs the archive schema's statements and the
-// users' queries on the archive, "ArchiveWorkGroup". It uses engine version 3 and managed
-// query results, and enforces its configuration. It is deleted with its query history and
-// saved queries: Athena refuses to delete a workgroup that has run any query otherwise.
+// ArchiveMode is "ArchiveMode", which the setup function answers by recording each stream's
+// archive mode in the region's meta table, with a hole wherever a mode changes to or from
+// all (ADR 0017). Every projector waits for it, so the hole is written before any function
+// changes. Its physical ID never changes. CloudFormation can't tag it.
+type ArchiveMode struct {
+	Common
+
+	Handler   Text
+	MetaTable Text
+	// Streams maps each stream to its archive mode where the region archives, "all", "local"
+	// or ArchiveOff; elsewhere every mode is ArchiveOff.
+	Streams map[string]string
+}
+
+// ArchiveOff is the archive mode of a stream that the region doesn't archive.
+const ArchiveOff = "off"
+
+// ArchiveWorkGroup is an Athena workgroup on the archive, with engine version 3 and its
+// configuration enforced: "ArchiveWorkGroup" runs the archive schema's statements and the
+// users' queries, with managed query results, and "BackfillWorkGroup" the backfills'
+// queries, with results in the bucket. It is deleted with its query history and saved
+// queries: Athena refuses to delete a workgroup that has run any query otherwise.
 type ArchiveWorkGroup struct {
 	Common
 
 	Name Text
+	// Results is the S3 location of the query results, encrypted with SSE-S3 in a bucket
+	// that the account owns; empty for managed query results.
+	Results Text
 }
 
 // ArchiveSchema is the desired state of the archive in a region, "ArchiveSchema", which the

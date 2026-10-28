@@ -10,11 +10,9 @@ import (
 	"os"
 
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
 	fh "github.com/aws/aws-sdk-go-v2/service/firehose"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/lucindo/dynaflux"
 	"github.com/lucindo/dynaflux/internal/access"
@@ -56,14 +54,15 @@ func Run(cat *dynaflux.Catalog) error {
 		}
 		lambda.Start(newSetup(h, log))
 	case catalog.EnvModeBackfill:
-		// A custom endpoint, a test's, serves no bucket names as hosts.
-		bucket := s3.NewFromConfig(cfg, func(o *s3.Options) { o.UsePathStyle = o.BaseEndpoint != nil })
+		clients := awsbackfill.NewClients(cfg)
+		naming := catalog.Naming{Prefix: e.prefix, Store: c.Catalog().Store}
 		f, berr := newBackfill(c, e, backfillParts{
-			store:  dynamo.New(ddb),
-			units:  awsbackfill.NewUnits(ddb, dynamodbstreams.NewFromConfig(cfg)),
-			tables: awsbackfill.NewReplicas(cfg),
-			lag:    awsbackfill.NewLag(cloudwatch.NewFromConfig(cfg), catalog.Naming{Prefix: e.prefix, Store: c.Catalog().Store}, c.Catalog()),
-			runs:   func(name string) backfill.Runs { return awsbackfill.NewRuns(bucket, name) },
+			store:   dynamo.New(ddb),
+			units:   awsbackfill.NewUnits(ddb, dynamodbstreams.NewFromConfig(cfg)),
+			tables:  awsbackfill.NewReplicas(cfg),
+			lag:     awsbackfill.NewLag(clients.CloudWatch, naming, c.Catalog()),
+			runs:    func(bucket string) backfill.Runs { return awsbackfill.NewRuns(clients.S3, bucket) },
+			archive: func(bucket string) archiveReader { return awsbackfill.NewArchive(clients, naming, c.Catalog(), bucket) },
 		}, log)
 		if berr != nil {
 			return berr

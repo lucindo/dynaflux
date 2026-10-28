@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/backfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/deployed"
 	"github.com/lucindo/dynaflux/internal/diag"
@@ -83,8 +84,6 @@ func (r *regionStatus) findings(f *fleet, prefix string, now time.Time) []findin
 		case r.blocking(id):
 			fs = append(fs, r.blocked(vs, now))
 		case !defined || vs.State == meta.Live || vs.State == meta.Retired:
-		case hasJob && j.Waits != "" && (j.State == meta.JobRunning || j.State == meta.JobCancelled):
-			fs = append(fs, r.waits(j, prefix))
 		case hasJob && j.State == meta.JobRunning:
 			if e, read := r.execs[id]; read && e.ARN == "" {
 				fs = append(fs, regionFinding(r.region, diag.SeverityWarning, "DF7216",
@@ -98,6 +97,9 @@ func (r *regionStatus) findings(f *fleet, prefix string, now time.Time) []findin
 			}
 			fs = append(fs, regionFinding(r.region, diag.SeverityWarning, "DF7202", msg, "dynaflux backfill "+id+where))
 		}
+	}
+	for _, s := range r.streams {
+		fs = append(fs, r.archiveFindings(s, prefix, now)...)
 	}
 	if r.local {
 		return fs
@@ -115,14 +117,72 @@ func prefixFlag(p optionalString) string {
 	return " -prefix " + cmp.Or(p.value, `""`)
 }
 
-// waits is DF7217 for job j, which waits for the archive read of a later release.
-func (r *regionStatus) waits(j meta.Job, prefix string) finding {
-	view, _, _ := strings.Cut(j.Version, "@")
-	return regionFinding(r.region, diag.SeverityWarning, "DF7217",
-		fmt.Sprintf("the backfill of %s waits for the archive read of a later release: stream %s got an event before the job checked that it "+
-			"had none; %s stays activating, and queries return ErrViewNotReady", j.Version, j.Stream, j.Version),
-		fmt.Sprintf("to fill the view from the stream table now, run dynaflux generate -rebuild %s, deploy regional.yaml, "+
-			"run dynaflux backfill %s%s, and once it is live, dynaflux retire %s%s", view, view, prefix, j.Version, prefix))
+// noOrigin is DF7217 for stream, whose table, born at born, is less than 23 hours old and has
+// no origin in region, which archives it with events: all. st says why backfill -all recorded
+// none, when it tried; prefix is the -prefix flag.
+func noOrigin(region, stream string, born time.Time, st backfill.OriginStatus, prefix string) finding {
+	msg := fmt.Sprintf("the table of stream %s is less than 23 hours old and has no origin in %s, which archives it with events: all", stream, region)
+	run := fmt.Sprintf("run dynaflux backfill -all -region %s%s", region, prefix)
+	before := fmt.Sprintf("before %s and before the stream's first event; otherwise the archive of it in %s is never complete",
+		timeText(born.Add(backfill.FreshAge)), region)
+	hint := run + " " + before
+	switch st.State {
+	case backfill.OriginTooLate:
+		msg += "; it holds events already, so the archive of it there is never complete"
+		hint = "backfills there read the table; to keep a new stream's whole history, run dynaflux backfill -all after the deploy that adds it, before its first event"
+	case backfill.OriginWaiting:
+		hint = fmt.Sprintf("a deploy changed its archive mode: %s again after %s, %s", run, timeText(st.Until), before)
+	case backfill.OriginPending:
+		hint = fmt.Sprintf("a deploy in %s is under way: %s again once it registered its catalog, %s", region, run, before)
+	case backfill.OriginRecorded, backfill.OriginHeld:
+	}
+	return regionFinding(region, diag.SeverityWarning, "DF7217", msg, hint)
+}
+
+// archiveFindings returns what needs an action in the history of stream s in the region:
+// DF7217 when its table is less than 23 hours old and has no origin; DF7204 when its archive
+// isn't complete, for the versions activating from it; and DF7204 for each gap suspected in
+// the views applied live, for the versions activated before it that no finding named yet.
+func (r *regionStatus) archiveFindings(s streamStatus, prefix string, now time.Time) []finding {
+	var fs []finding
+	named := map[string]bool{}
+	if a := s.check; a != nil && !a.unread {
+		if a.noOrigin && !a.born.IsZero() && now.Sub(a.born) < backfill.FreshAge {
+			fs = append(fs, noOrigin(r.region, s.name, a.born, backfill.OriginStatus{}, prefix))
+		}
+		if v := a.verdict; !v.Complete {
+			ids := r.affected(s.name, named, func(vs meta.ViewState) bool { return vs.State == meta.Activating && vs.Split == meta.SplitFence })
+			if len(ids) > 0 {
+				fs = append(fs, regionFinding(r.region, diag.SeverityWarning, "DF7204",
+					fmt.Sprintf("the archive of stream %s isn't complete: %s; %s can't go live from it", s.name, v.Reason, strings.Join(ids, ", ")),
+					rebuildHint(ids, prefix)))
+			}
+		}
+	}
+	for _, v := range s.suspects {
+		ids := r.affected(s.name, named, func(vs meta.ViewState) bool { return v.At.IsZero() || vs.ActivatedAt.Before(v.At) })
+		if len(ids) > 0 {
+			fs = append(fs, regionFinding(r.region, diag.SeverityWarning, "DF7204",
+				fmt.Sprintf("a gap is suspected in stream %s: %s; %s may miss its records", s.name, v.Reason, strings.Join(ids, ", ")),
+				rebuildHint(ids, prefix)))
+		}
+	}
+	return fs
+}
+
+// affected returns the activated versions of stream, neither retired nor broken, that match
+// and that named doesn't hold, and adds them to it.
+func (r *regionStatus) affected(stream string, named map[string]bool, match func(meta.ViewState) bool) []string {
+	var ids []string
+	for _, id := range r.versionIDs() {
+		vs := r.state(id)
+		if vs.Stream != stream || vs.State == meta.Retired || vs.State == meta.Broken || vs.ActivatedAt.IsZero() || named[id] || !match(vs) {
+			continue
+		}
+		named[id] = true
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func jobError(j meta.Job) string {
@@ -206,7 +266,7 @@ func (r *regionStatus) streamFindings(f *fleet, s streamStatus, prefix string) [
 		add(diag.SeverityError, "DF7208", "the table of stream "+s.name+" has no change stream, so nothing applies its events", redeploy)
 	case !ok:
 		add(diag.SeverityError, "DF7208", "stream "+s.name+" has no event source mapping to its projector, so nothing applies its events", redeploy)
-	case !delivering(mp.State):
+	case !mp.Delivering():
 		add(diag.SeverityError, "DF7208",
 			fmt.Sprintf("the event source mapping %s of stream %s is %s, so nothing applies its events", mp.UUID, s.name, mp.State), redeploy)
 	case strings.HasPrefix(mp.LastResult, "PROBLEM"):
@@ -270,15 +330,6 @@ func (r *regionStatus) missing(stream string, g deployed.Gap) []string {
 		}
 	}
 	return ids
-}
-
-// delivering reports whether a mapping in state delivers, or soon will.
-func delivering(state string) bool {
-	switch state {
-	case "Creating", "Enabling", "Enabled", "Updating":
-		return true
-	}
-	return false
 }
 
 func timeText(t time.Time) string { return t.UTC().Format(time.RFC3339) }

@@ -157,10 +157,10 @@ func (m *merger) Pop() any {
 	return last
 }
 
-// putRun writes the records that add gives a run under a new name of the job's, ending with
-// suffix, and returns its entry, or false when add gave none.
-func (s *step) putRun(ctx context.Context, j *meta.Job, suffix string, add func(w *runWriter) error) (meta.Run, bool, error) {
-	name, err := s.runName(j, suffix)
+// putRun writes the records that add gives a run under a new name of the job's, and returns
+// its entry, or false when add gave none.
+func (s *step) putRun(ctx context.Context, j *meta.Job, add func(w *runWriter) error) (meta.Run, bool, error) {
+	name, err := s.runName(j)
 	if err != nil {
 		return meta.Run{}, false, err
 	}
@@ -181,15 +181,15 @@ func (s *step) putRun(ctx context.Context, j *meta.Job, suffix string, add func(
 	return run, ok, nil
 }
 
-// sortedRun writes buf, sorted and without repeats, as a run of the job's whose name ends with
-// suffix, and returns its entry, or false when buf is empty.
-func (s *step) sortedRun(ctx context.Context, j *meta.Job, suffix string, buf []record) (meta.Run, bool, error) {
+// sortedRun writes buf, sorted and without repeats, as a run of the job's, and returns its
+// entry, or false when buf is empty.
+func (s *step) sortedRun(ctx context.Context, j *meta.Job, buf []record) (meta.Run, bool, error) {
 	if len(buf) == 0 {
 		return meta.Run{}, false, nil
 	}
 	slices.SortFunc(buf, func(a, b record) int { return compareRecords(&a, &b) })
 	buf = slices.CompactFunc(buf, func(a, b record) bool { return repeats(&a, &b) })
-	return s.putRun(ctx, j, suffix, func(w *runWriter) error {
+	return s.putRun(ctx, j, func(w *runWriter) error {
 		for i := range buf {
 			if err := w.add(&buf[i]); err != nil {
 				return err
@@ -201,16 +201,22 @@ func (s *step) sortedRun(ctx context.Context, j *meta.Job, suffix string, buf []
 
 // runName returns a name no other writer uses: a stale or duplicate worker, whose runs have
 // other extents, can then add garbage but never replace a committed run.
-func (s *step) runName(j *meta.Job, suffix string) (string, error) {
+func (s *step) runName(j *meta.Job) (string, error) {
+	nonce, err := s.nonce()
+	return fmt.Sprintf("runs/%d-%s", j.Attempt, nonce), err
+}
+
+// nonce returns 16 hex digits from the step's entropy, which names a staged object.
+func (s *step) nonce() (string, error) {
 	var b [8]byte
 	entropy := s.env.Entropy
 	if entropy == nil {
 		entropy = rand.Reader
 	}
 	if _, err := io.ReadFull(entropy, b[:]); err != nil {
-		return "", fmt.Errorf("backfill: name a run: %w", err)
+		return "", fmt.Errorf("backfill: name a staged object: %w", err)
 	}
-	return fmt.Sprintf("runs/%d-%s%s", j.Attempt, hex.EncodeToString(b[:]), suffix), nil
+	return hex.EncodeToString(b[:]), nil
 }
 
 // mergePass merges the job's smallest chains, a fan-in of them, so that no record is merged
@@ -234,7 +240,7 @@ func (s *step) mergePass(ctx context.Context, j meta.Job, cs [][]meta.Run) error
 		return err
 	}
 	for {
-		run, wrote, perr := s.putRun(ctx, &j, "", func(w *runWriter) error { return s.mergeOutput(ctx, m, w) })
+		run, wrote, perr := s.putRun(ctx, &j, func(w *runWriter) error { return s.mergeOutput(ctx, m, w) })
 		if perr != nil {
 			return perr
 		}

@@ -15,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
+	"github.com/lucindo/dynaflux/internal/backfill"
+	"github.com/lucindo/dynaflux/internal/backfill/awsbackfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/config"
 	"github.com/lucindo/dynaflux/internal/deployed"
@@ -39,6 +41,7 @@ type deployment struct {
 	naming  catalog.Naming
 	region  string
 	clients regionClients
+	cloud   cloud // the run's, which opens another region's clients
 	meta    *meta.Meta
 	err     error // the region couldn't be read
 	// compiled and engine serve the commands that read one region's tables.
@@ -136,7 +139,7 @@ func (c *cli) openStore(ctx context.Context, name string, cfg *config.Config, pr
 	}
 	c.header(f.naming, where, f.names)
 	for _, r := range f.names {
-		d := &deployment{naming: f.naming, region: r, clients: cl.clients(r)}
+		d := &deployment{naming: f.naming, region: r, clients: cl.clients(r), cloud: cl}
 		d.meta = meta.New(d.clients.data, f.naming.MetaTable())
 		f.regions = append(f.regions, d)
 	}
@@ -236,10 +239,10 @@ func (r *regionState) job(id string) (meta.Job, bool) {
 	return r.jobs[i], true
 }
 
-// runs reports whether a backfill of version id runs: its job is running and doesn't wait.
+// runs reports whether a backfill of version id runs: its job is running.
 func (r *regionState) runs(id string) bool {
 	j, ok := r.job(id)
-	return ok && j.State == meta.JobRunning && j.Waits == ""
+	return ok && j.State == meta.JobRunning
 }
 
 // header prints the line on stderr that says where a command works: store, prefix, account
@@ -260,6 +263,18 @@ func (f *fleet) running(ctx context.Context, d *deployment, j meta.Job) ([]strin
 		return nil, err
 	}
 	return []string{e.ARN}, nil
+}
+
+// backfillEnv returns what package backfill reads of d's region, on AWS, to record the origins
+// of its archive and to judge its completeness: d's meta table, stream tables and replicas,
+// its deployed catalog, and the witness of its streams' history.
+func (f *fleet) backfillEnv(d *deployment) *backfill.Env {
+	cl := d.clients
+	w := awsbackfill.WitnessClients{DynamoDB: cl.describe, S3: cl.bucket, CloudWatch: cl.metrics, Lambda: cl.lambda}
+	return &backfill.Env{
+		Naming: f.naming, Catalog: d.cat, Hash: d.reg.Hash, Meta: d.meta, Store: cl.data, Tables: cl.tables, Region: d.region,
+		Witness: awsbackfill.NewWitness(w, f.naming, f.naming.Bucket(f.account, d.region)),
+	}
 }
 
 // machine returns the ARN of the backfill state machine in region.

@@ -118,6 +118,11 @@ func (n Naming) ArchiveWorkGroup() string {
 	return n.Base()
 }
 
+// BackfillWorkGroup names the Athena workgroup in which backfills read the archive.
+func (n Naming) BackfillWorkGroup() string {
+	return n.Base() + "-backfill"
+}
+
 // ArchiveLogGroup names the log group of the Firehose streams.
 func (n Naming) ArchiveLogGroup() string {
 	return "/aws/kinesisfirehose/" + n.Base() + "-archive"
@@ -135,6 +140,7 @@ func (n Naming) StoreResources(projectorPerStream bool) []Resource {
 		{Kind: ResourceBackfillStateMachine, Name: n.BackfillStateMachine()},
 		{Kind: ResourceArchiveDatabase, Name: n.ArchiveDatabase()},
 		{Kind: ResourceArchiveWorkGroup, Name: n.ArchiveWorkGroup()},
+		{Kind: ResourceBackfillWorkGroup, Name: n.BackfillWorkGroup()},
 	}
 	if !projectorPerStream {
 		res = append(res, Resource{Kind: ResourceProjectorFunction, Name: n.ProjectorFunction()})
@@ -217,6 +223,7 @@ const (
 	ResourceArchiveStream        ResourceKind = "Firehose stream"
 	ResourceArchiveDatabase      ResourceKind = "archive database"
 	ResourceArchiveWorkGroup     ResourceKind = "Athena workgroup"
+	ResourceBackfillWorkGroup    ResourceKind = "backfill workgroup"
 	ResourceIcebergTable         ResourceKind = "Iceberg table"
 	ResourceDedupView            ResourceKind = "Athena view"
 	ResourceBucket               ResourceKind = "S3 bucket"
@@ -236,7 +243,7 @@ func (k ResourceKind) MaxLen() int {
 		return maxDeliveryStream
 	case ResourceArchiveDatabase:
 		return maxArchiveDatabase
-	case ResourceArchiveWorkGroup:
+	case ResourceArchiveWorkGroup, ResourceBackfillWorkGroup:
 		return maxAthenaWorkGroup
 	case ResourceIcebergTable, ResourceDedupView:
 		return maxArchiveTableOrView

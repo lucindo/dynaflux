@@ -162,27 +162,39 @@ func (f fakeLambda) ListEventSourceMappings(_ context.Context, in *lambda.ListEv
 }
 
 // ReadMetrics keeps the newest value of a series that continues on a later page, converts
-// seconds, sums failed rows over every page, and leaves out a series without data.
+// seconds, takes the freshness from its datapoint's time for the delivered time, sums failed
+// rows over every page, and leaves out a series without data.
 func TestReadMetrics(t *testing.T) {
 	t.Parallel()
+	now := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	minutes := func(ms ...int) []time.Time {
+		var ts []time.Time
+		for _, m := range ms {
+			ts = append(ts, now.Add(time.Duration(-m)*time.Minute))
+		}
+		return ts
+	}
+	partial, complete := cwtypes.StatusCodePartialData, cwtypes.StatusCodeComplete
 	cw := &fakeCloudWatch{pages: map[string][]cloudwatch.GetMetricDataOutput{
 		"DeliveryToIceberg.DataFreshness": {
-			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{90, 99}}, {Id: aws.String("m1")}},
-				NextToken: aws.String("2")},
-			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{400}}}},
+			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{90, 99}, Timestamps: minutes(2, 3), StatusCode: partial},
+				{Id: aws.String("m1"), StatusCode: complete}}, NextToken: aws.String("2")},
+			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{400}, Timestamps: minutes(4), StatusCode: complete}}},
 		},
 		"DeliveryToIceberg.FailedRowCount": {
-			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{2}}}, NextToken: aws.String("2")},
-			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{3}}}},
+			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{2}, Timestamps: minutes(60), StatusCode: partial}}, NextToken: aws.String("2")},
+			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{3}, Timestamps: minutes(120), StatusCode: complete}}},
 		},
 	}}
-	now := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	m, err := deployed.ReadMetrics(t.Context(), cw, []string{"shop-archive-page_views", "shop-archive-clicks"}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := m.Freshness; len(got) != 1 || got["shop-archive-page_views"] != 90*time.Second {
 		t.Errorf("Freshness %v, want 1m30s", got)
+	}
+	if got, want := m.Delivered, time.Date(1999, 12, 31, 23, 56, 30, 0, time.UTC); len(got) != 1 || !got["shop-archive-page_views"].Equal(want) {
+		t.Errorf("Delivered %v, want %v", got, want)
 	}
 	if got := m.FailedRows; len(got) != 1 || got["shop-archive-page_views"] != 5 {
 		t.Errorf("FailedRows %v, want 5", got)

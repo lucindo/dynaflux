@@ -332,6 +332,26 @@ func TestDev(t *testing.T) {
 	}
 }
 
+// Dev stops at an event that an application appended in another region: its projector
+// would apply the event's SYNC views a second time.
+func TestDevRefusesAnotherRegion(t *testing.T) {
+	t.Parallel()
+	s := newDevStore(t)
+	r := s.start()
+	other := engine.New(dynamo.New(dynamodb.NewFromConfig(s.cfg)), engine.Options{Region: "us-west-2", Prefix: s.prefix})
+	devAppend(t, other, s.cat, "page_views", firstViews()[0].values(t))
+	select {
+	case <-r.done:
+	case <-time.After(devWait):
+		t.Fatalf("dev didn't stop at the event; it printed\n%s", r.stderr.String())
+	}
+	refusal := "an event was appended in region us-west-2, but dynaflux dev runs us-east-1, whose projector would apply its SYNC views again"
+	hint := "\n  hint: set AWS_REGION=us-east-1 in the application, as dev prints, then run dynaflux dev -reset: the stream table keeps the event\n"
+	if got := r.stderr.String(); r.status != 1 || !strings.Contains(got, "\npage_views: 1 record; failed: "+refusal+"\n") || !strings.HasSuffix(got, refusal+hint) {
+		t.Errorf("dev: status %d, stderr\n%s\nwant status 1, the batch's refusal and the hint\n%s", r.status, got, refusal+hint)
+	}
+}
+
 // devQuery is a query and its String parameter.
 type devQuery struct{ name, param string }
 

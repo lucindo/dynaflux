@@ -138,6 +138,7 @@ func (rg *region) retire() {
 		r.violatef("retire: %s: %v", rg.name, err)
 		return
 	}
+	rg.noteState(r.cfg.Retire, meta.Retired)
 	rg.tombstoned()
 }
 

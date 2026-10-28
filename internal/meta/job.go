@@ -33,7 +33,6 @@ const (
 	attrScannedAt = "scanned_at"
 	attrFresh     = "fresh"
 	attrPaused    = "paused"
-	attrWaits     = "waits"
 	attrStaging   = "staging"
 	attrStage     = "stage"
 	attrSegments  = "segments"
@@ -53,6 +52,24 @@ const (
 	attrChunks    = "chunks"
 	attrRate      = "rate"
 	attrMessage   = "message"
+
+	// The archive source's stage (encoding.md §8.3).
+	attrPlanQuery = "plan_query"
+	attrPlan      = "plan"
+	attrExport    = "export"
+	attrTry       = "try"
+	attrFailed    = "failed"
+	attrSlice     = "slice"
+	attrQuery     = "query"
+	attrFile      = "file"
+	attrSkip      = "skip"
+	attrRows      = "rows"
+	attrErrors    = "errors"
+	attrAfter     = "after"
+	attrDone      = "done"
+	attrForeign   = "foreign"
+	attrScanned   = "scanned"
+	attrTries     = "tries"
 
 	sourceArchive = "archive"
 	sourceTable   = "table"
@@ -79,14 +96,6 @@ const (
 	JobDone      JobState = "done"
 	JobBroken    JobState = "broken"
 )
-
-// Wait is what a running job waits for that this release can't do: no step runs it until a
-// later release resumes it.
-type Wait string
-
-// WaitArchive is the read of a region's archive of a stream that has events, which arrives in
-// a later release (M6): a job split by fences waits for it at its watermark.
-const WaitArchive Wait = "archive_read"
 
 // Phase is the step a backfill job is at (docs/spec/encoding.md §8.3).
 type Phase string
@@ -119,17 +128,17 @@ type Job struct {
 	ScannedAt            time.Time // table source: when the scan ended; zero before
 	Fresh                bool      // once done: whether the fresh-stream rule made the version live
 
-	Staging string // the staging prefix
-	Stage   Stage
-	Runs    []Run  // the committed runs
-	Merge   *Merge // the merge pass in progress; nil when none
-	Staged  int64  // records staged
+	Staging string       // the staging prefix
+	Stage   Stage        // the table source's
+	Archive ArchiveStage // the archive source's
+	Runs    []Run        // the committed runs
+	Merge   *Merge       // the merge pass in progress; nil when none
+	Staged  int64        // records staged
 
 	Mark                     *keys.Mark // the cursor: the mark of the last record of the last chunk done
 	Applied, Skipped, Chunks int64
 	Rate                     int       // records per second; 0 for no limit
 	Paused                   bool      // apply waits for the projector's lag to fall
-	Waits                    Wait      // what the job waits for; "" when nothing
 	Error                    *JobError // the last failure; nil when none
 
 	version int64 // _v; 0 before the item exists
@@ -140,6 +149,38 @@ type Stage struct {
 	Segments int               // the scan's segment count; 0 before staging
 	Next     map[int]store.Key // a segment → the key of the last item staged from it
 	Finished []int             // the segments read to their end
+}
+
+// ArchiveStage is where an archive source's staging resumes (ADR 0016): the error prefix,
+// then the plan of slices, then each slice's export in turn. Its times come from the stored
+// item or the plan object, in UTC to the microsecond, so two stages compare with ==.
+type ArchiveStage struct {
+	Errors    ErrorPrefix
+	PlanQuery string // the query that lists the table's partitions, saved before the job waits for it
+	Plan      string // the committed plan object's name
+	Export    Export // the current slice's try; zero before the first
+	Slice     int    // the slice being staged; the plan's slices before it are staged
+	Query     string // the slice's succeeded query, whose files are being staged
+	File      int    // the index of the file being staged in that query's manifest
+	Skip      int    // the rows of that file already staged
+	Rows      int64  // the rows staged from the slice
+	Scanned   int64  // the bytes Athena scanned for the job
+	Tries     int    // the tries that failed and the restages, in all
+}
+
+// ErrorPrefix is how far the error prefix is staged.
+type ErrorPrefix struct {
+	After   string // the last object staged
+	Done    bool
+	Foreign int64 // the lines skipped because Dynaflux didn't write them
+}
+
+// Export is a try of a slice's export.
+type Export struct {
+	From, To time.Time
+	Try      int    // from 1
+	Failed   int    // the slice's failed tries that count against its limit
+	ID       string // the query; "" until the try starts
 }
 
 // Run is a committed run of staged records.
@@ -325,11 +366,11 @@ func encodeJob(j Job) (store.Item, error) {
 	if j.Paused {
 		it[attrPaused] = store.Value{Type: store.BOOL, Bool: true}
 	}
-	if j.Waits != "" {
-		it[attrWaits] = str(string(j.Waits))
-	}
 	if s := j.Stage; s.Segments != 0 || len(s.Next) > 0 || len(s.Finished) > 0 {
 		it[attrStage] = encodeStage(s)
+	}
+	if j.Archive != (ArchiveStage{}) {
+		it[attrStage] = encodeArchiveStage(j.Archive)
 	}
 	if j.State == JobDone || j.State == JobBroken {
 		it[catalog.AttrTTL] = keys.TTL(micros(j.UpdatedAt.Add(jobLifetime)))
@@ -371,6 +412,46 @@ func encodeStage(s Stage) store.Value {
 		}
 		stage[attrFinished] = store.Value{Type: store.L, List: finished}
 	}
+	return store.Value{Type: store.M, Map: stage}
+}
+
+// encodeArchiveStage writes the fields of a that aren't zero.
+func encodeArchiveStage(a ArchiveStage) store.Value {
+	stage := map[string]store.Value{}
+	putStr := func(m map[string]store.Value, name, s string) {
+		if s != "" {
+			m[name] = str(s)
+		}
+	}
+	putNum := func(m map[string]store.Value, name string, n int64) {
+		if n != 0 {
+			m[name] = num(n)
+		}
+	}
+	if e := a.Errors; e != (ErrorPrefix{}) {
+		errs := map[string]store.Value{}
+		putStr(errs, attrAfter, e.After)
+		if e.Done {
+			errs[attrDone] = store.Value{Type: store.BOOL, Bool: true}
+		}
+		putNum(errs, attrForeign, e.Foreign)
+		stage[attrErrors] = store.Value{Type: store.M, Map: errs}
+	}
+	putStr(stage, attrPlanQuery, a.PlanQuery)
+	putStr(stage, attrPlan, a.Plan)
+	if x := a.Export; x.Try > 0 {
+		export := map[string]store.Value{attrFrom: num(micros(x.From)), attrTo: num(micros(x.To)), attrTry: num(int64(x.Try))}
+		putNum(export, attrFailed, int64(x.Failed))
+		putStr(export, attrID, x.ID)
+		stage[attrExport] = store.Value{Type: store.M, Map: export}
+	}
+	putNum(stage, attrSlice, int64(a.Slice))
+	putStr(stage, attrQuery, a.Query)
+	putNum(stage, attrFile, int64(a.File))
+	putNum(stage, attrSkip, int64(a.Skip))
+	putNum(stage, attrRows, a.Rows)
+	putNum(stage, attrScanned, a.Scanned)
+	putNum(stage, attrTries, int64(a.Tries))
 	return store.Value{Type: store.M, Map: stage}
 }
 
@@ -491,6 +572,7 @@ func (m *Meta) decodeJob(it store.Item) (Job, error) {
 	}
 	if j.Split == SplitFence {
 		j.Cut = r.instant(attrCut, false)
+		j.Archive = r.archiveStage()
 	} else {
 		j.ReadAfter = r.instant(attrReadAfter, false)
 		j.ScannedAt = r.instant(attrScannedAt, false)
@@ -501,11 +583,6 @@ func (m *Meta) decodeJob(it store.Item) (Job, error) {
 	}
 	if _, ok := it[attrPaused]; ok {
 		j.Paused = r.boolean(attrPaused)
-	}
-	if _, ok := it[attrWaits]; ok {
-		if j.Waits = Wait(r.str(attrWaits)); j.Waits != WaitArchive || j.Split != SplitFence {
-			r.failf("%s %q doesn't go with %s %q", attrWaits, j.Waits, attrSplit, j.Split)
-		}
 	}
 	if j.State == JobDone || j.State == JobBroken {
 		r.integer(catalog.AttrTTL, true)
@@ -565,6 +642,50 @@ func (r *reader) stage() Stage {
 		}
 	})
 	return s
+}
+
+// archiveStage reads an archive source's stage, whose absent fields are zero; the zero
+// ArchiveStage when it is absent.
+func (r *reader) archiveStage() ArchiveStage {
+	var a ArchiveStage
+	r.nested(attrStage, false, func(sr *reader) {
+		sr.nested(attrErrors, false, func(er *reader) {
+			a.Errors.After = er.optStr(attrAfter)
+			if _, ok := er.attrs[attrDone]; ok {
+				a.Errors.Done = er.boolean(attrDone)
+			}
+			a.Errors.Foreign = er.optCount(attrForeign)
+		})
+		a.PlanQuery, a.Plan = sr.optStr(attrPlanQuery), sr.optStr(attrPlan)
+		sr.nested(attrExport, false, func(xr *reader) {
+			a.Export = Export{
+				From: xr.instant(attrFrom, true), To: xr.instant(attrTo, true), Try: int(xr.count(attrTry)),
+				Failed: int(xr.optCount(attrFailed)), ID: xr.optStr(attrID),
+			}
+			if a.Export.Try < 1 || !a.Export.From.Before(a.Export.To) {
+				xr.failf("try %d of [%v, %v)", a.Export.Try, a.Export.From, a.Export.To)
+			}
+		})
+		a.Slice, a.Query = int(sr.optCount(attrSlice)), sr.optStr(attrQuery)
+		a.File, a.Skip, a.Rows = int(sr.optCount(attrFile)), int(sr.optCount(attrSkip)), sr.optCount(attrRows)
+		a.Scanned, a.Tries = sr.optCount(attrScanned), int(sr.optCount(attrTries))
+	})
+	return a
+}
+
+// optStr reads a string; "" when it is absent.
+func (r *reader) optStr(name string) string {
+	v, _ := r.value(name, store.S, false)
+	return v.Str
+}
+
+// optCount reads an integer that isn't negative; 0 when it is absent.
+func (r *reader) optCount(name string) int64 {
+	n, ok := r.integer(name, false)
+	if ok && n < 0 {
+		r.failf("%s is %d", name, n)
+	}
+	return n
 }
 
 func (r *reader) runs(name string) []Run {

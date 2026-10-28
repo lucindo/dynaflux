@@ -33,9 +33,10 @@ type stream struct {
 	units       []*unit // in creation order
 	open        []*unit // one per key range; together they cover every key
 	listed      bool    // whether a backfill listed the units
-	// deleted holds the items deleted here. A delete is newer than any write of its item, so
-	// a write that arrives after it is dropped.
-	deleted map[store.Key]bool
+	// deleted holds when each item was last deleted here. A delete is newer than any write
+	// of the item with an earlier ingest_time, so such a write that arrives after it is
+	// dropped; an append after it starts the item's next life.
+	deleted map[store.Key]time.Time
 }
 
 func newStream(rg *region, name, table string) *stream {
@@ -46,7 +47,7 @@ func newStream(rg *region, name, table string) *stream {
 	lo := min(maxSeqGap+1, n)
 	seq, _ := new(big.Int).SetString(firstWideSeq, 0)
 	seq.Sub(seq, big.NewInt(lo+rg.run.topo.Int64N(n-lo+1)))
-	return &stream{rg: rg, name: name, table: table, seq: seq, deleted: map[store.Key]bool{}}
+	return &stream{rg: rg, name: name, table: table, seq: seq, deleted: map[store.Key]time.Time{}}
 }
 
 // append writes an append to the replica and its change stream, then ships it to every
@@ -55,11 +56,13 @@ func (s *stream) append(ctx context.Context, it store.Item, c store.Cond) error 
 	if err := s.rg.mem.Put(ctx, s.table, it, c); err != nil {
 		return err
 	}
-	stored, err := s.rg.mem.Get(ctx, s.table, keyOf(it), true)
+	stored, err := s.rg.mem.Get(ctx, s.table, store.KeyOf(it), true)
 	if err != nil {
 		return err
 	}
-	s.rg.run.applied[tableKey{s.table, keyOf(stored)}]++
+	r := s.rg.run
+	r.applied[r.life(tableKey{s.table, store.KeyOf(stored)})]++
+	r.written[stamp(s.table, stored)] = true
 	s.emit(projector.Record{Op: projector.Insert, New: stored})
 	s.rg.sweeper.expire(s.table, stored)
 	for _, l := range s.rg.links {
@@ -71,15 +74,15 @@ func (s *stream) append(ctx context.Context, it store.Item, c store.Cond) error 
 // replicate applies a write shipped from another region as Global Tables do: the last
 // writer wins. An item not present gives an INSERT. One present, from an append of the
 // same DEDUP BY event in this region or a third, is replaced with a MODIFY by a later write,
-// by ingest_time then origin_region; an earlier write is dropped, and so is any write of an
-// item deleted here.
+// by ingest_time then origin_region; an earlier write is dropped, and so is a write of an
+// item deleted here after its ingest_time.
 func (s *stream) replicate(it store.Item) {
 	r := s.rg.run
-	if s.deleted[keyOf(it)] {
+	if at, ok := s.deleted[store.KeyOf(it)]; ok && ingestTime(it) <= at.UnixMicro() {
 		return
 	}
 	ctx := context.Background()
-	cur, err := s.rg.mem.Get(ctx, s.table, keyOf(it), true)
+	cur, err := s.rg.mem.Get(ctx, s.table, store.KeyOf(it), true)
 	if err == nil && (cur == nil || later(it, cur)) {
 		err = s.rg.mem.Put(ctx, s.table, it, store.Cond{})
 	}
@@ -91,7 +94,7 @@ func (s *stream) replicate(it store.Item) {
 		s.emit(projector.Record{Op: projector.Insert, New: it})
 	case later(it, cur):
 		r.count(&r.stats.Modifies)
-		if r.isDivergent(tableKey{s.table, keyOf(it)}) {
+		if r.isDivergent(tableKey{s.table, store.KeyOf(it)}) {
 			r.count(&r.stats.Divergent)
 		}
 		s.emit(projector.Record{Op: projector.Modify, Old: cur, New: it})
@@ -102,13 +105,10 @@ func (s *stream) replicate(it store.Item) {
 }
 
 // remove deletes an item, by a TTL delete here or one replicated from another region. It
-// emits the item's REMOVE when the item is here, and keeps any later write of it out.
+// emits the item's REMOVE when the item is here, and keeps any earlier write of it out.
 func (s *stream) remove(k store.Key) {
 	r := s.rg.run
-	if s.deleted[k] {
-		return
-	}
-	s.deleted[k] = true
+	s.deleted[k] = time.Now()
 	ctx := context.Background()
 	cur, err := s.rg.mem.Get(ctx, s.table, k, true)
 	if err == nil && cur != nil {
@@ -119,7 +119,7 @@ func (s *stream) remove(k store.Key) {
 		r.violatef("harness: %s: delete of %s %s: %v", s.rg.name, k.PK, k.SK, err)
 	case cur != nil:
 		r.count(&r.stats.Removes)
-		r.expired[tableKey{s.table, k}] = true
+		r.expired[r.life(tableKey{s.table, k})] = true
 		s.emit(projector.Record{Op: projector.Remove, Old: cur})
 	}
 }
@@ -141,8 +141,9 @@ func (s *stream) emit(rec projector.Record) {
 		u = s.unitFor(h)
 	}
 	s.seq.Add(s.seq, big.NewInt(1+s.rg.run.topo.Int64N(maxSeqGap)))
-	rec.Seq = s.seq.String()
+	rec.Seq, rec.Arrival = s.seq.String(), time.Now().Truncate(time.Second)
 	u.add(rec, h)
+	s.noteWaitable(u, rec)
 	if u.left--; u.left == 0 && !closeOnNext {
 		s.rollover(u)
 	}
@@ -402,7 +403,7 @@ func (l *link) deliverDue() {
 			r.violatef("harness: %s: a shipment arrived %v late, with the link up", l.id, now.Sub(sh.due))
 		}
 		if s := l.to.streams[sh.table]; sh.remove {
-			s.remove(keyOf(sh.item))
+			s.remove(store.KeyOf(sh.item))
 		} else {
 			s.replicate(sh.item)
 		}

@@ -23,6 +23,7 @@ import (
 const (
 	lookupTimeoutSeconds        = 300
 	catalogTimeoutSeconds       = 300
+	archiveModeTimeoutSeconds   = 300
 	archiveSchemaTimeoutSeconds = 960
 )
 
@@ -79,7 +80,7 @@ func regionalTemplate(m *infra.Manifest, version string) (*resources, *yaml.Node
 	for _, x := range s.StateMachines {
 		rs.add(x.ID, func() *yaml.Node { return stateMachine(r, x) })
 	}
-	addArchive(rs, r, s)
+	addArchive(rs, r, s, len(m.ArchiveRegions) > 0)
 	for _, x := range s.Catalogs {
 		rs.add(x.ID, func() *yaml.Node { return catalogRegistration(r, x, version) })
 	}
@@ -394,7 +395,7 @@ func function(r *resolver, f infra.Function) *yaml.Node {
 		kv("LoggingConfig", mapping(kv("LogGroup", r.value(f.LogGroup)), kv("LogFormat", str("JSON")))),
 		kv("Environment", mapping(kv("Variables", env))),
 		kv("Tags", tagMap),
-	), kv("Metadata", mapping(kv("BuildMethod", str("go1.x")))))
+	), kv("Metadata", mapping(kv("BuildMethod", str("go1.x")))), dependsOn(f.After...))
 }
 
 // lookup returns the custom resource that the setup function answers with the stream ARN
@@ -419,6 +420,28 @@ func catalogRegistration(r *resolver, x infra.CatalogRegistration, generator str
 		kv("CatalogHash", str(x.Hash)),
 		kv("Generator", str(generator)),
 	), dependsOn(x.After...))
+}
+
+// archiveMode returns the custom resource that the setup function answers by recording each
+// stream's archive mode in the meta table (ADR 0017). Where only some regions archive, a
+// stream's mode is off in the others. Modes are quoted: YAML 1.1 parsers, as SAM's, read a
+// plain off as false.
+func archiveMode(r *resolver, x infra.ArchiveMode, someRegions bool) *yaml.Node {
+	quoted := func(s string) *yaml.Node { n := str(s); n.Style = yaml.DoubleQuotedStyle; return n }
+	streams := mapping()
+	for _, s := range slices.Sorted(maps.Keys(x.Streams)) {
+		mode := quoted(x.Streams[s])
+		if someRegions && x.Streams[s] != infra.ArchiveOff {
+			mode = intrinsic("If", seq(str(inArchive), mode, quoted(infra.ArchiveOff)))
+		}
+		streams.Content = append(streams.Content, str(s), mode)
+	}
+	return resource(setup.TypeArchiveMode, mapping(
+		kv("ServiceToken", r.value(x.Handler)),
+		kv("ServiceTimeout", num(archiveModeTimeoutSeconds)),
+		kv("MetaTable", r.value(x.MetaTable)),
+		kv("Streams", streams),
+	))
 }
 
 func eventSourceMapping(r *resolver, x infra.Mapping) *yaml.Node {

@@ -35,16 +35,17 @@ func TestConformance(t *testing.T) {
 	})
 }
 
-// lossy loses the response to the next PutItem once armed: the write lands and the SDK
-// sees a connection error, as when a response is lost on the network.
+// lossy loses the response to the next request for operation (".PutItem") once armed: the
+// write lands and the SDK sees a connection error, as when a response is lost on the network.
 type lossy struct {
-	next  aws.HTTPClient
-	armed atomic.Bool
+	next      aws.HTTPClient
+	operation string
+	armed     atomic.Bool
 }
 
 func (l *lossy) Do(r *http.Request) (*http.Response, error) {
 	res, err := l.next.Do(r)
-	if err == nil && strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".PutItem") && l.armed.CompareAndSwap(true, false) {
+	if err == nil && strings.HasSuffix(r.Header.Get("X-Amz-Target"), l.operation) && l.armed.CompareAndSwap(true, false) {
 		res.Body.Close()
 		return nil, errors.New("read: connection reset by peer")
 	}
@@ -72,7 +73,7 @@ func TestRetriedWriteThroughSDK(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			l := &lossy{next: awshttp.NewBuildableClient().WithTimeout(2 * time.Second)}
+			l := &lossy{next: awshttp.NewBuildableClient().WithTimeout(2 * time.Second), operation: ".PutItem"}
 			rec := emulatortest.NewRecorder(l)
 			b := emulatortest.Backend(t, emulatortest.Config(t, rec))
 			if tt.before != nil {
@@ -105,6 +106,47 @@ func TestRetriedWriteThroughSDK(t *testing.T) {
 				t.Errorf("attempts = %q, want %q", attempts, want)
 			}
 		})
+	}
+}
+
+// A transaction whose response was lost is sent again with its token, which DynamoDB answers
+// with the first send's success without applying it twice; a resend with another token would
+// fail every condition over the transaction's own items (DynamoDB Local 3.3.2 experiment E9
+// of the M6 research).
+func TestTransactLostResponseThroughSDK(t *testing.T) {
+	t.Parallel()
+	l := &lossy{next: awshttp.NewBuildableClient().WithTimeout(2 * time.Second), operation: ".TransactWriteItems"}
+	rec := emulatortest.NewRecorder(l)
+	b := emulatortest.Backend(t, emulatortest.Config(t, rec))
+	row := func(v string) store.Item {
+		return store.Item{"pk": str("p"), "sk": str("row"), "_v": {Type: store.N, Str: v}}
+	}
+	event := store.Item{"pk": str("p"), "sk": str("event")}
+	if err := b.Put(t.Context(), "t", row("1"), store.IfAbsent()); err != nil {
+		t.Fatal(err)
+	}
+	before := len(rec.Calls())
+	l.armed.Store(true)
+	err := b.Transact(t.Context(), []store.TxPut{
+		{Table: "t", Item: event, Cond: store.IfAbsent()},
+		{Table: "t", Item: row("2"), Cond: store.IfVersion(1)},
+	})
+	if err != nil {
+		t.Fatalf("Transact = %v, want success", err)
+	}
+	var attempts []string
+	for _, c := range rec.Calls()[before:] {
+		attempts = append(attempts, fmt.Sprintf("%s: %d %s", c.Target, c.Status, c.ErrorCode))
+	}
+	tx := "DynamoDB_20120810.TransactWriteItems: "
+	if want := []string{tx + "0 ", tx + "200 "}; !reflect.DeepEqual(attempts, want) {
+		t.Errorf("attempts = %q, want %q", attempts, want)
+	}
+	for _, want := range []store.Item{event, row("2")} {
+		got, gerr := b.Get(t.Context(), "t", store.Key{PK: "p", SK: want["sk"].Str}, true)
+		if gerr != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("Get = %v, %v; want %v", got, gerr, want)
+		}
 	}
 }
 

@@ -280,6 +280,8 @@ func (q *query) followsKey(unbound []string) (bool, bool) {
 type QueryOptions struct {
 	// AllowPartial reads a view whose version isn't live, without reading its state.
 	AllowPartial bool
+	// Wait makes the query wait for the events of appends first, one token after another.
+	Wait []Wait
 }
 
 // Query runs the named query with params, in the order of its parameters, and returns its
@@ -288,7 +290,13 @@ type QueryOptions struct {
 //
 // A query over a view fails with ErrViewNotReady unless the view's current version is live
 // in the engine's region, in states read from the meta table at most
-// [meta.MaxViewStateAge] ago, or o.AllowPartial is set.
+// [meta.MaxViewStateAge] ago, or o.AllowPartial is set. A query over a SYNC version reads
+// strongly consistently, so it sees every append in the region that returned before it.
+//
+// With o.Wait, a query over a view first waits for each token's receipts ([Engine.Wait]),
+// then reads the version's state again rather than from the cache: a waited record may have
+// opened its breaker. A query over a stream only checks the tokens. Either reads strongly
+// consistently.
 func (e *Engine) Query(ctx context.Context, cat *Catalog, name string, params []expr.Value, o QueryOptions) ([][]expr.Value, error) {
 	q, ok := cat.queries[name]
 	if !ok {
@@ -302,12 +310,22 @@ func (e *Engine) Query(ctx context.Context, cat *Catalog, name string, params []
 			return nil, err
 		}
 	}
-	if q.view != nil && !o.AllowPartial {
-		if err := e.ready(ctx, cat, q.viewID); err != nil {
+	waiting := false
+	for _, w := range o.Wait {
+		if w.Token == "" {
+			continue
+		}
+		waiting = true
+		if err := e.waitFor(ctx, cat, q, w); err != nil {
 			return nil, fmt.Errorf("dynaflux: query %s: %w", name, err)
 		}
 	}
-	rows, err := e.run(ctx, cat, q, params)
+	if q.view != nil && !o.AllowPartial {
+		if err := e.ready(ctx, cat, q.viewID, waiting); err != nil {
+			return nil, fmt.Errorf("dynaflux: query %s: %w", name, err)
+		}
+	}
+	rows, err := e.run(ctx, cat, q, params, waiting)
 	if err != nil {
 		return nil, fmt.Errorf("dynaflux: query %s: %w", name, err)
 	}
@@ -317,10 +335,11 @@ func (e *Engine) Query(ctx context.Context, cat *Catalog, name string, params []
 	return rows, nil
 }
 
-// ready returns nil when view version id is live in the engine's region, and otherwise an
-// error that matches ErrViewNotReady and names the state, with a broken version's failure.
-func (e *Engine) ready(ctx context.Context, cat *Catalog, id string) error {
-	states, err := e.stateCache(e.naming(cat).MetaTable()).States(ctx, false)
+// ready returns nil when view version id is live in the engine's region, by the cached
+// states or, when fresh is set, states read now, and otherwise an error that matches
+// ErrViewNotReady and names the state, with a broken version's failure.
+func (e *Engine) ready(ctx context.Context, cat *Catalog, id string, fresh bool) error {
+	states, err := e.stateCache(e.naming(cat).MetaTable()).States(ctx, fresh)
 	if err != nil {
 		return err
 	}
@@ -347,7 +366,8 @@ func (e *Engine) stateCache(table string) *meta.StateCache {
 	return c
 }
 
-func (e *Engine) run(ctx context.Context, cat *Catalog, q *query, params []expr.Value) ([][]expr.Value, error) {
+// run reads q's rows, strongly consistently when strong is set or q reads a SYNC version.
+func (e *Engine) run(ctx context.Context, cat *Catalog, q *query, params []expr.Value, strong bool) ([][]expr.Value, error) {
 	limit, err := q.limitValue(params)
 	if err != nil || limit == 0 {
 		return nil, err
@@ -356,6 +376,7 @@ func (e *Engine) run(ctx context.Context, cat *Catalog, q *query, params []expr.
 	if err != nil {
 		return nil, err
 	}
+	r.consistent = strong || q.view != nil && consistent(q.view)
 	perCombo := 0
 	if limit > 0 && q.keyOrder {
 		perCombo = limit

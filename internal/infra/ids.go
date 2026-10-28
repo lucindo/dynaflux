@@ -37,15 +37,17 @@ func namePart(name string) string {
 
 // IDs of the resources that have no name part.
 const (
-	idMeta             = "Meta"
-	idBucket           = "Bucket"
-	idProjector        = "Projector" // the store's projector when runtime.split is store
-	idSetup            = "Setup"
-	idCatalog          = "Catalog"
-	idBackfill         = "Backfill"
-	idBackfillMachine  = "BackfillStateMachine"
-	idArchiveWorkGroup = "ArchiveWorkGroup"
-	idArchiveSchema    = "ArchiveSchema"
+	idMeta              = "Meta"
+	idBucket            = "Bucket"
+	idProjector         = "Projector" // the store's projector when runtime.split is store
+	idSetup             = "Setup"
+	idCatalog           = "Catalog"
+	idArchiveMode       = "ArchiveMode"
+	idBackfill          = "Backfill"
+	idBackfillMachine   = "BackfillStateMachine"
+	idArchiveWorkGroup  = "ArchiveWorkGroup"
+	idBackfillWorkGroup = "BackfillWorkGroup"
+	idArchiveSchema     = "ArchiveSchema"
 	// idArchive owns the log group and the role of the delivery streams, and
 	// idArchiveOptimizer the role of the table optimizers.
 	idArchive          = "Archive"

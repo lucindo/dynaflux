@@ -21,6 +21,16 @@ type Mapping struct {
 	LastResult string
 }
 
+// Delivering reports whether the mapping reads its stream, or soon will from its checkpoint:
+// it is enabled, or being created, enabled or updated.
+func (m Mapping) Delivering() bool {
+	switch m.State {
+	case "Creating", "Enabling", "Enabled", "Updating":
+		return true
+	}
+	return false
+}
+
 // Mappings lists the event source mappings that read the change stream whose ARN is stream.
 func Mappings(ctx context.Context, c Lambda, stream string) ([]Mapping, error) {
 	var out []Mapping

@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package awsbackfilltest serves, over HTTP, the AWS calls of package awsbackfill that the
-// emulator lacks, for tests: S3 objects in memory, and CloudWatch without data.
+// emulator lacks, for tests: S3 objects in memory, Athena running package archive's
+// statements over records in memory, CloudWatch with series a test sets or without data,
+// Firehose's description of a delivery stream, and Lambda's event source mappings. The
+// fakes encode our reading of AWS's documentation, which the end-to-end suite confirms.
 package awsbackfilltest
 
 import (
@@ -14,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // S3 is buckets of objects in memory behind S3's REST API, path-style, with the operations
@@ -22,20 +26,33 @@ import (
 // SDK sends them to an http endpoint. It is safe for concurrent use.
 type S3 struct {
 	mu      sync.Mutex
-	objects map[string][]byte // bucket/key → data
+	objects map[string][]byte    // bucket/key → data
+	written map[string]time.Time // bucket/key → when it was last written
 	// deny, when set, refuses a GetObject of a key it returns true for with AccessDenied, as
 	// S3 answers a missing key to a caller without s3:ListBucket.
 	deny func(key string) bool
 }
 
 // NewS3 returns an S3 with no object.
-func NewS3() *S3 { return &S3{objects: map[string][]byte{}} }
+func NewS3() *S3 { return &S3{objects: map[string][]byte{}, written: map[string]time.Time{}} }
 
 // DenyGet refuses GetObject of the keys deny returns true for with AccessDenied.
 func (s *S3) DenyGet(deny func(key string) bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deny = deny
+}
+
+// Put stores data under key in bucket, written now.
+func (s *S3) Put(bucket, key string, data []byte) {
+	s.PutAt(bucket, key, data, time.Now())
+}
+
+// PutAt stores data under key in bucket, written at at.
+func (s *S3) PutAt(bucket, key string, data []byte, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.objects[bucket+"/"+key], s.written[bucket+"/"+key] = data, at
 }
 
 // Keys returns the keys of bucket under prefix, sorted.
@@ -68,11 +85,12 @@ func (s *S3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	switch {
 	case r.Method == http.MethodPut && key != "":
-		s.objects[bucket+"/"+key] = body
+		s.objects[bucket+"/"+key], s.written[bucket+"/"+key] = body, time.Now()
 	case r.Method == http.MethodGet && key != "":
 		s.get(w, r, bucket, key)
 	case r.Method == http.MethodGet && q.Get("list-type") == "2":
-		s.list(w, bucket, q.Get("prefix"), q.Get("continuation-token"), q.Get("max-keys"))
+		after := max(q.Get("continuation-token"), q.Get("start-after"))
+		s.list(w, bucket, q.Get("prefix"), after, q.Get("max-keys"))
 	case r.Method == http.MethodPost && q.Has("delete"):
 		s.delete(w, bucket, body)
 	default:
@@ -125,23 +143,25 @@ type listResult struct {
 }
 
 type listed struct {
-	Key  string `xml:"Key"`
-	Size int    `xml:"Size"`
+	Key          string `xml:"Key"`
+	Size         int    `xml:"Size"`
+	LastModified string `xml:"LastModified"`
 }
 
-// list answers ListObjectsV2: maxKeys keys at most, 1,000 by default, after token, which is
-// the last key of the page before.
-func (s *S3) list(w http.ResponseWriter, bucket, prefix, token, maxKeys string) {
+// list answers ListObjectsV2: maxKeys keys at most, 1,000 by default, after the key after:
+// the last key of the page before, or StartAfter.
+func (s *S3) list(w http.ResponseWriter, bucket, prefix, after, maxKeys string) {
 	limit, err := strconv.Atoi(maxKeys)
 	if err != nil || limit <= 0 || limit > 1000 {
 		limit = 1000
 	}
 	keys := s.keys(bucket, prefix)
-	keys = keys[min(len(keys), sortSearch(keys, token)):]
+	keys = keys[min(len(keys), sortSearch(keys, after)):]
 	res := listResult{IsTruncated: len(keys) > limit}
 	keys = keys[:min(len(keys), limit)]
 	for _, k := range keys {
-		res.Contents = append(res.Contents, listed{Key: k, Size: len(s.objects[bucket+"/"+k])})
+		res.Contents = append(res.Contents, listed{Key: k, Size: len(s.objects[bucket+"/"+k]),
+			LastModified: s.written[bucket+"/"+k].UTC().Format("2006-01-02T15:04:05.000Z")})
 	}
 	res.KeyCount = len(keys)
 	if res.IsTruncated {
@@ -150,12 +170,12 @@ func (s *S3) list(w http.ResponseWriter, bucket, prefix, token, maxKeys string) 
 	writeXML(w, res)
 }
 
-// sortSearch returns the index of the first key after token, or 0 without a token.
-func sortSearch(keys []string, token string) int {
-	if token == "" {
+// sortSearch returns the index of the first key after after, or 0 when it is empty.
+func sortSearch(keys []string, after string) int {
+	if after == "" {
 		return 0
 	}
-	i, found := slices.BinarySearch(keys, token)
+	i, found := slices.BinarySearch(keys, after)
 	if found {
 		i++
 	}

@@ -136,6 +136,16 @@ func Owner(kind byte, unitKey, seq string) (string, error) {
 	return string(kind) + unitKey + seq, nil
 }
 
+// OwnerEvent returns the owner of the uniqExact markers that a SYNC append's transaction
+// writes (encoding.md §7.4): E, then the event's 26-character event_id. It fails for any
+// other input.
+func OwnerEvent(eventID string) (string, error) {
+	if _, ok := decodeBase32(eventID, eventHashLen); !ok {
+		return "", fmt.Errorf("marker owner: %q is not an event_id", eventID)
+	}
+	return "E" + eventID, nil
+}
+
 // appendBase32 appends base32(b) (encoding.md §4): b read as one big-endian number,
 // left-padded with zero bits to a multiple of 5.
 func appendBase32(dst, b []byte) []byte {

@@ -1,0 +1,46 @@
+{
+  "format": 1,
+  "views": {
+    "quota_usage": [
+      {
+        "number": 1,
+        "state": "current",
+        "fingerprint": "5f024e9cea63e1113127173985e0bc66880ff047ba442c590ade6cdff45af802",
+        "mode": "sync",
+        "stream": "api_calls",
+        "keys": [
+          {
+            "name": "account_id",
+            "expr": {
+              "op": "column",
+              "type": "String",
+              "name": "account_id"
+            }
+          }
+        ],
+        "partition_key_len": 1,
+        "split": 1,
+        "aggregates": [
+          {
+            "fn": "count",
+            "type": "UInt64",
+            "name": "calls"
+          },
+          {
+            "fn": "sum",
+            "args": [
+              {
+                "op": "column",
+                "type": "UInt32",
+                "name": "units"
+              }
+            ],
+            "type": "UInt64",
+            "name": "used"
+          }
+        ],
+        "storage_format": 1
+      }
+    ]
+  }
+}

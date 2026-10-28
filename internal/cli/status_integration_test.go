@@ -101,9 +101,56 @@ func TestStatusOnDynamoDBLocal(t *testing.T) {
 		Region: emulatortest.Region, Account: account, Backends: map[string]store.Backend{emulatortest.Region: s.b},
 		StepFunctions: map[string]cli.StepFunctions{emulatortest.Region: steps},
 		AWS:           map[string]cli.AWS{emulatortest.Region: healthyAWS(s.naming, emulatortest.Region, compile(t, s.dir).Catalog)},
+		Tables:        map[string]backfill.Tables{emulatortest.Region: &fakeReplicas{born: map[string]time.Time{}}},
 	})
 	if want := "us-east-1: warning DF7216: the backfill of plan_counts@v1 is interrupted: its execution " + arn + " ended without finishing\n"; !strings.Contains(stderr.String(), want) {
 		t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+	}
+}
+
+// status judges the region's archive on DynamoDB Local by the holes its meta table records
+// after each stream's origin: a lag is a suspected gap for the versions activated before it,
+// and a change of the archive mode leaves a version activating with the fence split without
+// a way to go live.
+func TestStatusArchiveOnDynamoDBLocal(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := newLocalStore(t)
+	born := time.Now().Add(-72 * time.Hour)
+	all := map[string]meta.ArchiveMode{"page_views": meta.ArchiveAll, "signups": meta.ArchiveAll}
+	must(t, s.meta.ApplyArchiveModes(ctx, nil, all, true, born))
+	for _, stream := range []string{"page_views", "signups"} {
+		item, _, err := s.meta.Stream(ctx, stream)
+		must(t, err)
+		_, err = s.meta.RecordOrigin(ctx, item, meta.Origin{At: born.Add(time.Hour), Hash: "0123456789ab", RegisteredAt: born, Born: born,
+			ARN: streamARN(s.naming, emulatortest.Region, stream)})
+		must(t, err)
+	}
+	_, err := s.meta.Activate(ctx, "plan_counts@v1", "signups", meta.SplitFence, meta.DefaultBounds)
+	must(t, err)
+	at := time.Now().Add(time.Second).UTC().Truncate(time.Second)
+	must(t, s.meta.MarkLag(ctx, "page_views", at))
+	must(t, s.meta.ApplyArchiveModes(ctx, all, map[string]meta.ArchiveMode{"page_views": meta.ArchiveAll, "signups": meta.ArchiveOff}, false, at))
+
+	var stdout, stderr strings.Builder
+	status := cli.Run(ctx, []string{"status", "-endpoint", s.endpoint, "-prefix", s.naming.Prefix}, nil, &stdout, &stderr, s.dir)
+	when := at.Format(time.RFC3339)
+	for _, want := range []string{
+		"us-east-1: warning DF7204: a gap is suspected in stream page_views: a projector handled a record almost 24 hours old at " + when +
+			"; gone@v1, page_counts@v1 may miss its records\n",
+		"us-east-1: warning DF7204: the archive of stream signups isn't complete: a deploy changed its archive mode from all to off at " + when +
+			"; plan_counts@v1 can't go live from it\n  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, " +
+			"and run dynaflux backfill plan_counts -prefix " + s.naming.Prefix + "\n",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+		}
+	}
+	if want := "  stream signups: archive not complete: a deploy changed its archive mode from all to off at " + when + "\n"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout lacks %q:\n%s", want, stdout.String())
+	}
+	if status != 1 {
+		t.Errorf("status %d, want 1", status)
 	}
 }
 

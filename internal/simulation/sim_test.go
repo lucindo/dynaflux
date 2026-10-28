@@ -86,11 +86,11 @@ func outlivesWindow(sc simulation.Scenario) bool {
 // happen.
 func TestSim(t *testing.T) {
 	t.Parallel()
-	sys := newPageViews(t)
+	system := systems(t)
 	for _, sc := range simulation.Scenarios() {
 		t.Run(sc.Name, func(t *testing.T) {
 			t.Parallel()
-			runTier(t, sc, sys, outlivesWindow(sc), func(t *testing.T, seed int, out simulation.Outcome) {
+			runTier(t, sc, system(sc), outlivesWindow(sc), func(t *testing.T, seed int, out simulation.Outcome) {
 				t.Helper()
 				report(t, sc, seed, out)
 			})
@@ -158,10 +158,73 @@ func checkTier(t *testing.T, sc simulation.Scenario, prunes bool, total simulati
 	if sc.Backfill.Within > 0 && (min(total.Backfills, total.Chunks) == 0 || !sc.Backfill.Table && total.Unlisted == 0) {
 		t.Errorf("no backfill went live, or no unit was created after a listing: %+v", total)
 	}
+	checkConflictsTier(t, sc, total)
+	checkSyncTier(t, sc, total)
+	checkWaitTier(t, sc, total)
 	checkJobsTier(t, sc, total)
 	checkSplitTier(t, sc, total)
 	checkRegionsTier(t, sc, total)
 	checkBuildsTier(t, sc, total)
+	checkHistoryTier(t, sc, total)
+	checkExportTier(t, sc, total)
+}
+
+// checkExportTier fails t when a tier of sc ran no export of the archive where jobs read it,
+// or, in the full tier, made none of the export faults and commit failures sc sets happen.
+func checkExportTier(t *testing.T, sc simulation.Scenario, total simulation.Stats) {
+	t.Helper()
+	a := sc.Archive
+	if sc.Backfill.Within > 0 && !sc.Backfill.Table && total.Exports == 0 ||
+		*full && (a.Timeout > 0 && total.Halved == 0 || a.Fail > 0 && total.FailedTries == 0 || a.Commit > 0 && total.CommitFailures == 0) {
+		t.Errorf("no export ran, or none timed out or failed, or no commit failed: %+v", total)
+	}
+}
+
+// checkHistoryTier fails t when a tier of sc didn't make the archive history it sets up: the
+// CLI recorded no origin, no deploy changed archiving, or no projector stalled into a lag,
+// or no job then found its archive incomplete.
+func checkHistoryTier(t *testing.T, sc simulation.Scenario, total simulation.Stats) {
+	t.Helper()
+	h := sc.History
+	if h.Origins > 0 && total.Origins == 0 || h.Toggle > 0 && total.Toggles == 0 || h.Stall > 0 && min(total.Stalls, total.Lags) == 0 ||
+		h != (simulation.History{}) && total.Incomplete == 0 {
+		t.Errorf("no origin was recorded, no deploy changed archiving, no projector stalled into a lag, or no job found its archive incomplete: %+v", total)
+	}
+}
+
+// checkConflictsTier fails t when a tier of sc didn't make the conflict and throttling
+// faults it sets happen.
+func checkConflictsTier(t *testing.T, sc simulation.Scenario, total simulation.Stats) {
+	t.Helper()
+	if f := sc.Faults; f.Conflict > 0 && total.Conflicts == 0 || f.InProgress > 0 && total.InProgress == 0 ||
+		f.AppliedThrottled > 0 && total.AppliedThrottled == 0 || f.AppliedConflict > 0 && total.AppliedConflicts == 0 {
+		t.Errorf("a conflict or throttling fault never happened: %+v", total)
+	}
+}
+
+// checkSyncTier fails t when a tier of a sync scenario landed no event with its SYNC rows,
+// sent no append with a variant catalog, put no event that names versions alone, or
+// appended no event again where sc sets them, or, in the full tier, refused no poison
+// event.
+func checkSyncTier(t *testing.T, sc simulation.Scenario, total simulation.Stats) {
+	t.Helper()
+	if !strings.HasPrefix(sc.Name, "sync") {
+		return
+	}
+	if total.Synced == 0 || sc.Variant > 0 && min(total.Variants, total.SyncedAlone) == 0 || sc.Reappend > 0 && total.Reappends == 0 ||
+		*full && sc.Poison > 0 && total.Refused == 0 {
+		t.Errorf("no event landed with its SYNC rows, or a writer never used a variant, put an event alone, appended again or had a poison event refused: %+v", total)
+	}
+}
+
+// checkWaitTier fails t when a tier of sc, which asks for receipts, landed none, or its
+// readers never got rows after a wait or, in the full tier, never timed out or found the
+// version not live.
+func checkWaitTier(t *testing.T, sc simulation.Scenario, total simulation.Stats) {
+	t.Helper()
+	if sc.Waitable > 0 && (min(total.Receipts, total.Waits) == 0 || *full && min(total.WaitTimeouts, total.WaitsNotReady) == 0) {
+		t.Errorf("no receipt landed, or no wait returned rows, timed out or found its version not live: %+v", total)
+	}
 }
 
 // checkJobsTier fails t when a tier of sc didn't take both paths of a fresh stream, or didn't
@@ -233,20 +296,22 @@ func add(total *simulation.Stats, s simulation.Stats) {
 	}
 }
 
-// TestDeterministic runs two seeds of late, which has every fault, twice each: a seed's run
-// is the same every time, and two seeds differ. The full tier adds regions, which cuts
-// regions off and deletes events, and runs four seeds of each.
+// TestDeterministic runs two seeds of late, which has every fault, and of sync, whose
+// writers retry transactions, twice each: a seed's run is the same every time, and two seeds
+// differ. The full tier adds regions, which cuts regions off and deletes events, and runs
+// four seeds of each.
 func TestDeterministic(t *testing.T) {
 	t.Parallel()
-	sys := newPageViews(t)
-	names, n := []string{"late"}, 2
+	system := systems(t)
+	names, n := []string{"late", "sync"}, 2
 	if *full {
 		names, n = append(names, "regions"), 4
 	}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			replay(t, scenario(t, name), sys, n)
+			sc := scenario(t, name)
+			replay(t, sc, system(sc), n)
 		})
 	}
 }
@@ -343,7 +408,8 @@ func TestControl(t *testing.T) {
 	}
 	c, ok := environmentControls(t)[*controlID]
 	if !ok {
-		c = envControl{scenario(t, *scenarioName), newPageViews(t)}
+		sc := scenario(t, *scenarioName)
+		c = envControl{sc, systems(t)(sc)}
 	}
 	if *want == "" {
 		t.Fatal("set -sim.want to the property the control breaks")
@@ -416,8 +482,8 @@ type buggy struct {
 	once atomic.Bool // for bugs that strike once per run
 }
 
-func (s *buggy) NewCore(b store.Backend, a simulation.Archiver, cat *projector.Compiled) simulation.Core {
-	return buggyCore{Core: s.pageViews.NewCore(b, a, cat), sys: s, b: b}
+func (s *buggy) NewCore(region string, b store.Backend, a simulation.Archiver, cat *projector.Compiled) simulation.Core {
+	return buggyCore{Core: s.pageViews.NewCore(region, b, a, cat), sys: s, b: b}
 }
 
 type buggyCore struct {
@@ -443,7 +509,7 @@ func (c buggyCore) Handle(ctx context.Context, b projector.Batch) (projector.Res
 // TestChangeStreamCheck: P0 catches a change stream that repeats an append, lacks one, or
 // holds one that no append wrote; that lacks the REMOVE of a deleted item, holds one of an
 // item never deleted, or one before its INSERT; or that holds a MODIFY of an event appended
-// in one region only.
+// in one region only. An item appended again after its REMOVE is in it once more.
 func TestChangeStreamCheck(t *testing.T) {
 	t.Parallel()
 	a, b := event("a"), event("b")
@@ -458,25 +524,31 @@ func TestChangeStreamCheck(t *testing.T) {
 		return projector.Record{Op: projector.Remove, Seq: seq, Old: it}
 	}
 	for _, tc := range []struct {
-		name             string
-		applied, deleted []store.Item
-		records          []projector.Record
-		want             int
+		name                    string
+		applied, deleted, again []store.Item
+		records                 []projector.Record
+		want                    int
 	}{
-		{"each append once", []store.Item{a, b}, nil, []projector.Record{ins(b, narrow), ins(a, wide)}, 0},
-		{"an append twice", []store.Item{a, b}, nil, []projector.Record{ins(a, narrow), ins(b, narrow), ins(a, wide)}, 1},
-		{"an append missing", []store.Item{a, b}, nil, []projector.Record{ins(a, narrow)}, 1},
-		{"a record without an append", []store.Item{a}, nil, []projector.Record{ins(a, narrow), ins(b, wide)}, 1},
-		{"a REMOVE past the width boundary", []store.Item{a}, []store.Item{a}, []projector.Record{ins(a, narrow), rem(a, wide)}, 0},
-		{"a REMOVE missing", []store.Item{a}, []store.Item{a}, []projector.Record{ins(a, narrow)}, 1},
-		{"a REMOVE of an item never deleted", []store.Item{a}, nil, []projector.Record{ins(a, narrow), rem(a, wide)}, 1},
-		{"a REMOVE before its INSERT", []store.Item{a}, []store.Item{a}, []projector.Record{rem(a, narrow), ins(a, wide)}, 1},
-		{"a MODIFY of an event appended twice", []store.Item{a, a}, nil, []projector.Record{ins(a, narrow), mod(a, wide)}, 0},
-		{"a MODIFY of an event appended once", []store.Item{a}, nil, []projector.Record{ins(a, narrow), mod(a, wide)}, 1},
+		{"each append once", []store.Item{a, b}, nil, nil, []projector.Record{ins(b, narrow), ins(a, wide)}, 0},
+		{"an append twice", []store.Item{a, b}, nil, nil, []projector.Record{ins(a, narrow), ins(b, narrow), ins(a, wide)}, 1},
+		{"an append missing", []store.Item{a, b}, nil, nil, []projector.Record{ins(a, narrow)}, 1},
+		{"a record without an append", []store.Item{a}, nil, nil, []projector.Record{ins(a, narrow), ins(b, wide)}, 1},
+		{"a REMOVE past the width boundary", []store.Item{a}, []store.Item{a}, nil, []projector.Record{ins(a, narrow), rem(a, wide)}, 0},
+		{"a REMOVE missing", []store.Item{a}, []store.Item{a}, nil, []projector.Record{ins(a, narrow)}, 1},
+		{"a REMOVE of an item never deleted", []store.Item{a}, nil, nil, []projector.Record{ins(a, narrow), rem(a, wide)}, 1},
+		{"a REMOVE before its INSERT", []store.Item{a}, []store.Item{a}, nil, []projector.Record{rem(a, narrow), ins(a, wide)}, 2},
+		{"a MODIFY of an event appended twice", []store.Item{a, a}, nil, nil, []projector.Record{ins(a, narrow), mod(a, wide)}, 0},
+		{"a MODIFY of an event appended once", []store.Item{a}, nil, nil, []projector.Record{ins(a, narrow), mod(a, wide)}, 1},
+		{"an append again after a REMOVE", []store.Item{a}, []store.Item{a}, []store.Item{a},
+			[]projector.Record{ins(a, "100000000000000000001"), rem(a, "100000000000000000002"), ins(a, "100000000000000000003")}, 0},
+		{"an append again without the REMOVE", []store.Item{a}, []store.Item{a}, []store.Item{a},
+			[]projector.Record{ins(a, "100000000000000000001"), ins(a, "100000000000000000003")}, 2},
+		{"an append again missing", []store.Item{a}, []store.Item{a}, []store.Item{a},
+			[]projector.Record{ins(a, "100000000000000000001"), rem(a, "100000000000000000002")}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := simulation.CheckChangeStream(tc.applied, tc.deleted, tc.records)
+			got := simulation.CheckChangeStream(tc.applied, tc.deleted, tc.again, tc.records)
 			p0 := slices.DeleteFunc(slices.Clone(got), func(v string) bool { return !strings.HasPrefix(v, "P0:") })
 			if len(got) != tc.want || len(p0) != tc.want {
 				t.Errorf("violations %q, want %d of P0", got, tc.want)

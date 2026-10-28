@@ -13,7 +13,10 @@
 // A run checks these properties:
 //   - P0: every applied append is in each region's change stream exactly once as an INSERT,
 //     and once as a later REMOVE when some region deleted it; there is a MODIFY of it only
-//     when other regions appended it too.
+//     when other regions appended it too. An event appended again after its REMOVE starts
+//     the item's next life, which is checked the same way. An append acknowledged as stored,
+//     not as a duplicate, wrote its event: an item with its key, origin_region and
+//     ingest_time.
 //   - P1: each region's views equal the oracle over that region's records. A version retired
 //     in the region is left out, and once its tombstone could be cached no invocation that
 //     starts writes it.
@@ -24,9 +27,10 @@
 //   - P3: a view is broken exactly when a record fails its evaluation; a live view, by
 //     the time a Handle that evaluated the record returns without error. A version split by
 //     time may break by its split instead, which P10 checks.
-//   - P4: a row item holds high-water marks only for the units of its view's stream that
-//     are still delivering or finished within W plus two lifetimes (and the lateness of a
-//     late write), and the backfill's.
+//   - P4: a row item that a single-item write stores holds high-water marks only for the
+//     units of its view's stream that are still delivering or finished within W plus two
+//     lifetimes (and the lateness of a late write), and the backfill's. A transaction's row
+//     writes are P11c's.
 //   - P5: row versions rise by one; marker owners, progress and fences never go back.
 //   - P6: the run reaches quiescence within its budget, every backfilled version live or
 //     broken.
@@ -40,12 +44,38 @@
 //     its split, and only by an INSERT at or before its split time that a batch started at
 //     or after its late bound, or by a MODIFY whose images straddle the split time; a version
 //     whose region holds such a MODIFY is broken.
+//   - P11: an event whose _sync names a view version V lands only in a transaction of its
+//     writer's region (a) that writes, of the SYNC versions, the rows of the versions _sync
+//     names, every row of V that the event reaches by the oracle, or alone when it reaches
+//     no row of them; (b) V was live in that region's meta at some moment from 30 s before
+//     the append's call to the landing; and (c) the transaction's row writes keep _hwm, the
+//     backfill's mark included, as stored.
+//   - P12: a receipt lands in a region only for an INSERT of its change stream that an append
+//     there asked one for, and only once the progress of the record's unit in the region's
+//     meta covers the record: the projector handled it, and no fence can make it the
+//     projector's again.
+//   - P13: at quiescence each region holds the receipt of every INSERT that an append there
+//     asked one for, and no other region holds it.
+//   - P14: a region's archive of a stream backs a job split by fences only while complete
+//     (ADR 0017): (a) an origin lands only while the region's functions archive the stream;
+//     when the functions stop or start archiving it, and when a unit's progress passes a
+//     record that entered the stream a day before, the stream item already holds a hole
+//     after its origin; (b) a job moves from stage to apply only after its step read the
+//     stream item while, by the model, an origin had landed under a registered catalog that
+//     archives every event of the stream, and neither change happened since; (c) a job that
+//     ends broken while its version isn't names an archive rule; (d) a job marks its error
+//     prefix read only when no object of a commit that failed had landed when its step last
+//     listed the prefix.
+//   - P15: a view query that waited for an append's event and returned rows read a version
+//     that was live in the region at some moment after the event's receipt first landed, and
+//     whose rows that the event reaches by the oracle hold it, by their high-water marks or by
+//     the unit's progress.
 //
 // A run also fails when one invocation has two identical requests in flight (D3): the
 // seed can't order them, so the run wouldn't replay. It fails, too, when an append returns
-// ErrDuplicate though its write found no other call's event, or success though it did
-// ("events:"), and when a Handle reports more divergent MODIFY records than its batch
-// holds ("Stats:").
+// ErrDuplicate though its write found no other call's event, or success though it did, or
+// another error than ErrEvaluation for a poison event ("events:"), and when a Handle reports
+// more divergent MODIFY records than its batch holds ("Stats:").
 package simulation
 
 import (
@@ -85,6 +115,12 @@ type Config struct {
 	// Retire names a version, live from the start and additive, that a scenario with
 	// Builds.Retire retires.
 	Retire string
+	// Variants are catalogs that writers append with instead of Catalog, as Scenario.Variant
+	// says: the same versions in other modes, such as with every view ASYNC.
+	Variants []*engine.Catalog
+	// Params holds, by name, the value of each named query's parameter that reads every row
+	// of the query's view. Readers query with them.
+	Params map[string]expr.Value
 }
 
 // System is the code under test with its reference semantics.
@@ -92,9 +128,9 @@ type System interface {
 	Config() Config
 	// Event returns the n-th event to append. A poison event fails the evaluation of a view.
 	Event(r *rand.Rand, n int, poison bool) Event
-	// NewCore returns a new container's core, running cat, or the system's catalog when cat
-	// is nil; b and a carry the region's faults.
-	NewCore(b store.Backend, a Archiver, cat *projector.Compiled) Core
+	// NewCore returns a new container's core of region, running cat, or the system's catalog
+	// when cat is nil; b and a carry the region's faults.
+	NewCore(region string, b store.Backend, a Archiver, cat *projector.Compiled) Core
 	// Expect feeds an oracle one INSERT record of a region's stream. A region's oracle gets
 	// each record once, whatever the deliveries were; P3 also feeds the records of a batch
 	// to an oracle of their own, to learn which views they fail.
@@ -110,6 +146,9 @@ type Event struct {
 	// Divergent, when set, is what a writer appends in a second region instead of Vals: the
 	// same DEDUP BY identity with other values, which regions may keep apart (sql.md §8.5).
 	Divergent []expr.Value
+	// Poison is set by the run for a poison event; a SYNC append of it may fail with
+	// ErrEvaluation.
+	Poison bool
 }
 
 // Scenario configures one kind of run.
@@ -125,6 +164,14 @@ type Scenario struct {
 	// Duplicate is the share of a DEDUP BY stream's events that a writer appends in a
 	// second region too, as a client that fails over does.
 	Duplicate float64
+	// Variant is the share of appends that a writer sends with one of Config.Variants.
+	Variant float64
+	// Reappend is the share of a DEDUP BY stream's events that a writer appends again once
+	// the run expired their items in every region, as TTL deletes do.
+	Reappend float64
+	// Waitable is the share of appends that ask for a receipt. A reader waits for each such
+	// append that stored its event, and appends again ask as the first did.
+	Waitable  float64
 	Faults    Faults
 	Topology  Topology
 	Isolation Isolation
@@ -134,23 +181,40 @@ type Scenario struct {
 	Backfill  Backfill
 	Builds    Builds
 	TimeSplit TimeSplit
+	History   History
 	// Budget is the fake time a seed has to reach quiescence (P6).
 	Budget time.Duration
 	Seeds  struct{ Smoke, Full int }
 }
 
 // Faults are the per-request fault rates and the response times of the store and the
-// archive.
+// archive. A transaction gets the faults of a conditional write but Late and
+// AppliedConflict, and InProgress of its own.
 type Faults struct {
 	Transient float64 // fails without effect
 	Ambiguous float64 // a write applies, but its caller sees a timeout
-	Retried   float64 // a conditional write applies, then fails its condition on the SDK's retry
-	Crash     float64 // the invocation dies
-	Spike     float64 // the response takes up to SpikeMax longer
-	Late      float64 // a core's write lands up to LateMax after its deadline; the core dies
-	Latency   time.Duration
-	SpikeMax  time.Duration
-	LateMax   time.Duration
+	// Retried: a conditional write applies, then fails its condition on the SDK's retry; a
+	// transaction's resend without its token fails every condition over its own items.
+	Retried float64
+	Crash   float64 // the invocation dies
+	Spike   float64 // the response takes up to SpikeMax longer
+	Late    float64 // a core's write lands up to LateMax after its deadline; the core dies
+	// Conflict: a store write fails without effect with store.ErrConflict, as one that meets
+	// a transaction.
+	Conflict float64
+	// InProgress: a transaction holds its items, so other writes to them conflict, and
+	// commits up to HoldMax later; its caller gets the commit's outcome.
+	InProgress float64
+	// AppliedThrottled: a store write applies, then its caller sees store.ErrThrottled, as
+	// when the SDK's retries after a lost response were throttled.
+	AppliedThrottled float64
+	// AppliedConflict: a single-item write applies, then its caller sees store.ErrConflict,
+	// as when the SDK's retry after a lost response met a transaction.
+	AppliedConflict float64
+	Latency         time.Duration
+	SpikeMax        time.Duration
+	LateMax         time.Duration
+	HoldMax         time.Duration
 }
 
 // Topology shapes the change streams.
@@ -199,12 +263,26 @@ type ESM struct {
 	Slow   float64 // one response of an invocation stalls until near its deadline
 }
 
-// Archive models Firehose delivering into Iceberg.
+// Archive models Firehose delivering into Iceberg, and Athena reading it.
 type Archive struct {
 	MinDelay, MaxDelay time.Duration // from an acknowledged put to delivery
 	Dup                float64       // a record is delivered twice
 	Error              float64       // a record goes to the error prefix instead
 	Lie                bool          // the watermark reports complete too early
+	// Commit is the chance that the records of a put fail to commit: no table gets them, and an
+	// error object names their data files instead. Foreign is the chance that an object of the
+	// error prefix also holds a line that Dynaflux didn't write.
+	Commit, Foreign float64
+	// Freshness, when set, makes the watermark CloudWatch's: Firehose samples DataFreshness that
+	// often while it holds a record, and CloudWatch stamps the samples by a clock up to Skew off.
+	// Otherwise the watermark knows when every record arrived.
+	Freshness, Skew time.Duration
+	// RecordBytes is the Parquet bytes each record stands for in the table's partitions, which
+	// size the slices of an export; 0 for 1.
+	RecordBytes int64
+	// Timeout is the chance that an export of a slice two hours or longer times out, and Fail
+	// that the first try of a slice's export fails; either leaves some of its files.
+	Timeout, Fail float64
 }
 
 // Backfill configures the backfills of the versions that [Config] names: one job per version
@@ -298,7 +376,21 @@ type Outcome struct {
 // Tombstones the regions that retired Config.Retire. Skewed counts the appends a writer's
 // clock shifted, LateLandings the replicated writes that landed past TimeSplit.Landing,
 // TimeSplits the versions split by time that ended live, and SplitBreaks those that its split
-// broke.
+// broke. Transactions counts the transactions sent, Conflicts the writes that failed with
+// store.ErrConflict without effect, injected or held off by a transaction in progress,
+// InProgress the transactions that held their items, and AppliedThrottled and
+// AppliedConflicts the writes that applied before their caller saw an error. Synced counts
+// the events that landed in a transaction with their SYNC rows, SyncedAlone those whose
+// _sync named versions that they reach no row of, put alone, Variants the appends sent
+// with a variant catalog, Refused the poison events a SYNC append refused, and Reappends
+// the events appended again after they expired. Receipts counts the receipts that landed,
+// and of the readers' waits, Waits those that returned rows, WaitTimeouts those that timed
+// out, and WaitsNotReady those whose version wasn't live. Toggles counts the deploys that
+// stopped or started archiving a stream, Origins the origins the CLI recorded, Stalls the
+// regions whose mappings stalled, Lags the progress writes that passed a record a day old,
+// and Incomplete the jobs that ended broken on an archive that wasn't complete. Exports counts
+// the exports Athena ran, Halved those that timed out, FailedTries those that failed, and
+// CommitFailures the puts whose records failed to commit.
 type Stats struct {
 	Requests, Transient, Ambiguous, Retried, Spikes, Crashes, Killed, Late, Slow int64
 	Invocations, Timeouts, Stale, Dups, Empty, Containers, Units, Poison         int64
@@ -307,6 +399,11 @@ type Stats struct {
 	Fresh, Resumed, Twins, Lost                                                  int64
 	Deploys, Guarded, Tombstones                                                 int64
 	Skewed, LateLandings, TimeSplits, SplitBreaks                                int64
+	Transactions, Conflicts, InProgress, AppliedThrottled, AppliedConflicts      int64
+	Synced, SyncedAlone, Variants, Refused, Reappends                            int64
+	Receipts, Waits, WaitTimeouts, WaitsNotReady                                 int64
+	Toggles, Origins, Stalls, Lags, Incomplete                                   int64
+	Exports, Halved, FailedTries, CommitFailures                                 int64
 }
 
 // Run runs seed of sc against sys in its own synctest bubble and checks the properties.

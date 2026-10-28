@@ -188,9 +188,7 @@ func TestBatchErrorNeedsTheLoop(t *testing.T) {
 		rejected := call(2)
 		rejected.Price = mustDecimal("1.234")
 		tok, err := fluxgen.AppendEvents(t.Context(), s, cat, "api_calls", []apiCall{stored, rejected, call(3)}, (*apiCall).fields)
-		// DEDUP BY event IDs don't depend on the store, so this names events 0 and 2.
-		want, werr := fluxgen.AppendEvents(t.Context(), newStore(mem.New()), cat, "api_calls", []apiCall{stored, call(3)}, (*apiCall).fields)
-		if werr != nil || tok != want {
+		if want := secondCallToken(t, cat, stored, call(3)); tok != want {
 			t.Errorf("got token %q, want %q, which names the duplicate and the stored event", tok, want)
 		}
 		// The single check says "duplicate" although event 1 wasn't stored.
@@ -214,6 +212,22 @@ func TestBatchErrorNeedsTheLoop(t *testing.T) {
 			t.Errorf("events %v not stored and %d failures, want [1] and 2", notStored, len(be.Unwrap()))
 		}
 	})
+}
+
+// secondCallToken returns the token of a batch of first and next appended to a new store
+// after first alone: DEDUP BY event IDs don't depend on the store, and an engine's second
+// call gets the same ingest_time in the bubble.
+func secondCallToken(t *testing.T, cat *dynaflux.Catalog, first, next apiCall) dynaflux.Token {
+	t.Helper()
+	s := newStore(mem.New())
+	if _, err := fluxgen.AppendEvent(t.Context(), s, cat, "api_calls", first.fields()); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := fluxgen.AppendEvents(t.Context(), s, cat, "api_calls", []apiCall{first, next}, (*apiCall).fields)
+	if !errors.Is(err, dynaflux.ErrDuplicate) {
+		t.Fatalf("the batch: %v, want only the first event a duplicate", err)
+	}
+	return tok
 }
 
 func TestFieldTypeMismatch(t *testing.T) {

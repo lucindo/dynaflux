@@ -209,7 +209,7 @@ func newQueryStore(t *testing.T, sql string) *queryStore {
 		cat:   cat,
 		mem:   m,
 		e:     engine.New(reads, engine.Options{Region: "us-east-1", Entropy: rand.NewChaCha8([32]byte{})}),
-		core:  projector.New(cat.Projector(), m, nil, projector.Config{Naming: naming}),
+		core:  projector.New(cat.Projector(), m, nil, projector.Config{Naming: naming, Region: "us-east-1"}),
 		reads: reads,
 		units: splitUnits(4),
 	}

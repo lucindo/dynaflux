@@ -73,13 +73,15 @@ func (rg *region) backfillEnv() backfill.Env {
 	r := rg.run
 	return backfill.Env{
 		Naming:  r.cfg.Naming,
-		Catalog: r.cfg.Catalog.Catalog(),
+		Catalog: r.archivedCat,
 		Hash:    r.catalogHash,
 		Meta:    meta.New(rg.store, r.meta),
 		Store:   rg.store,
 		Units:   lister{rg},
 		Tables:  tables{rg},
 		Archive: archiveReader{rg},
+		Region:  rg.name,
+		Witness: witness{rg},
 		Runs:    gatedRuns{rg},
 		Lag:     lagger{rg},
 		Bounds:  meta.DefaultBounds,
@@ -96,7 +98,7 @@ func (d *driver) run() {
 		d.rg.backfilling--
 		r.settle(1)
 	}()
-	start := between(d.rng, 0, r.sc.Backfill.Within)
+	start := r.sc.History.Deployed + between(d.rng, 0, r.sc.Backfill.Within)
 	if r.sc.Backfill.Together {
 		start = d.rg.backfillStart
 	}
@@ -195,10 +197,8 @@ func (d *driver) step(id string, rng *rand.Rand, attempt int, timeout time.Durat
 
 // failed reports, as a violation, an error that no fault explains.
 func (d *driver) failed(err error) bool {
-	for _, injected := range []error{errTransient, errAmbiguous, errTimeout, errCrashed, context.DeadlineExceeded} {
-		if errors.Is(err, injected) {
-			return false
-		}
+	if injected(err) || errors.Is(err, errTimeout) || errors.Is(err, errCrashed) || errors.Is(err, context.DeadlineExceeded) {
+		return false
 	}
 	d.rg.run.violatef("backfill: %s: %v", d.id, err)
 	return true

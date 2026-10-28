@@ -49,6 +49,10 @@ func Run(t *testing.T, newBackend func(t *testing.T) store.Backend) {
 	t.Run("DeepCopies", s.checkDeepCopies)
 	t.Run("InvalidRequests", s.checkInvalidRequests)
 	t.Run("TooLarge", s.checkTooLarge)
+	t.Run("TransactWritesAll", s.checkTransactWritesAll)
+	t.Run("TransactConditions", s.checkTransactConditions)
+	t.Run("TransactRefusals", s.checkTransactRefusals)
+	t.Run("TransactCopies", s.checkTransactCopies)
 }
 
 // suite gives each check, a parallel subtest, a backend of its own.

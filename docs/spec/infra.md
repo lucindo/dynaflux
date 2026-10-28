@@ -118,6 +118,7 @@ length budget that `validate` checks.
 | State machine log group | `/aws/vendedlogs/states/{base}-backfill` | `/aws/vendedlogs/states/prod-analytics-backfill` |
 | Glue database | `{base}` with every `-` replaced by `_` | `prod_analytics` |
 | Athena workgroup | `{base}` | `prod-analytics` |
+| Backfill workgroup | `{base}-backfill` | `prod-analytics-backfill` |
 | Iceberg table | `{stream}` | `page_views` |
 | Athena view, one row per event | `{stream}_dedup` | `page_views_dedup` |
 | Firehose stream | `{base}-archive-{stream}` | `prod-analytics-archive-page_views` |
@@ -231,7 +232,7 @@ event source mappings write what they discard to it.
 | Object ownership | `BucketOwnerEnforced`: no ACLs |
 | Encryption | SSE-S3 (`AES256`) |
 | Versioning | On |
-| Lifecycle | Abort incomplete multipart uploads after 7 days. Delete noncurrent versions after 30 days, and remove expired delete markers. Under `backfill/`, delete objects 30 days after they were written, and noncurrent versions after 1 day. Nothing else expires current objects. |
+| Lifecycle | Abort incomplete multipart uploads after 7 days. Delete noncurrent versions after 30 days, and remove expired delete markers. Under `backfill/` and `athena/backfill/`, delete objects 30 days after they were written, and noncurrent versions after 1 day. Nothing else expires current objects. |
 | Bucket policy | Deny every request made without TLS (`aws:SecureTransport` is `false`). |
 | Deletion and replacement | `RetainExceptOnCreate`; `Retain` on replacement |
 
@@ -248,7 +249,8 @@ event source mappings write what they discard to it.
 | `warehouse/<database>/<stream>/iceberg/` | Firehose, the setup function, the table optimizers | One Iceberg table per archived stream ([§7.3](#73-tables-and-columns)). |
 | `errors/firehose/<stream>/` | Firehose | Records that Firehose couldn't deliver. |
 | `aws/lambda/<mapping UUID>/<shard ID>/YYYY/MM/DD/…` | Lambda | What an event source mapping discarded. Lambda chooses this key. |
-| `backfill/<version>/<created>/` | The backfill function | A job's staged runs ([lifecycle.md §5.3](lifecycle.md#53-staging)), deleted when its version goes live. A job that finds one expired stages again. |
+| `backfill/<version>/<created>/` | The backfill function, and Athena for it | A job's staged runs ([lifecycle.md §5.3](lifecycle.md#53-staging)), and with the archive source its slice plan and, under `unload/`, the exports of its slices. Deleted when its version goes live. A job that finds one expired stages again. |
+| `athena/backfill/` | Athena | The results of the backfill workgroup's queries ([§7.1](#71-resources)): each export's data manifest, and the archive's partition listing. |
 
 ## 6. Functions and event source mappings
 
@@ -375,6 +377,30 @@ region, one execution per attempt ([lifecycle.md §5.4](lifecycle.md#54-jobs),
 - `Catalog` depends on the backfill function too, so a deploy registers its catalog only
   once the function runs it ([§6.4](#64-catalog-registration)).
 
+### 6.6 Archive mode
+
+`ArchiveMode`, a `Custom::DynafluxArchiveMode` custom resource that the setup function
+serves, records each stream's archive mode in the region's meta table before any function
+changes. A backfill trusts the region's archive of a stream only from an origin with no
+change of that mode since ([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete),
+[ADR 0017](../decisions/0017-archive-completeness.md)).
+
+| Property | Value |
+|----------|-------|
+| `MetaTable` | The meta table. |
+| `Streams` | Each stream's archive mode in this region: `all`, `local` or `off`. With `archive.regions`, `Fn::If` on `InArchive` gives `off` in the other regions. |
+
+- It is in every region, archiving or not, and every projector function depends on it, so
+  CloudFormation updates it before the projectors.
+- On create and update, a stream without a stream item gets one with its mode
+  ([encoding.md §8.5](encoding.md#85-stream-item)). A stream whose mode changes to or from
+  `all` gets its new mode and a hole in one write. A stream missing from the old or new
+  properties counts as `off`. A rollback is an update with the properties swapped, so it
+  records another hole. Delete writes nothing.
+- Its physical ID is `<meta table>/archive-mode`, so it is never replaced. It times out
+  after 300 seconds, and retries `AccessDenied` for about 60 seconds while new permissions
+  take effect.
+
 ## 7. Archive
 
 `regional.yaml` has the archive resources when at least one stream is archived
@@ -392,6 +418,7 @@ in `ArchiveSchema`. Its Iceberg table, data and optimizers stay.
 | Logical ID | Type | Settings |
 |------------|------|----------|
 | `ArchiveWorkGroup` | `AWS::Athena::WorkGroup` | Engine version 3, managed query results, configuration enforced. `RecursiveDeleteOption: true`: Athena refuses to delete a workgroup that has run any query otherwise, and the setup function runs queries in it on every deploy. Deleting it deletes its query history and saved queries, so don't save queries you want to keep in it. |
+| `BackfillWorkGroup` | `AWS::Athena::WorkGroup` | `{base}-backfill`: engine version 3, results under `athena/backfill/` in the bucket with SSE-S3 and the account as expected bucket owner, configuration enforced, `RecursiveDeleteOption: true`. A backfill's Athena queries run in it ([lifecycle.md §5.3](lifecycle.md#53-staging)): an export's data manifest is written to the results location, which the archive workgroup's managed results would keep out of the job's reach. |
 | `ArchiveSchema` | `Custom::DynafluxArchiveSchema` | The Glue database, the Iceberg tables and their optimizers ([§7.2](#72-archive-schema)). `Retain`. |
 | `Firehose<Stream>` | `AWS::KinesisFirehose::DeliveryStream` | [§7.4](#74-firehose-streams) |
 | `LogsArchive`, `LogStream<Stream>` | `AWS::Logs::LogGroup`, `AWS::Logs::LogStream` | Firehose's log group, kept 30 days, with one log stream per Firehose stream. |
@@ -544,14 +571,17 @@ change and a new Dynaflux release.
   that needs them. The backfill role's statements that grow with the store go in customer
   managed policies of its own ([§9.6](#96-backfill-role)). No AWS managed policies.
 - Resources are exact ARNs, taken from the resources themselves. `*` appears only for
-  actions that have no resource type: `dynamodb:ListStreams`, `cloudwatch:GetMetricData` and
-  Step Functions' log delivery. There are no wildcard ARNs such as
+  actions that have no resource type: `dynamodb:ListStreams`, `cloudwatch:GetMetricData`,
+  `cloudwatch:ListMetrics`, `lambda:ListEventSourceMappings` and Step Functions' log
+  delivery. There are no wildcard ARNs such as
   `table/{base}-view-*`: one would also match the tables of another store named
   `{store}-view-…`.
 - Statements about archive resources exist only in archive regions.
-- No role can call `dynamodb:DeleteItem`, `UpdateItem` or the transaction actions: the
-  runtime always writes whole items
-  ([ADR 0004](../decisions/0004-runtime-storage-boundary.md)).
+- No role can call `dynamodb:DeleteItem` or `UpdateItem`: the runtime always writes whole
+  items ([ADR 0004](../decisions/0004-runtime-storage-boundary.md)). No generated role
+  writes in a transaction either. IAM has no transaction action: it governs a transaction's
+  writes as `PutItem` and its condition checks as `GetItem`
+  ([ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md)).
 - Functions publish metrics in CloudWatch embedded metric format logs, so no role needs
   `cloudwatch:PutMetricData`.
 - A trust policy names the service, with a condition only where the service documents one:
@@ -653,7 +683,10 @@ versions.
 
 Trusts `lambda.amazonaws.com`. The statements in the first table are inline; those of the
 second name every stream and view table, so they go in managed policies attached to the
-role, `RoleBackfillPolicy<n>`, as many as fit 6,144 characters each.
+role, `RoleBackfillPolicy<n>`, as many as fit 6,144 characters each. The statements whose
+names start with `Archive` exist only in archive regions: a job reads the archive with them
+([ADR 0016](../decisions/0016-archive-export-with-athena.md),
+[ADR 0017](../decisions/0017-archive-completeness.md)).
 
 | Statement | Actions | Resources | Condition |
 |-----------|---------|-----------|-----------|
@@ -662,6 +695,19 @@ role, `RoleBackfillPolicy<n>`, as many as fit 6,144 characters each.
 | `Metrics` | `cloudwatch:GetMetricData` | `*` | |
 | `Staging` | `s3:DeleteObject`, `GetObject`, `PutObject` | `backfill/*` in the bucket | |
 | `StagingList` | `s3:ListBucket` | The bucket | `s3:prefix` starts with `backfill/` |
+| `ArchiveQueries` | `athena:GetQueryExecution`, `GetQueryResults`, `StartQueryExecution`, `StopQueryExecution` | The backfill workgroup | |
+| `ArchiveAthenaCatalog` | `glue:GetDatabase`, `GetDatabases` | The Glue catalog and `database/default`, which Athena needs in every region | |
+| `ArchiveCatalog` | `glue:GetDatabase`, `GetPartitions`, `GetTable`, `GetTables` | The Glue catalog, the archive database and its tables | |
+| `ArchiveFiles` | `s3:GetObject` | `warehouse/<database>/*` in the bucket | |
+| `ArchiveList` | `s3:ListBucket` | The bucket | `s3:prefix` is `warehouse/<database>` or starts with `warehouse/<database>/` |
+| `ArchiveResults` | `s3:AbortMultipartUpload`, `GetObject`, `ListMultipartUploadParts`, `PutObject` | `athena/backfill/*` in the bucket | |
+| `ArchiveResultsList` | `s3:ListBucket` | The bucket | `s3:prefix` starts with `athena/backfill/` |
+| `ArchiveBucketLocation` | `s3:GetBucketLocation` | The bucket | None: the request has no prefix |
+| `ArchiveErrors` | `s3:GetObject` | `errors/firehose/*` in the bucket | |
+| `ArchiveErrorsList` | `s3:ListBucket` | The bucket | `s3:prefix` starts with `errors/firehose/` |
+| `ArchiveGaps` | `s3:GetObject` | `aws/lambda/*` in the bucket | |
+| `ArchiveGapsList` | `s3:ListBucket` | The bucket | `s3:prefix` starts with `aws/lambda/` |
+| `ArchiveEvidence` | `cloudwatch:ListMetrics`, `lambda:ListEventSourceMappings` | `*` | |
 
 | Statement | Actions | Resources |
 |-----------|---------|-----------|
@@ -669,9 +715,17 @@ role, `RoleBackfillPolicy<n>`, as many as fit 6,144 characters each.
 | `StreamTables` | `dynamodb:DescribeTable` | The stream tables in every region of `regions`: a job checks every replica's creation time |
 | `Streams` | `dynamodb:DescribeStream` | The streams of the stream tables in this region |
 | `Views` | `dynamodb:BatchGetItem`, `GetItem`, `PutItem` | The table of every current and retained view version |
+| `ArchiveDelivery` | `firehose:DescribeDeliveryStream` | The Firehose streams of the region |
 
 The function reads the projectors' `IteratorAge` with `GetMetricData`, and pauses while they
-are more than 5 minutes behind. M6 adds the grants to read the archive.
+are more than 5 minutes behind. From the archive, it also reads the Firehose streams' data
+freshness and the stream tables' and projectors' hourly metrics, and lists the metrics and
+the event source mappings, for the completeness rules.
+
+Athena reads the Glue catalog and the archive's files, and writes an export's files under
+`backfill/` and `athena/backfill/`, with the backfill role's credentials. So the backfill
+relies on plain IAM access to the Glue Data Catalog too ([§11](#11-deploying)): under Lake
+Formation, its queries fail.
 
 ### 9.7 Backfill state machine role
 
@@ -704,16 +758,17 @@ matches the tables of a store named `{store}-view-…`.
 | `dynamodb:GetItem` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-view-{view}-v{N}` | | `inspect` |
 | `dynamodb:BatchGetItem` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-view-{view}-v{N}` | | `query` |
 | `dynamodb:Query` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-view-{view}-v{N}`, `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `inspect`, `query` |
-| `dynamodb:Scan` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `backfill` |
+| `dynamodb:Scan` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `backfill`, `import` |
 | `dynamodb:PutItem` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `import` |
-| `dynamodb:DescribeTable` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `status`, `backfill` |
+| `dynamodb:DescribeTable` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}` | | `status`, `backfill`, `import` |
 | `dynamodb:DescribeStream` | `arn:{partition}:dynamodb:{region}:{account}:table/{base}-stream-{stream}/stream/*` | | `status` |
-| `lambda:ListEventSourceMappings`, `cloudwatch:GetMetricData` | `*` | | `status` |
-| `s3:ListBucket` | `arn:{partition}:s3:::{base}-{account}-{region}-an` | `s3:prefix` is `aws/lambda/` | `status` |
-| `s3:GetObject` | `arn:{partition}:s3:::{base}-{account}-{region}-an/aws/lambda/*` | | `status` |
+| `lambda:ListEventSourceMappings`, `cloudwatch:GetMetricData` | `*` | | `status`, `backfill` |
+| `s3:ListBucket` | `arn:{partition}:s3:::{base}-{account}-{region}-an` | `s3:prefix` is `aws/lambda/` | `status`, `backfill` |
+| `s3:GetObject` | `arn:{partition}:s3:::{base}-{account}-{region}-an/aws/lambda/*` | | `status`, `backfill` |
 | `states:StartExecution` | `arn:{partition}:states:{region}:{account}:stateMachine:{base}-backfill` | | `backfill` |
 | `states:DescribeExecution` | `arn:{partition}:states:{region}:{account}:execution:{base}-backfill:*` | | `status`, `backfill` |
 | `states:StopExecution` | `arn:{partition}:states:{region}:{account}:execution:{base}-backfill:*` | | `backfill` |
+| `athena:StopQueryExecution` | `arn:{partition}:athena:{region}:{account}:workgroup/{base}-backfill` | | `backfill` |
 
 - `status`, `diff`, `inspect` and `query` only read. `backfill` and `retire` write meta
   items, `backfill` also scans stream tables and starts and stops executions of the backfill
@@ -723,12 +778,44 @@ matches the tables of a store named `{store}-view-…`.
   ([§5.2](#52-bucket)), the projectors' and the archive's metrics, and the event source
   mappings of each stream. `cloudwatch:GetMetricData` and `lambda:ListEventSourceMappings`
   have no resource type, so they take `*`.
-- `backfill` describes a stream table in every region of `regions`, even with `-region`:
-  before a new job, it checks every replica's age to tell whether the stream is fresh
-  ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)).
+- `status` and `backfill` judge whether each region's archive of a stream is complete
+  ([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete)) from the stream's meta
+  item, its table's replicas, its event source mappings, Lambda's on-failure records and
+  hourly metrics of the table's writes and the projectors' invocations. `backfill` records
+  origins with `PutItem` on the meta table, after a scan of the stream table, and
+  `backfill -cancel` stops the Athena query of a job's archive read, which runs in the
+  backfill workgroup.
+- `backfill` and `status` describe a stream table in every region of `regions`, even with
+  `-region`: they check every replica's age, to tell whether the stream is fresh
+  ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)) and whether its origin still holds.
+  `import` does too, into a stream that a region archives with `events: all`, and then
+  reads the stream's meta item in each such region; where it has no origin, a scan of the
+  region's replica, with `Limit` 1, tells whether one can still be recorded (DF7406).
 - Every command also calls STS `GetCallerIdentity`, which needs no permission. With
   `-endpoint`, the commands reach only DynamoDB Local, and need no AWS permission. `init`,
   `validate`, `explain`, `generate`, `dev` and `version` never call AWS.
+
+### 9.9 Applications
+
+`generate` writes no policy for applications either. An application's role needs these, in
+each region it uses, with the ARN forms of [§9.8](#98-operators)
+([ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md),
+[ADR 0015](../decisions/0015-wait-tokens-and-receipts.md)):
+
+| Actions | Resources | Condition | For |
+|---------|-----------|-----------|-----|
+| `dynamodb:PutItem` | `table/{base}-stream-{stream}` | | Appends and `Import<Stream>` |
+| `dynamodb:Query` | `table/{base}-stream-{stream}` | | `Read<Stream>` and queries over a stream |
+| `dynamodb:GetItem`, `BatchGetItem`, `Query` | `table/{base}-view-{view}-v{N}` | | Queries over a view |
+| `dynamodb:Query` | `table/{base}-meta` | `ForAllValues:StringEquals` on `dynamodb:LeadingKeys`: `view` | Queries over a view, and appends to a stream with a `SYNC` view: both read the versions' states |
+| `dynamodb:GetItem`, `BatchGetItem` | `table/{base}-view-{view}-v*`, for each `SYNC` view of the streams it appends to | | `SYNC` appends read rows and markers |
+| `dynamodb:PutItem` | The same tables | `ForAnyValue:StringEquals` on `dynamodb:EnclosingOperation`: `TransactWriteItems` | `SYNC` appends write rows and markers, only in their transactions |
+| `dynamodb:BatchGetItem` | `table/{base}-meta` | `ForAllValues:StringLike` on `dynamodb:LeadingKeys`: `rcpt#*` | `WaitFor` reads receipts |
+
+Each new version of a view is a new table, so name a `SYNC` view's tables by the pattern
+`{base}-view-{view}-v*`: a policy that lists today's tables fails every `SYNC` append after
+the view's next backfill. The pattern also matches the tables of another store named
+`{store}-view-{view}-v…`.
 
 ## 10. Alarms and dashboard
 
@@ -783,7 +870,8 @@ so new view versions appear without a change to the template.
 **Before the first deploy:**
 
 - Lake Formation must leave plain IAM access to the Glue Data Catalog in place, which is the
-  default (`IAMAllowedPrincipals` keeps its permissions). The archive uses IAM only.
+  default (`IAMAllowedPrincipals` keeps its permissions). The archive, and the backfill's
+  Athena queries over it, use IAM only.
 - Choose the home region for `global.yaml`, one of `regions`. It can't move later.
 
 **Build** the runtime binary once, from the project root, after `dynaflux generate`:
@@ -825,7 +913,10 @@ sam deploy --stack-name prod-analytics-regional --region us-east-1 \
 
 **After the first deploy,** run `dynaflux backfill -all -yes` before the application: every
 view version returns `ErrViewNotReady` to queries until a backfill makes it `live`
-([lifecycle.md §2](lifecycle.md#2-deploying-changes)). Its permissions are in
+([lifecycle.md §2](lifecycle.md#2-deploying-changes)). It also records each archived
+stream's origin, which it can do only before the stream's first event and within 23 hours
+of the `global.yaml` deploy; without one, backfills in that region never read the archive
+([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete)). Its permissions are in
 [§9.8](#98-operators).
 
 **After the table optimizers first run,** set a retention on the two log groups that Glue
@@ -846,14 +937,14 @@ region.
 |--------|------------------------------|
 | New column | Deploy `regional.yaml` in every region. `ArchiveSchema` adds the column to the archive table before CloudFormation updates the projector. |
 | New view version | Deploy `regional.yaml` in every region. The new table exists before the code that writes it. Then run `dynaflux backfill <view>`: the version's queries return `ErrViewNotReady` until it is `live` ([lifecycle.md §2](lifecycle.md#2-deploying-changes)). |
-| New stream | Deploy `global.yaml` (a new table, with every replica), then `regional.yaml` in every region (its lookup, mapping and archive table), then run `dynaflux backfill -all`. Do all three before the application writes to the stream: a version of a stream without events goes `live` without reading it ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)). Deploy the regional stacks within hours of the global one: a stream keeps records for 24 hours, and a mapping created later misses older ones. |
+| New stream | Deploy `global.yaml` (a new table, with every replica), then `regional.yaml` in every region (its lookup, mapping and archive table), then run `dynaflux backfill -all`. Do all three before the application writes to the stream, and the backfill within 23 hours of the global deploy: a version of a stream without events goes `live` without reading it ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)), and `backfill -all` records the stream's archive origin, which it can't after the first event ([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete)). Deploy the regional stacks within hours of the global one: a stream keeps records for 24 hours, and a mapping created later misses older ones. |
 | Retire a view version | Run `dynaflux retire <view>@v<N>`, with each environment's `-prefix`, then `generate`, and deploy `regional.yaml` in every region. CloudFormation deletes the version's table at the end of the update ([lifecycle.md §8](lifecycle.md#8-retiring-a-version)). |
-| Roll back, or deploy an older build | Never past a view version that is `activating` or `live` in the region: the older build can't apply it, so its stream stops in that region until a build that defines it is deployed again (`dynaflux status` reports DF7209). `Catalog` registers the older catalog again ([§6.4](#64-catalog-registration)). A rollback doesn't undo a retire. |
+| Roll back, or deploy an older build | Never past a view version that is `activating` or `live` in the region: the older build can't apply it, so its stream stops in that region until a build that defines it is deployed again (`dynaflux status` reports DF7209). `Catalog` registers the older catalog again ([§6.4](#64-catalog-registration)). A rollback doesn't undo a retire. Never to a build before M6 while an application appends to a stream with a `SYNC` view: older projectors don't skip the versions its transactions applied ([lifecycle.md §2](lifecycle.md#2-deploying-changes)). |
 | Change `runtime.split` | Deploy `regional.yaml`. Functions are created and deleted, and the mappings are updated in place. |
 | Change capacity | Deploy the template that holds the table. DynamoDB lets a table switch from provisioned to on-demand at most 4 times in 24 hours. |
 | Add a region | One region per change (`generate` refuses more, DF6017), and nothing else in the same deploy. Add it to `regions`, run `generate`, and deploy `global.yaml`: DynamoDB copies the existing items to the new replica, which can take hours. Then deploy `regional.yaml` in the new region, and run `dynaflux backfill -all -region <region>`. Its view versions hold only the events inside each stream's `LOG RETENTION`, and `status` labels them partial ([lifecycle.md §10](lifecycle.md#10-regions-and-environments)). |
 | Remove a region | Never the home region. Delete the region's regional stack. Run `generate --unprotect-region <region>` and deploy `global.yaml`, which turns off deletion protection on that region's replicas; `generate` refuses to remove the region before that (DF6018). Then remove the region from `regions`, run `generate`, and deploy `global.yaml`: DynamoDB deletes the region's replicas, with their data. The region's bucket and Glue database stay. |
-| Stop archiving a stream: `enabled: false`, a dropped stream, or a shorter `archive.regions` | CloudFormation deletes the Firehose stream, and Firehose doesn't promise to deliver the records it still buffers (up to 300 seconds or 128 MiB), although the projector counted them as sent. To drop a stream: stop writing to it, wait until the projector's iterator age is near 0 and the archive's data freshness has drained, then deploy. For a stream that stays, the archive may miss up to one buffer before the change; when only `archive.regions` shrinks, the other regions' archives keep their copies. The Glue database, the Iceberg tables and their files stay, and archiving again goes on with them. |
+| Stop archiving a stream: `enabled: false`, a dropped stream, or a shorter `archive.regions` | CloudFormation deletes the Firehose stream, and Firehose doesn't promise to deliver the records it still buffers (up to 300 seconds or 128 MiB), although the projector counted them as sent. To drop a stream: stop writing to it, wait until the projector's iterator age is near 0 and the archive's data freshness has drained, then deploy. For a stream that stays, the archive may miss up to one buffer before the change; when only `archive.regions` shrinks, the other regions' archives keep their copies. The Glue database, the Iceberg tables and their files stay, and archiving again goes on with them. `ArchiveMode` records the change as a hole in the region's archive history of the stream, so from then on that region's backfills read the table ([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete)); so does archiving again. |
 | Drop a stream | Its Global Table, Iceberg table and archive files stay; its mapping, lookup and Firehose stream go. Delete what stays by hand. |
 | Change `prefix` or `store` | Deploy new stacks. Updating an existing stack fails: the setup function's ARN changes, and a custom resource's service token can't. The stack policy also refuses to replace stream tables. |
 
@@ -919,7 +1010,7 @@ archived streams and 60 provisioned view versions pass the limit. Roles have the
 | VPC | The functions call only AWS APIs; a VPC would add NAT gateway or endpoint costs. |
 | An SNS topic | Pass your own as `AlarmTopicArn` ([§2](#2-parameters)). |
 | A permissions boundary | One can be added to the existing roles in place when an account requires it. |
-| IAM policies for operators and applications | With exact ARNs, such a policy outgrows IAM's limits as a store grows. [§9.8](#98-operators) lists what each command needs, and the [two-region example](../../examples/analytics/README.md#use-it-from-an-application) shows an application's policy. |
+| IAM policies for operators and applications | With exact ARNs, such a policy outgrows IAM's limits as a store grows. [§9.8](#98-operators) lists what each command needs, [§9.9](#99-applications) what an application needs, and the [two-region example](../../examples/analytics/README.md#use-it-from-an-application) shows an application's policy. |
 | A region check | `global.yaml` fails in a region outside `regions`, because its own region must hold a replica, and `regional.yaml` fails at the stream lookup ([§6.2](#62-stream-arn-lookup)). |
 
 ## 15. Not in these templates yet
@@ -927,7 +1018,6 @@ archived streams and 60 provisioned view versions pass the limit. Roles have the
 | What | When | Why |
 |------|------|-----|
 | The query function, direct invoke, function URLs, API Gateway HTTP and REST APIs, custom domains and Route 53 records | M6 | The query handler and its front doors arrive together in M6, with their authentication settings ([config.md](config.md#http)). |
-| Permissions to read the archive for a backfill or a query | M6 | They follow the archive reader's design ([lifecycle.md §5.2](lifecycle.md#52-sources)). |
 | Checks of the deployed stacks that `status` doesn't make yet: the event source mappings' settings against [§8](#8-fixed-values), stream replicas outside `regions`, the archive schema and the optimizer runs in each region | M7 | `status` covers the states, jobs, mappings, lag, archive freshness and gaps ([lifecycle.md §12](lifecycle.md#12-diagnostics)). |
 | Orphan-file removal for the archive tables | When a store needs it | Table locations already can't overlap ([§7.3](#73-tables-and-columns)). |
 | Splitting `regional.yaml` past 500 resources | When a store needs it | `generate` refuses with the count ([§13](#13-checks-in-generate)). CloudFormation stack refactoring can later move the alarms and the dashboard to a third stack without replacing them. |
@@ -948,11 +1038,24 @@ page will record the answers:
 - How long a running Firehose stream takes to deliver a column added to its table.
 - That Firehose writes, with `AppendOnly`, to a table that Athena created in a database that
   CloudFormation created, with the archive's value encodings.
-- Where Firehose puts failed records under `errors/firehose/<stream>/`, and whether it uses
-  `s3:DeleteObject`.
+- Where Firehose puts failed records under `errors/firehose/<stream>/`, and what it writes
+  there for a commit that fails; and whether it uses `s3:DeleteObject`.
 - Whether an in-place update of a Firehose stream's Iceberg settings, such as its buffering,
   works on a stream created with `AppendOnly`.
-- Whether `<stream>_dedup` reads only the days that an `event_time` filter selects.
+- Whether `<stream>_dedup`, and a backfill's export, read only the days that an
+  `event_time` filter selects.
+- The JSON text that `UNLOAD` writes for the backfill's export, whose projection casts
+  integers, decimals, dates and times to text; and that `Float64` values come back exact.
+- The columns of `"<stream>$partitions"`, and the form of its day.
+- How long Athena returns the same query for a repeated `ClientRequestToken`, and how long
+  an export of 25 GB of Parquet takes.
+- Whether `DeliveryToIceberg.DataFreshness` has a datapoint whenever Firehose holds a
+  record and none while it holds nothing: the backfill's watermark rests on it.
+- That the backfill role's grants cover the reads and writes Athena makes for it, with no
+  `AccessDenied` in CloudTrail.
+- How often `SYNC` appends to a hot row conflict, and what the cancelled transactions cost.
+- That `dynamodb:EnclosingOperation` limits an application's `PutItem` on view tables to its
+  transactions ([§9.9](#99-applications)).
 - Whether deletion protection blocks removing a replica. If it doesn't,
   `--unprotect-region` goes.
 - Whether a new replica's initial copy of the existing items appears in its stream.

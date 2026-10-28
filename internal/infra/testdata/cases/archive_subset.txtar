@@ -276,6 +276,12 @@ Resources:
           ExpirationInDays: 30
           NoncurrentVersionExpiration:
             NoncurrentDays: 1
+        - Id: backfill-results
+          Status: Enabled
+          Prefix: athena/backfill/
+          ExpirationInDays: 30
+          NoncurrentVersionExpiration:
+            NoncurrentDays: 1
       Tags:
       - Key: dynaflux:kind
         Value: bucket
@@ -528,6 +534,142 @@ Resources:
             Condition:
               StringLike:
                 s3:prefix: backfill/*
+          - !If
+            - InArchive
+            - Sid: ArchiveQueries
+              Effect: Allow
+              Action:
+              - athena:GetQueryExecution
+              - athena:GetQueryResults
+              - athena:StartQueryExecution
+              - athena:StopQueryExecution
+              Resource: !Sub arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${BackfillWorkGroup}
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveAthenaCatalog
+              Effect: Allow
+              Action:
+              - glue:GetDatabase
+              - glue:GetDatabases
+              Resource:
+              - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog
+              - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/default
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveCatalog
+              Effect: Allow
+              Action:
+              - glue:GetDatabase
+              - glue:GetPartitions
+              - glue:GetTable
+              - glue:GetTables
+              Resource:
+              - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog
+              - !Sub
+                - arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${PrefixUnderscore}analytics
+                - {PrefixUnderscore: !Join [_, !Split ["-", !Ref Prefix]]}
+              - !Sub
+                - arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${PrefixUnderscore}analytics/*
+                - {PrefixUnderscore: !Join [_, !Split ["-", !Ref Prefix]]}
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveFiles
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub
+              - ${Bucket.Arn}/warehouse/${PrefixUnderscore}analytics/*
+              - {PrefixUnderscore: !Join [_, !Split ["-", !Ref Prefix]]}
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveList
+              Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt Bucket.Arn
+              Condition:
+                StringLike:
+                  s3:prefix:
+                  - !Sub
+                    - warehouse/${PrefixUnderscore}analytics
+                    - {PrefixUnderscore: !Join [_, !Split ["-", !Ref Prefix]]}
+                  - !Sub
+                    - warehouse/${PrefixUnderscore}analytics/*
+                    - {PrefixUnderscore: !Join [_, !Split ["-", !Ref Prefix]]}
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveResults
+              Effect: Allow
+              Action:
+              - s3:AbortMultipartUpload
+              - s3:GetObject
+              - s3:ListMultipartUploadParts
+              - s3:PutObject
+              Resource: !Sub ${Bucket.Arn}/athena/backfill/*
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveResultsList
+              Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt Bucket.Arn
+              Condition:
+                StringLike:
+                  s3:prefix: athena/backfill/*
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveBucketLocation
+              Effect: Allow
+              Action: s3:GetBucketLocation
+              Resource: !GetAtt Bucket.Arn
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveErrors
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${Bucket.Arn}/errors/firehose/*
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveErrorsList
+              Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt Bucket.Arn
+              Condition:
+                StringLike:
+                  s3:prefix: errors/firehose/*
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveGaps
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${Bucket.Arn}/aws/lambda/*
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveGapsList
+              Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt Bucket.Arn
+              Condition:
+                StringLike:
+                  s3:prefix: aws/lambda/*
+            - !Ref AWS::NoValue
+          - !If
+            - InArchive
+            - Sid: ArchiveEvidence
+              Effect: Allow
+              Action:
+              - cloudwatch:ListMetrics
+              - lambda:ListEventSourceMappings
+              Resource: "*"
+            - !Ref AWS::NoValue
       Tags:
       - Key: dynaflux:kind
         Value: backfill
@@ -563,6 +705,13 @@ Resources:
           Resource:
           - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-stream-debug_events/stream/*
           - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}analytics-stream-page_views/stream/*
+        - !If
+          - InArchive
+          - Sid: ArchiveDelivery
+            Effect: Allow
+            Action: firehose:DescribeDeliveryStream
+            Resource: !GetAtt FirehosePageViews.Arn
+          - !Ref AWS::NoValue
   RoleBackfillStateMachine:
     Type: AWS::IAM::Role
     Properties:
@@ -834,6 +983,8 @@ Resources:
     Type: AWS::Serverless::Function
     Metadata:
       BuildMethod: go1.x
+    DependsOn:
+    - ArchiveMode
     Properties:
       FunctionName: !Sub ${Prefix}analytics-projector
       CodeUri: ../../cmd/dynaflux-runtime
@@ -1029,6 +1180,18 @@ Resources:
         Value: backfill
       - Key: dynaflux:store
         Value: analytics
+  ArchiveMode:
+    Type: Custom::DynafluxArchiveMode
+    Properties:
+      ServiceToken: !GetAtt Setup.Arn
+      ServiceTimeout: 300
+      MetaTable: !Ref Meta
+      Streams:
+        debug_events: "off"
+        page_views: !If
+        - InArchive
+        - "all"
+        - "off"
   ArchiveWorkGroup:
     Type: AWS::Athena::WorkGroup
     Condition: InArchive
@@ -1044,6 +1207,26 @@ Resources:
       Tags:
       - Key: dynaflux:kind
         Value: archive
+      - Key: dynaflux:store
+        Value: analytics
+  BackfillWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Condition: InArchive
+    Properties:
+      Name: !Sub ${Prefix}analytics-backfill
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        EngineVersion:
+          SelectedEngineVersion: Athena engine version 3
+        ResultConfiguration:
+          OutputLocation: !Sub s3://${Bucket}/athena/backfill/
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+          ExpectedBucketOwner: !Ref AWS::AccountId
+      Tags:
+      - Key: dynaflux:kind
+        Value: backfill
       - Key: dynaflux:store
         Value: analytics
   ArchiveSchema:

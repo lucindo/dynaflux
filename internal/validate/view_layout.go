@@ -215,7 +215,7 @@ func (v *viewCompiler) mode() catalog.Mode {
 	}
 	if s := v.info.stream; s != nil && !v.groupsByPartition(s.stream.PrimaryKey) {
 		v.st.warnf(pos, "DF3501", "add the stream's PRIMARY KEY columns to GROUP BY, or use MODE ASYNC",
-			"MODE SYNC on a view whose rows many partition keys of %s share; concurrent appends will conflict", s.stream.Name)
+			"MODE SYNC on a view whose rows many partition keys of %s share; concurrent appends will conflict, and canceled transactions are billed", s.stream.Name)
 	}
 	return m
 }

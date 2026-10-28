@@ -98,7 +98,7 @@ func (est *estimate) viewFindings(i int) []finding {
 		fs = append(fs, finding{
 			subject: v.Name,
 			message: fmt.Sprintf("MODE SYNC on shared rows: ~%s appends a second update each row in a transaction in the accepting region, "+
-				"and concurrent ones conflict and retry", num(m.Pass*est.model.Rate/float64(est.store.Regions)/m.ActiveRows)),
+				"and concurrent ones conflict and retry; canceled transactions are billed", num(m.Pass*est.model.Rate/float64(est.store.Regions)/m.ActiveRows)),
 			hint: "use MODE ASYNC, or add the PRIMARY KEY of " + est.stream.Name + " to GROUP BY",
 		})
 	}

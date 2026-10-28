@@ -195,13 +195,16 @@ func (s suite) checkCanceledContext(t *testing.T) {
 		break
 	}
 	_, _, scanErr := b.ScanPage(ctx, Table, store.Scan{Segments: 1}, nil)
-	errs := map[string]error{"Put": putErr, "Get": getErr, "BatchGet": batchErr, "Query": queryErr, "ScanPage": scanErr}
+	txErr := b.Transact(ctx, []store.TxPut{{Table: Table, Item: keyed(k.PK, k.SK, nil), Cond: store.IfAbsent()}})
+	errs := map[string]error{
+		"Put": putErr, "Get": getErr, "BatchGet": batchErr, "Query": queryErr, "ScanPage": scanErr, "Transact": txErr,
+	}
 	for op, err := range errs {
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("%s with a canceled context: error = %v, want context.Canceled", op, err)
 		}
 	}
 	if got := mustGet(t, b, k); got != nil {
-		t.Errorf("Put with a canceled context stored %s", show(got))
+		t.Errorf("a write with a canceled context stored %s", show(got))
 	}
 }

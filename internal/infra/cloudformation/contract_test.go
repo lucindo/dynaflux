@@ -98,6 +98,9 @@ func sent(n *yaml.Node) any {
 		return substitute(n.Value)
 	case n.Tag == "!Ref" || n.Tag == "!GetAtt":
 		return sample(n.Value)
+	case n.Tag == "!If":
+		// As a region whose condition holds.
+		return sent(n.Content[1])
 	case n.Kind == yaml.SequenceNode:
 		var s []any
 		for _, c := range n.Content {

@@ -10,6 +10,8 @@
 //     optimizers, and re-creates their dedup views.
 //   - [TypeCatalog] registers the catalog that the binary runs in the meta table, and sets
 //     retired the versions it lists retired (ADR 0013).
+//   - [TypeArchiveMode] records each stream's archive mode in the meta table, with a hole
+//     where it changes to or from all, before any function changes (ADR 0017).
 //
 // The handlers work from the request's properties alone, except that the catalog handler
 // also reads the binary's catalog. They reach AWS through small interfaces that the runtime
@@ -31,6 +33,7 @@ const (
 	TypeStreamARN     = "Custom::DynafluxStreamArn"
 	TypeArchiveSchema = "Custom::DynafluxArchiveSchema"
 	TypeCatalog       = "Custom::DynafluxCatalog"
+	TypeArchiveMode   = "Custom::DynafluxArchiveMode"
 )
 
 // The request types.
@@ -131,6 +134,8 @@ type Request struct {
 	PhysicalID string
 	// Props are the resource's properties. CloudFormation passes every scalar as a string.
 	Props map[string]any
+	// OldProps are the properties before an update, on ActionUpdate.
+	OldProps map[string]any
 }
 
 // Response is the reply to a request: the resource's physical ID, and the attributes that
@@ -167,6 +172,8 @@ func (h *Handler) Handle(ctx context.Context, r Request) (Response, error) {
 		resp, err = h.lookupStream(ctx, r.Props)
 	case r.Type == TypeArchiveSchema:
 		resp, err = h.applySchema(ctx, r.Props)
+	case r.Type == TypeArchiveMode:
+		resp, err = h.applyArchiveModes(ctx, r)
 	default:
 		err = fmt.Errorf("unknown resource type %q", r.Type)
 	}

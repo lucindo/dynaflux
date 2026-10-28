@@ -22,6 +22,7 @@ import (
 	"github.com/lucindo/dynaflux/internal/archive"
 	"github.com/lucindo/dynaflux/internal/backfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/emulatortest"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/projector"
 )
@@ -54,7 +55,8 @@ func TestS1bHandoff(t *testing.T) {
 		}
 		return accepted
 	})
-	h := &handoff{r: r, want: map[string][2]uint64{}}
+	h := &handoff{r: r, want: map[string][2]uint64{}, born: time.Now().Add(-48 * time.Hour)}
+	h.recordOrigin()
 	h.appendAndDeliver(6)
 	env := h.env(catalog.Hash(data))
 	if _, err = backfill.Start(t.Context(), r.meta, backfill.Request{Version: version, Stream: quotaEvents, Name: "quota-by-account-v1", Execution: backfill.LocalExecution, Split: meta.SplitFence}); err != nil {
@@ -85,6 +87,25 @@ type handoff struct {
 	r    *localRig
 	n    int
 	want map[string][2]uint64
+	born time.Time // the stream table's, as the job sees it
+}
+
+// recordOrigin records the origin of the quota stream's archive, as a deploy and backfill -all
+// do while the stream table is fresh.
+func (h *handoff) recordOrigin() {
+	r := h.r
+	ctx := r.t.Context()
+	err := r.meta.ApplyArchiveModes(ctx, nil, map[string]meta.ArchiveMode{quotaEvents: meta.ArchiveAll}, true, h.born)
+	var item meta.StreamItem
+	if err == nil {
+		item, _, err = r.meta.Stream(ctx, quotaEvents)
+	}
+	if err == nil {
+		_, err = r.meta.RecordOrigin(ctx, item, meta.Origin{At: h.born, Hash: "h", RegisteredAt: h.born, Born: h.born, ARN: r.stream(quotaEvents).arn})
+	}
+	if err != nil {
+		r.t.Fatal(err)
+	}
 }
 
 // appendAndDeliver appends n quota events and delivers the stream's new records to a new
@@ -124,8 +145,10 @@ func (h *handoff) env(hash string) *backfill.Env {
 		Store:   r.b,
 		Core:    projector.New(rules.cat.Projector(), r.b, nil, projector.Config{Naming: r.naming}),
 		Units:   shards{client: streams, arn: arn},
-		Tables:  bornLongAgo{},
+		Tables:  bornAt{h.born},
 		Archive: fakeArchive{fh: r.fh},
+		Region:  emulatortest.Region,
+		Witness: mapped{arn},
 		Runs:    backfill.NewMemRuns(),
 		Lag:     noLag{},
 		Bounds:  meta.Bounds{Listing: time.Second},
@@ -174,25 +197,51 @@ func (s shards) Units(ctx context.Context, _ string) ([]string, error) {
 	}
 }
 
-type bornLongAgo struct{}
+// bornAt is stream tables created at a time, never restored.
+type bornAt struct{ at time.Time }
 
-func (bornLongAgo) Born(context.Context, string) (time.Time, bool, error) {
-	return time.Now().Add(-48 * time.Hour), false, nil
+func (b bornAt) Born(context.Context, string) (time.Time, bool, error) { return b.at, false, nil }
+
+// mapped is a stream whose ARN is arn and which a mapping reads, without gaps.
+type mapped struct{ arn string }
+
+func (m mapped) StreamARN(context.Context, string) (string, error) { return m.arn, nil }
+
+func (m mapped) Facts(context.Context, string, meta.StreamItem) (backfill.Facts, error) {
+	return backfill.Facts{ARN: m.arn, Mapping: true}, nil
 }
 
 type noLag struct{}
 
 func (noLag) Lag(context.Context) (time.Duration, error) { return 0, nil }
 
-// fakeArchive is the records the PutRecordBatch fake stored, one file of them. The fake
-// stores a record before its call returns, so the archive holds every record put before a
-// cut once the cut is taken.
+// fakeArchive is the records the PutRecordBatch fake stored, one file of them, which every
+// query exports. The fake stores a record before its call returns, so the archive holds every
+// record put before a cut once the cut is taken. Its queries succeed at once, and its error
+// prefix is empty.
 type fakeArchive struct{ fh *fakeFirehose }
 
 func (fakeArchive) Complete(context.Context, string, time.Time) (bool, error) { return true, nil }
 
-func (fakeArchive) Export(context.Context, *meta.Job) ([]string, bool, error) {
-	return []string{"accepted"}, true, nil
+func (fakeArchive) Start(_ context.Context, q backfill.Query, _ string) (string, error) {
+	return strconv.Itoa(int(q.Kind)), nil
+}
+
+func (fakeArchive) Status(context.Context, string) (backfill.QueryStatus, error) {
+	return backfill.QueryStatus{State: backfill.QuerySucceeded}, nil
+}
+
+func (fakeArchive) Stop(context.Context, string) error { return nil }
+
+// Partitions lists one partition of every event time.
+func (fakeArchive) Partitions(context.Context, string) ([]backfill.Partition, error) {
+	return []backfill.Partition{{From: time.Unix(0, 0), To: time.Unix(1<<32, 0), Bytes: 1}}, nil
+}
+
+func (fakeArchive) Files(context.Context, string) ([]string, error) { return []string{"accepted"}, nil }
+
+func (fakeArchive) ErrorObjects(context.Context, string, string, time.Time) ([]string, error) {
+	return nil, nil
 }
 
 func (a fakeArchive) Open(context.Context, string) (io.ReadCloser, error) {

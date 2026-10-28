@@ -7,6 +7,7 @@ package catalogtest
 import (
 	"bytes"
 	"io/fs"
+	"slices"
 	"testing"
 	"testing/fstest"
 
@@ -42,4 +43,27 @@ func MarshalFS(tb testing.TB, fsys fs.FS) []byte {
 		tb.Fatal(err)
 	}
 	return data
+}
+
+// Async returns the catalog data with every view version ASYNC but those of the views that
+// keep names: the catalog of an application build that appends without them.
+func Async(tb testing.TB, data []byte, keep ...string) []byte {
+	tb.Helper()
+	def, err := catalog.Unmarshal(data)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	for i := range def.Views {
+		if slices.Contains(keep, def.Views[i].Name) {
+			continue
+		}
+		for j := range def.Views[i].Versions {
+			def.Views[i].Versions[j].Mode = catalog.ModeAsync
+		}
+	}
+	out, err := catalog.Marshal(def)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return out
 }

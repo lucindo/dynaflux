@@ -15,6 +15,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/lucindo/dynaflux/internal/keys"
 	"github.com/lucindo/dynaflux/internal/meta"
@@ -43,6 +44,16 @@ type record struct {
 	unit, seq string
 	item      store.Item
 	size      int
+	// arrival is when an archived record entered the change stream; zero when unknown. It
+	// isn't staged: only what the archive's read keeps is.
+	arrival time.Time
+}
+
+// older reports whether r arrived before born, the stream table's creation: it is a record of
+// an older table that a re-created one replaced, which no version filled after reads
+// (lifecycle.md §10).
+func (r *record) older(born time.Time) bool {
+	return !r.arrival.IsZero() && r.arrival.Before(born)
 }
 
 // backfillRecord returns r as ApplyBackfill takes it.

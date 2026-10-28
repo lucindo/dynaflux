@@ -18,7 +18,8 @@ type ArchiveModel struct {
 }
 
 func NewArchiveModel(cfg Archive, seed uint64) *ArchiveModel {
-	return &ArchiveModel{a: &archive{cfg: cfg}, rng: newRand(seed, streamArchive)}
+	rng := newRand(seed, streamArchive)
+	return &ArchiveModel{a: newArchive(cfg, rng), rng: rng}
 }
 
 func (m *ArchiveModel) Put(unit string, recs []projector.Record) { m.a.put(m.rng, "s", unit, recs) }
@@ -40,14 +41,20 @@ func (m *ArchiveModel) Arrived(now time.Time) ([]string, int) {
 func (m *ArchiveModel) CompleteThrough(t, now time.Time) bool { return m.a.completeThrough(t, now) }
 
 // CheckChangeStream checks P0 on one region whose change stream holds records, against
-// the appends applied, one per region that applied it, and the items some region deleted.
-func CheckChangeStream(applied, deleted []store.Item, records []projector.Record) []string {
-	r := &run{applied: map[tableKey]int{}, expired: map[tableKey]bool{}}
+// the appends applied, one per region that applied it, the items some region deleted, and
+// the deleted items appended once more, which starts their next life.
+func CheckChangeStream(applied, deleted, again []store.Item, records []projector.Record) []string {
+	r := &run{applied: map[lifeKey]int{}, expired: map[lifeKey]bool{}, lives: map[tableKey]int{}}
 	for _, it := range applied {
-		r.applied[tableKey{"t", keyOf(it)}]++
+		r.applied[r.life(tableKey{"t", store.KeyOf(it)})]++
 	}
 	for _, it := range deleted {
-		r.expired[tableKey{"t", keyOf(it)}] = true
+		r.expired[r.life(tableKey{"t", store.KeyOf(it)})] = true
+	}
+	for _, it := range again {
+		k := tableKey{"t", store.KeyOf(it)}
+		r.lives[k]++
+		r.applied[r.life(k)]++
 	}
 	r.checkStream(&region{name: "r0", order: []*stream{{table: "t", units: []*unit{{recs: records}}}}})
 	return r.violations

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/athena"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
@@ -136,6 +137,14 @@ func (b recBackend) Put(ctx context.Context, table string, it store.Item, c stor
 	return b.next.Put(ctx, table, it, c)
 }
 
+// Transact notes PutItem on each put's table: IAM has no transaction action.
+func (b recBackend) Transact(ctx context.Context, puts []store.TxPut) error {
+	for _, p := range puts {
+		b.r.note("dynamodb:PutItem", tableARN(b.region, p.Table), "")
+	}
+	return b.next.Transact(ctx, puts)
+}
+
 type recSFN struct {
 	next cli.StepFunctions
 	r    *recorder
@@ -185,6 +194,13 @@ func (c recAWS) ListObjectsV2(ctx context.Context, in *s3.ListObjectsV2Input, op
 func (c recAWS) GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
 	c.r.note("s3:GetObject", "arn:aws:s3:::"+aws.ToString(in.Bucket)+"/"+aws.ToString(in.Key), "")
 	return c.next.GetObject(ctx, in, opts...)
+}
+
+// StopQueryExecution notes the backfill workgroup, where IAM authorizes the call: a job's
+// export runs there.
+func (c recAWS) StopQueryExecution(ctx context.Context, in *athena.StopQueryExecutionInput, opts ...func(*athena.Options)) (*athena.StopQueryExecutionOutput, error) {
+	c.r.note("athena:StopQueryExecution", "arn:aws:athena:"+c.region+":"+account+":workgroup/"+shop.BackfillWorkGroup(), "")
+	return c.next.StopQueryExecution(ctx, in, opts...)
 }
 
 // adapterFake answers the requests that the awsbackfill adapters sign, DescribeTable and
@@ -279,12 +295,7 @@ func operatorRuns() []operatorRun {
 			s := newStatusStore(t)
 			s.job(t, "us-east-1", types.ExecutionStatusRunning)
 			s.gap("uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-a", time.Now().Add(-time.Hour))
-			env := cli.Env{Region: "us-east-1", Backends: s.backends, StepFunctions: map[string]cli.StepFunctions{},
-				AWS: map[string]cli.AWS{}, Units: map[string]backfill.Lister{}}
-			for r := range s.backends {
-				env.StepFunctions[r], env.AWS[r], env.Units[r] = s.sfn[r], s.aws[r], s.units[r]
-			}
-			return s.dir, env
+			return s.dir, s.env()
 		}},
 		{"diff", []string{"diff"}, 0, func(t *testing.T) (string, cli.Env) {
 			t.Helper()
@@ -300,8 +311,12 @@ func operatorRuns() []operatorRun {
 		{"backfill new jobs", []string{"backfill", "-all", "-yes"}, 0, func(t *testing.T) (string, cli.Env) {
 			t.Helper()
 			s := newBackfillStore(t)
-			// Every replica of signups is new, so us-east-1 checks that it is empty.
+			// Every replica of signups is new, so us-east-1 checks that it is empty and records
+			// its origin. page_views's archive has an origin of two days, whose hours the
+			// activity check reads, and a gap since.
 			s.tables["us-west-2"].born[catalog.Naming{Store: "shop"}.StreamTable("signups")] = time.Now()
+			s.origin(t, "us-east-1", "page_views", time.Now().Add(-48*time.Hour))
+			s.gap("us-east-1", "page_views", time.Now().Add(-time.Hour))
 			return s.env()
 		}},
 		{"backfill resume", slices.Concat([]string{"backfill", "page_seen@v1"}, east), 0, func(t *testing.T) (string, cli.Env) {
@@ -316,6 +331,12 @@ func operatorRuns() []operatorRun {
 			s.job(t, types.ExecutionStatusRunning)
 			return s.env()
 		}},
+		{"backfill cancel an export", slices.Concat([]string{"backfill", "-cancel", "plan_counts@v1"}, east), 0, func(t *testing.T) (string, cli.Env) {
+			t.Helper()
+			s := newBackfillStore(t)
+			s.exportJob(t)
+			return s.env()
+		}},
 		{"retire", []string{"retire", "page_counts@v1", "-yes"}, 0, func(t *testing.T) (string, cli.Env) {
 			t.Helper()
 			s := newRetireStore(t)
@@ -326,6 +347,12 @@ func operatorRuns() []operatorRun {
 			s := newImportStore(t)
 			return s.dir, cli.Env{Backends: map[string]store.Backend{"us-east-1": s.b}}
 		}},
+		{"import into a young stream", []string{"import", "-region", "us-east-1", "page_views", "-file", "input/views.jsonl", "-yes"}, 1,
+			func(t *testing.T) (string, cli.Env) {
+				t.Helper()
+				s := newYoungImportStore(t)
+				return s.dir, s.env()
+			}},
 	}
 }
 
@@ -337,13 +364,7 @@ func liveDeployed(t *testing.T) (string, cli.Env) {
 	return d.dir, cli.Env{Region: "us-west-2", Backends: map[string]store.Backend{"us-east-1": d.b}}
 }
 
-func (s *backfillStore) env() (string, cli.Env) {
-	env := cli.Env{Region: "us-east-1", Backends: s.backends, StepFunctions: map[string]cli.StepFunctions{}, Tables: map[string]backfill.Tables{}}
-	for _, r := range backfillRegions {
-		env.StepFunctions[r], env.Tables[r] = s.sfn[r], s.tables[r]
-	}
-	return s.dir, env
-}
+func (s *backfillStore) env() (string, cli.Env) { return s.dir, s.cliEnv(false) }
 
 // operatorCalls runs every operator run, and returns their distinct calls in order.
 func operatorCalls(t *testing.T) []call {

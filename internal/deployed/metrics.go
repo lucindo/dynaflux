@@ -28,31 +28,35 @@ type Metrics struct {
 	// Freshness is, by delivery stream, the latest 1-minute maximum of
 	// DeliveryToIceberg.DataFreshness of the last [Recent].
 	Freshness map[string]time.Duration
+	// Delivered is, by delivery stream, that datapoint's time less its freshness: Firehose
+	// had delivered every record it took before then.
+	Delivered map[string]time.Time
 	// FailedRows is, by delivery stream, how many rows Firehose couldn't write to the
 	// archive in the last [FailedRowsWindow].
 	FailedRows map[string]int64
 }
 
-// series is a metric to read, and what to do with its values, newest first.
+// series is a metric to read, and what to do with its values and their times, newest first.
 type series struct {
 	namespace, metric, dimension, value, stat string
-	add                                       func(values []float64)
+	add                                       func(values []float64, times []time.Time)
 }
 
 // ReadMetrics reads the freshness and failed rows of the delivery streams, up to now.
 func ReadMetrics(ctx context.Context, c CloudWatch, deliveryStreams []string, now time.Time) (Metrics, error) {
-	m := Metrics{Freshness: map[string]time.Duration{}, FailedRows: map[string]int64{}}
+	m := Metrics{Freshness: map[string]time.Duration{}, Delivered: map[string]time.Time{}, FailedRows: map[string]int64{}}
 	var recent, failed []series
 	for _, d := range deliveryStreams {
 		recent = append(recent, series{"AWS/Firehose", "DeliveryToIceberg.DataFreshness", "DeliveryStreamName", d, "Maximum",
-			func(vs []float64) {
+			func(vs []float64, ts []time.Time) {
 				// The first values a series gets are its latest: a later page continues it with older ones.
 				if _, ok := m.Freshness[d]; !ok {
 					m.Freshness[d] = time.Duration(vs[0] * float64(time.Second))
+					m.Delivered[d] = ts[0].Add(-m.Freshness[d])
 				}
 			}})
 		failed = append(failed, series{"AWS/Firehose", "DeliveryToIceberg.FailedRowCount", "DeliveryStreamName", d, "Sum",
-			func(vs []float64) {
+			func(vs []float64, _ []time.Time) {
 				for _, v := range vs {
 					m.FailedRows[d] += int64(v)
 				}
@@ -73,7 +77,7 @@ func read(ctx context.Context, c CloudWatch, ss []series, period int32, start, e
 		return nil
 	}
 	queries := make([]types.MetricDataQuery, len(ss))
-	byID := make(map[string]func([]float64), len(ss))
+	byID := make(map[string]func([]float64, []time.Time), len(ss))
 	for i, s := range ss {
 		id := "m" + strconv.Itoa(i)
 		byID[id] = s.add
@@ -98,10 +102,36 @@ func read(ctx context.Context, c CloudWatch, ss []series, period int32, start, e
 			return fmt.Errorf("deployed: read metrics: %w", err)
 		}
 		for _, r := range page.MetricDataResults {
+			if err = CheckMetricResult(r, page.NextToken == nil); err != nil {
+				return fmt.Errorf("deployed: read metrics: %w", err)
+			}
 			if add, ok := byID[aws.ToString(r.Id)]; ok && len(r.Values) > 0 {
-				add(r.Values)
+				if len(r.Timestamps) != len(r.Values) {
+					return fmt.Errorf("deployed: read metrics: %s has %d values and %d times", aws.ToString(r.Id), len(r.Values), len(r.Timestamps))
+				}
+				add(r.Values, r.Timestamps)
 			}
 		}
 	}
 	return nil
+}
+
+// CheckMetricResult fails on a result of a page of GetMetricData that doesn't hold its
+// series: CloudWatch's internal error, a read it denied, or partial data on the last page,
+// which last says this is. Missing datapoints would read as no activity.
+func CheckMetricResult(r types.MetricDataResult, last bool) error {
+	switch r.StatusCode {
+	case types.StatusCodeComplete:
+		return nil
+	case types.StatusCodePartialData:
+		if !last {
+			return nil
+		}
+	case types.StatusCodeInternalError, types.StatusCodeForbidden:
+	}
+	var why []string
+	for _, m := range r.Messages {
+		why = append(why, aws.ToString(m.Code)+": "+aws.ToString(m.Value))
+	}
+	return fmt.Errorf("CloudWatch returned series %s with status %q %v", aws.ToString(r.Id), r.StatusCode, why)
 }

@@ -20,7 +20,7 @@ const (
 	snapshotsToKeep        = 1
 )
 
-// addArchive adds the archive to s: the Athena workgroup, the archive schema with its
+// addArchive adds the archive to s: the Athena workgroups, the archive schema with its
 // optimizer role, and a delivery stream per archived stream with their log group, log
 // streams and role.
 func (b *builder) addArchive(s *Scope) {
@@ -30,10 +30,17 @@ func (b *builder) addArchive(s *Scope) {
 		return Common{ID: id, ArchiveOnly: b.archiveOnly, Tags: tags}
 	}
 
-	s.ArchiveWorkGroups = []ArchiveWorkGroup{{
-		Common: common(idArchiveWorkGroup, b.tags(TagKindArchive, "")),
-		Name:   b.name(catalog.ResourceArchiveWorkGroup, b.naming.ArchiveWorkGroup()),
-	}}
+	s.ArchiveWorkGroups = []ArchiveWorkGroup{
+		{
+			Common: common(idArchiveWorkGroup, b.tags(TagKindArchive, "")),
+			Name:   b.name(catalog.ResourceArchiveWorkGroup, b.naming.ArchiveWorkGroup()),
+		},
+		{
+			Common:  common(idBackfillWorkGroup, b.tags(TagKindBackfill, "")),
+			Name:    b.name(catalog.ResourceBackfillWorkGroup, b.naming.BackfillWorkGroup()),
+			Results: "s3://" + ref(idBucket, AttrName) + "/" + backfillResults,
+		},
+	}
 	schema := ArchiveSchema{
 		Common:           common(idArchiveSchema, nil),
 		Handler:          ref(idSetup, AttrARN),
@@ -81,7 +88,7 @@ func (b *builder) addArchive(s *Scope) {
 			Table:           catalog.IcebergTable(st.Name),
 			Role:            ref(roleID(idArchive), AttrARN),
 			Bucket:          ref(idBucket, AttrARN),
-			ErrorPrefix:     firehoseErrorPrefix(st.Name),
+			ErrorPrefix:     archive.ErrorPrefix(st.Name),
 			LogGroup:        ref(logs.ID, AttrName),
 			LogStream:       ref(logStream.ID, AttrName),
 			AppendOnly:      true,
@@ -96,12 +103,6 @@ func (b *builder) addArchive(s *Scope) {
 func (b *builder) archiveDatabase() Text {
 	return b.name(catalog.ResourceArchiveDatabase,
 		catalog.Naming{Prefix: placeholder(PlaceholderPrefixUnderscore), Store: b.cat.Store}.ArchiveDatabase())
-}
-
-// firehoseErrorPrefix is where in the bucket Firehose writes the records of stream that it
-// fails to deliver.
-func firehoseErrorPrefix(stream string) string {
-	return "errors/firehose/" + stream + "/"
 }
 
 // deliveryRole returns the role of every delivery stream. It covers all the database's
@@ -123,7 +124,7 @@ func deliveryRole(c Common, db Text) Role {
 			},
 			{
 				Sid:       "Bucket",
-				Actions:   []string{"s3:GetBucketLocation", s3ListBucket, "s3:ListBucketMultipartUploads"},
+				Actions:   []string{s3BucketLocation, s3ListBucket, "s3:ListBucketMultipartUploads"},
 				Resources: []Text{ref(idBucket, AttrARN)},
 			},
 			{Sid: sidLogs, Actions: []string{logsPutLogEvents}, Resources: []Text{ref(logsID(idArchive), AttrARN)}},
@@ -167,13 +168,13 @@ func (b *builder) setupArchiveStatements() []Statement {
 		// Athena needs these on the default database in every region.
 		{
 			Sid:       "ArchiveAthenaCatalog",
-			Actions:   []string{glueCreateDatabase, glueGetDatabase, "glue:GetDatabases"},
+			Actions:   []string{glueCreateDatabase, glueGetDatabase, glueGetDatabases},
 			Resources: []Text{regionalARN("glue", "catalog"), regionalARN("glue", "database/default")},
 		},
 		{
 			Sid: "ArchiveCatalog",
 			Actions: []string{
-				glueCreateDatabase, "glue:CreateTable", "glue:CreateTableOptimizer", glueGetDatabase, "glue:GetDatabases",
+				glueCreateDatabase, "glue:CreateTable", "glue:CreateTableOptimizer", glueGetDatabase, glueGetDatabases,
 				"glue:GetPartitions", glueGetTable, "glue:GetTables", glueUpdateTable,
 				"glue:UpdateTableOptimizer",
 			},
@@ -187,7 +188,7 @@ func (b *builder) setupArchiveStatements() []Statement {
 		{Sid: "ArchiveFiles", Actions: []string{s3GetObject, s3PutObject}, Resources: []Text{warehouseObjects(db)}},
 		{Sid: "ArchiveList", Actions: []string{s3ListBucket}, Resources: []Text{ref(idBucket, AttrARN)}, Conditions: warehouseListing(db)},
 		// An s3:prefix condition would never match it: the request has no prefix.
-		{Sid: "ArchiveBucketLocation", Actions: []string{"s3:GetBucketLocation"}, Resources: []Text{ref(idBucket, AttrARN)}},
+		{Sid: "ArchiveBucketLocation", Actions: []string{s3BucketLocation}, Resources: []Text{ref(idBucket, AttrARN)}},
 	}
 	for i := range statements {
 		statements[i].ArchiveOnly = b.archiveOnly

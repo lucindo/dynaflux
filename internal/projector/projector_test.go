@@ -149,6 +149,7 @@ GROUP BY page, day;
 `
 
 const (
+	region          = "us-east-1" // the engine's and the core's
 	clicksTable     = "app-stream-clicks"
 	pageTotalsTable = "app-view-page_totals-v1"
 	unit            = "shardId-00000001"
@@ -180,7 +181,13 @@ func newFixture(t *testing.T, wrap func(store.Backend) store.Backend) *fixture {
 // newPendingFixture is newFixture with every view version pending its backfill.
 func newPendingFixture(t *testing.T, wrap func(store.Backend) store.Backend) *fixture {
 	t.Helper()
-	cat, err := engine.Compile(catalogtest.Marshal(t, "app", views))
+	return newStoreFixture(t, views, wrap)
+}
+
+// newStoreFixture is newPendingFixture of the store that sql defines.
+func newStoreFixture(t *testing.T, sql string, wrap func(store.Backend) store.Backend) *fixture {
+	t.Helper()
+	cat, err := engine.Compile(catalogtest.Marshal(t, "app", sql))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,10 +200,10 @@ func newPendingFixture(t *testing.T, wrap func(store.Backend) store.Backend) *fi
 	return &fixture{
 		cat:     cat,
 		mem:     m,
-		e:       engine.New(m, engine.Options{Region: "us-east-1", Entropy: rand.NewChaCha8([32]byte{})}),
+		e:       engine.New(m, engine.Options{Region: region, Entropy: rand.NewChaCha8([32]byte{})}),
 		meta:    meta.New(m, naming.MetaTable()),
 		archive: a,
-		core:    projector.New(cat.Projector(), wrap(m), a, projector.Config{Naming: naming}),
+		core:    projector.New(cat.Projector(), wrap(m), a, projector.Config{Naming: naming, Region: region}),
 	}
 }
 
@@ -209,7 +216,8 @@ func (f *fixture) click(t *testing.T, user, page string, ms uint64, tags ...stri
 	}
 	price := expr.Decimal(new(big.Int).SetUint64(ms))
 	ev := []expr.Value{expr.String(user), expr.String(page), expr.Uint(ms), price, expr.Array(tagVals), expr.Null()}
-	res, err := f.e.Append(t.Context(), f.cat, "clicks", [][]expr.Value{ev}, engine.AppendMode{})
+	// An import applies no SYNC version: the tests hand the event to the core.
+	res, err := f.e.Append(t.Context(), f.cat, "clicks", [][]expr.Value{ev}, engine.AppendMode{Import: true})
 	if err == nil {
 		err = res[0].Err
 	}

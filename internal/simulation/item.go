@@ -12,16 +12,12 @@ import (
 	"github.com/lucindo/dynaflux/internal/store"
 )
 
-func keyOf(it store.Item) store.Key {
-	return store.Key{PK: it[catalog.AttrPK].Str, SK: it[catalog.AttrSK].Str}
-}
-
 // recordKey returns the key of a record's item: a REMOVE has only its old image.
 func recordKey(rec projector.Record) store.Key {
 	if rec.Op == projector.Remove {
-		return keyOf(rec.Old)
+		return store.KeyOf(rec.Old)
 	}
-	return keyOf(rec.New)
+	return store.KeyOf(rec.New)
 }
 
 func keyText(it store.Item) string {

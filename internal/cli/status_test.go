@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/athena"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -35,8 +36,9 @@ import (
 )
 
 // statusStore is testdata/status.txtar deployed in memory in us-east-1 and us-west-2 with
-// every version live, its projectors 2 seconds behind and its archive 2 minutes. Make it in
-// a synctest bubble, whose clock reads 2000-01-01T00:00:00Z.
+// every version live, its projectors 2 seconds behind and its archive 2 minutes. Its stream
+// tables are three days old, and each region's archive of each stream is complete since an
+// hour after. Make it in a synctest bubble, whose clock reads 2000-01-01T00:00:00Z.
 type statusStore struct {
 	dir      string
 	cat      *catalog.Catalog
@@ -45,6 +47,7 @@ type statusStore struct {
 	sfn      map[string]*fakeSFN
 	aws      map[string]*fakeAWS
 	units    map[string]fakeUnits
+	tables   map[string]*fakeReplicas
 }
 
 var shop = catalog.Naming{Store: "shop"} //nolint:gochecknoglobals // test fixture
@@ -53,13 +56,18 @@ func newStatusStore(t *testing.T) *statusStore {
 	t.Helper()
 	ctx := t.Context()
 	s := &statusStore{dir: writeProject(t, "status"), backends: map[string]store.Backend{}, metas: map[string]*meta.Meta{},
-		sfn: map[string]*fakeSFN{}, aws: map[string]*fakeAWS{}, units: map[string]fakeUnits{}}
+		sfn: map[string]*fakeSFN{}, aws: map[string]*fakeAWS{}, units: map[string]fakeUnits{}, tables: map[string]*fakeReplicas{}}
 	s.cat = compile(t, s.dir).Catalog
 	data, err := catalog.Marshal(s.cat)
 	must(t, err)
+	born := time.Now().Add(-72 * time.Hour)
 	for _, r := range backfillRegions {
 		b := mem.New()
 		s.backends[r], s.metas[r] = b, meta.New(b, shop.MetaTable())
+		s.tables[r] = &fakeReplicas{born: map[string]time.Time{shop.StreamTable("page_views"): born, shop.StreamTable("signups"): born}}
+		must(t, s.metas[r].ApplyArchiveModes(ctx, nil, map[string]meta.ArchiveMode{"page_views": meta.ArchiveAll, "signups": meta.ArchiveAll}, true, born))
+		s.origin(t, r, "page_views", born.Add(time.Hour))
+		s.origin(t, r, "signups", born.Add(time.Hour))
 		_, err = s.metas[r].RegisterCatalog(ctx, data, "v0.5.0")
 		must(t, err)
 		for id, vv := range s.cat.Versions() {
@@ -76,6 +84,32 @@ func newStatusStore(t *testing.T) *statusStore {
 		s.units[r] = fakeUnits{shop.StreamTable("page_views"): {"shardId-0002", "shardId-0001"}, shop.StreamTable("signups"): {"shardId-0003"}}
 	}
 	return s
+}
+
+// origin records the origin of stream's archive in region at at, for its table as tables
+// describes it now.
+func (s *statusStore) origin(t *testing.T, region, stream string, at time.Time) {
+	t.Helper()
+	m := s.metas[region]
+	item, _, err := m.Stream(t.Context(), stream)
+	must(t, err)
+	arn := streamARN(shop, region, stream)
+	if a := s.aws[region]; a != nil {
+		arn = a.arns[shop.StreamTable(stream)]
+	}
+	_, err = m.RecordOrigin(t.Context(), item, meta.Origin{At: at, Hash: "0123456789ab", RegisteredAt: at,
+		Born: s.tables[region].born[shop.StreamTable(stream)], ARN: arn})
+	must(t, err)
+}
+
+// recreate gives stream's table in region a new life from born, as when it is re-created then:
+// its stream has a new ARN, which the mappings read.
+func (s *statusStore) recreate(region, stream string, born time.Time) {
+	table, a := shop.StreamTable(stream), s.aws[region]
+	s.tables[region].born[table] = born
+	old, arn := a.arns[table], "arn:aws:dynamodb:"+region+":"+account+":table/"+table+"/stream/"+born.UTC().Format("2006-01-02T15:04:05.000")
+	a.arns[table], a.mappings[arn] = arn, a.mappings[old]
+	delete(a.mappings, old)
 }
 
 // healthyAWS is region's services with each stream mapped to the store's projector, which
@@ -107,13 +141,18 @@ func mapping(region, stream, function, state, result string) lambdatypes.EventSo
 func (s *statusStore) run(t *testing.T, args ...string) result {
 	t.Helper()
 	var stdout, stderr strings.Builder
-	env := cli.Env{Region: "us-east-1", Account: account, Backends: s.backends, StepFunctions: map[string]cli.StepFunctions{},
-		AWS: map[string]cli.AWS{}, Units: map[string]backfill.Lister{}}
-	for r := range s.backends {
-		env.StepFunctions[r], env.AWS[r], env.Units[r] = s.sfn[r], s.aws[r], s.units[r]
-	}
-	status := cli.RunEnv(t.Context(), args, nil, &stdout, &stderr, s.dir, env)
+	status := cli.RunEnv(t.Context(), args, nil, &stdout, &stderr, s.dir, s.env())
 	return result{status, stdout.String(), stderr.String()}
+}
+
+// env is the store's AWS.
+func (s *statusStore) env() cli.Env {
+	env := cli.Env{Region: "us-east-1", Account: account, Backends: s.backends, StepFunctions: map[string]cli.StepFunctions{},
+		AWS: map[string]cli.AWS{}, Units: map[string]backfill.Lister{}, Tables: map[string]backfill.Tables{}}
+	for r := range s.backends {
+		env.StepFunctions[r], env.AWS[r], env.Units[r], env.Tables[r] = s.sfn[r], s.aws[r], s.units[r], s.tables[r]
+	}
+	return env
 }
 
 // job deploys plan_counts@v2 and gives it a running job in region whose execution
@@ -183,7 +222,7 @@ type statusCase struct {
 func TestStatus(t *testing.T) {
 	t.Parallel()
 	g := readGoldens(t, "status")
-	for _, tt := range slices.Concat(statusCases(), statusJobCases(), statusDeliveryCases()) {
+	for _, tt := range slices.Concat(statusCases(), statusJobCases(), statusDeliveryCases(), statusArchiveCases()) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
@@ -209,6 +248,7 @@ func statusCases() []statusCase {
 		{"healthy json", []string{"-json"}, 0, nil},
 		{"one region", east, 0, nil},
 		{"region not in regions", []string{"-region", "eu-west-1"}, 2, nil},
+		{"FIPS region", []string{"-region", "fips-us-east-1"}, 2, nil},
 		{"unexpected argument", []string{"page_counts"}, 2, nil},
 		{"verbose", slices.Concat([]string{"-verbose"}, east), 0, func(t *testing.T, s *statusStore) {
 			t.Helper()
@@ -323,38 +363,6 @@ func statusJobCases() []statusCase {
 			})
 			must(t, err)
 		}},
-		{"waits", east, 0, func(t *testing.T, s *statusStore) {
-			t.Helper()
-			s.pending(t)
-			m := s.metas["us-east-1"]
-			arn := s.sfn["us-east-1"].arn("us-east-1", "plan-counts-v2-0a1b2c-a1")
-			_, err := backfill.Start(t.Context(), m, backfill.Request{
-				Version: "plan_counts@v2", Stream: "signups", Name: "plan-counts-v2-0a1b2c", Execution: func(int) string { return arn }, Split: meta.SplitFence,
-			})
-			must(t, err)
-			s.sfn["us-east-1"].status[arn] = types.ExecutionStatusSucceeded
-			_, err = m.Activate(t.Context(), "plan_counts@v2", "signups", meta.SplitFence, meta.DefaultBounds)
-			must(t, err)
-			_, err = m.UpdateJob(t.Context(), "plan_counts@v2", func(j *meta.Job) (bool, error) {
-				j.Phase, j.Waits = meta.PhaseWatermark, meta.WaitArchive
-				return true, nil
-			})
-			must(t, err)
-		}},
-		{"waits json", slices.Concat([]string{"-json"}, east), 0, func(t *testing.T, s *statusStore) {
-			t.Helper()
-			s.pending(t)
-			m := s.metas["us-east-1"]
-			_, err := backfill.Start(t.Context(), m, backfill.Request{
-				Version: "plan_counts@v2", Stream: "signups", Name: "plan-counts-v2-0a1b2c", Execution: backfill.LocalExecution, Split: meta.SplitFence,
-			})
-			must(t, err)
-			_, err = m.UpdateJob(t.Context(), "plan_counts@v2", func(j *meta.Job) (bool, error) {
-				j.Phase, j.Waits, j.Paused = meta.PhaseWatermark, meta.WaitArchive, false
-				return true, nil
-			})
-			must(t, err)
-		}},
 		{"jobs gaps and units json", slices.Concat([]string{"-json", "-verbose"}, east), 1, func(t *testing.T, s *statusStore) {
 			t.Helper()
 			s.job(t, "us-east-1", types.ExecutionStatusRunning)
@@ -429,6 +437,104 @@ func statusDeliveryCases() []statusCase {
 	}
 }
 
+// statusArchiveCases are the runs where a region's archive of a stream isn't complete, or a
+// job reads it.
+func statusArchiveCases() []statusCase {
+	return []statusCase{
+		{"young stream without an origin", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			// The table was re-created an hour ago, which voids its origin.
+			s.recreate("us-east-1", "signups", time.Now().Add(-time.Hour))
+		}},
+		{"hole after the origin", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.fenceJob(t, meta.PhaseApply)
+			m := s.metas["us-east-1"]
+			all, off := map[string]meta.ArchiveMode{"signups": meta.ArchiveAll}, map[string]meta.ArchiveMode{"signups": meta.ArchiveOff}
+			must(t, m.ApplyArchiveModes(t.Context(), all, off, false, time.Now()))
+			must(t, m.ApplyArchiveModes(t.Context(), off, all, false, time.Now().Add(time.Minute)))
+		}},
+		// The mode hole comes first, and fails the archive: the lag after it still suspects a gap
+		// in the live versions.
+		{"lag after a hole", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.fenceJob(t, meta.PhaseApply)
+			m := s.metas["us-east-1"]
+			all, off := map[string]meta.ArchiveMode{"signups": meta.ArchiveAll}, map[string]meta.ArchiveMode{"signups": meta.ArchiveOff}
+			must(t, m.ApplyArchiveModes(t.Context(), all, off, false, time.Now()))
+			must(t, m.ApplyArchiveModes(t.Context(), off, all, false, time.Now().Add(time.Minute)))
+			time.Sleep(time.Hour)
+			must(t, m.MarkLag(t.Context(), "signups", time.Now()))
+		}},
+		{"lag without an origin", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.recreate("us-east-1", "signups", time.Now().Add(-time.Hour))
+			time.Sleep(time.Hour)
+			must(t, s.metas["us-east-1"].MarkLag(t.Context(), "signups", time.Now()))
+		}},
+		{"suspected gap", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			time.Sleep(time.Hour)
+			must(t, s.metas["us-east-1"].MarkLag(t.Context(), "page_views", time.Now()))
+		}},
+		{"suspected gap json", slices.Concat([]string{"-json"}, east), 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			time.Sleep(time.Hour)
+			must(t, s.metas["us-east-1"].MarkLag(t.Context(), "page_views", time.Now()))
+		}},
+		{"past CloudWatch's hourly data", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			// A table re-created 600 days ago gets an origin of 500.
+			s.recreate("us-east-1", "page_views", time.Now().Add(-600*24*time.Hour))
+			s.origin(t, "us-east-1", "page_views", time.Now().Add(-500*24*time.Hour))
+		}},
+		{"archive job waits for Firehose", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.fenceJob(t, meta.PhaseWatermark)
+		}},
+		{"archive job waits for an idle Firehose", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.fenceJob(t, meta.PhaseWatermark)
+			delete(s.aws["us-east-1"].metrics, "DeliveryToIceberg.DataFreshness shop-archive-signups")
+		}},
+		{"archive job can't tell Firehose is empty", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.fenceJob(t, meta.PhaseWatermark)
+			delete(s.aws["us-east-1"].metrics, "DeliveryToIceberg.DataFreshness shop-archive-signups")
+			time.Sleep(3 * time.Hour)
+		}},
+		{"archive job stages", east, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.fenceJob(t, meta.PhaseStage)
+		}},
+	}
+}
+
+// fenceJob deploys plan_counts@v2, activates it in us-east-1 with the fence split, and gives
+// it a job in phase whose execution runs: its cut is now, and in the stage phase, Athena has
+// scanned 1,234,567,890 bytes for it.
+func (s *statusStore) fenceJob(t *testing.T, phase meta.Phase) {
+	t.Helper()
+	s.pending(t)
+	m := s.metas["us-east-1"]
+	arn := s.sfn["us-east-1"].arn("us-east-1", "plan-counts-v2-0a1b2c-a1")
+	_, err := backfill.Start(t.Context(), m, backfill.Request{
+		Version: "plan_counts@v2", Stream: "signups", Name: "plan-counts-v2-0a1b2c", Execution: func(int) string { return arn }, Split: meta.SplitFence,
+	})
+	must(t, err)
+	s.sfn["us-east-1"].status[arn] = types.ExecutionStatusRunning
+	_, err = m.Activate(t.Context(), "plan_counts@v2", "signups", meta.SplitFence, meta.DefaultBounds)
+	must(t, err)
+	_, err = m.UpdateJob(t.Context(), "plan_counts@v2", func(j *meta.Job) (bool, error) {
+		j.Phase, j.Cut = phase, time.Now()
+		if phase == meta.PhaseStage {
+			j.Archive = meta.ArchiveStage{PlanQuery: "q-0", Plan: "plan-1-0a1b", Scanned: 1234567890}
+		}
+		return true, nil
+	})
+	must(t, err)
+}
+
 // apply activates plan_counts@v2 in us-east-1 and moves its job to the apply phase, a
 // quarter done, at rate.
 func (s *statusStore) apply(t *testing.T, rate int) {
@@ -464,14 +570,15 @@ func must(t *testing.T, err error) {
 	}
 }
 
-// fakeAWS answers status's calls in a region besides DynamoDB's tables.
+// fakeAWS answers the calls of status and backfill in a region besides DynamoDB's tables.
 type fakeAWS struct {
 	bucket   string
 	arns     map[string]string                                        // a stream table → its stream's ARN
 	mappings map[string][]lambdatypes.EventSourceMappingConfiguration // by stream ARN
-	metrics  map[string][]float64                                     // by metric and dimension value, newest first
+	metrics  map[string][]float64                                     // by metric and dimension value, a minute apart, newest first
 	objects  map[string]string                                        // the bucket's objects
 	fail     map[string]error                                         // by operation
+	stopped  []string                                                 // the Athena queries stopped
 }
 
 func (f *fakeAWS) DescribeTable(_ context.Context, in *dynamodb.DescribeTableInput, _ ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
@@ -498,8 +605,12 @@ func (f *fakeAWS) GetMetricData(_ context.Context, in *cloudwatch.GetMetricDataI
 	out := &cloudwatch.GetMetricDataOutput{}
 	for _, q := range in.MetricDataQueries {
 		m := q.MetricStat.Metric
-		out.MetricDataResults = append(out.MetricDataResults,
-			cwtypes.MetricDataResult{Id: q.Id, Values: f.metrics[aws.ToString(m.MetricName)+" "+aws.ToString(m.Dimensions[0].Value)]})
+		values := f.metrics[aws.ToString(m.MetricName)+" "+aws.ToString(m.Dimensions[0].Value)]
+		times := make([]time.Time, len(values))
+		for i := range values {
+			times[i] = aws.ToTime(in.EndTime).Truncate(time.Minute).Add(time.Duration(-i-1) * time.Minute)
+		}
+		out.MetricDataResults = append(out.MetricDataResults, cwtypes.MetricDataResult{Id: q.Id, Values: values, Timestamps: times, StatusCode: cwtypes.StatusCodeComplete})
 	}
 	return out, nil
 }
@@ -526,6 +637,11 @@ func (f *fakeAWS) GetObject(_ context.Context, in *s3.GetObjectInput, _ ...func(
 		return nil, &s3types.NoSuchKey{}
 	}
 	return &s3.GetObjectOutput{Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+func (f *fakeAWS) StopQueryExecution(_ context.Context, in *athena.StopQueryExecutionInput, _ ...func(*athena.Options)) (*athena.StopQueryExecutionOutput, error) {
+	f.stopped = append(f.stopped, aws.ToString(in.QueryExecutionId))
+	return &athena.StopQueryExecutionOutput{}, nil
 }
 
 // fakeUnits lists each stream table's shards.

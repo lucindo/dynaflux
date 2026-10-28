@@ -36,7 +36,11 @@ type Env struct {
 	Core    Applier
 	Units   Lister
 	Tables  Tables
-	Archive Archive // nil where the archive can't be read yet (AWS in M5)
+	Archive Archive // nil where no job is split by fences, as in dev
+	// Region is the region's name, which the catalog's archive regions use, and Witness reads
+	// its stream's history: both needed with Archive.
+	Region  string
+	Witness Witness
 	Runs    Runs
 	Lag     Lag
 	Bounds  meta.Bounds
@@ -50,10 +54,17 @@ type Env struct {
 	// Entropy names staged runs; nil means crypto/rand.Reader. Steps that share a staging
 	// prefix need sources that don't repeat each other.
 	Entropy io.Reader
-	// Now is the host's clock, which a table source reads to wait for its read_after; nil
-	// means time.Now.
+	// Now is the host's clock, which a table source reads to wait for its read_after, and an
+	// origin's writer for its time; nil means time.Now.
 	Now func() time.Time
 	Log *slog.Logger
+}
+
+func (e *Env) now() time.Time {
+	if e.Now != nil {
+		return e.Now()
+	}
+	return time.Now()
 }
 
 // Applier applies a backfill chunk: [projector.Core.ApplyBackfill].
@@ -73,16 +84,25 @@ type Tables interface {
 	Born(ctx context.Context, streamTable string) (time.Time, bool, error)
 }
 
-// Archive reads a region's archive of one stream. M6 reads Athena behind it, and may reshape
-// it (m5-plan §17).
+// Archive reads a region's archive of one stream (ADR 0016): Athena on AWS, the simulation
+// harness's model, and fakes in tests.
 type Archive interface {
 	// Complete reports whether the archive holds every record put before cut.
 	Complete(ctx context.Context, stream string, cut time.Time) (bool, error)
-	// Export returns the files that hold the stream's archived records, delivered and in the
-	// error prefix, or done false while the export runs.
-	Export(ctx context.Context, job *meta.Job) ([]string, bool, error)
-	// Open reads a file: one archive record per line, in the form archive.Encoder writes.
-	Open(ctx context.Context, file string) (io.ReadCloser, error)
+	// Start starts q and returns its ID, or the ID of the query that a call with the same
+	// token started. It fails with [ErrThrottled] when no query started for now.
+	Start(ctx context.Context, q Query, token string) (string, error)
+	Status(ctx context.Context, id string) (QueryStatus, error)
+	Stop(ctx context.Context, id string) error
+	// Partitions returns the partitions that a succeeded QueryPartitions listed.
+	Partitions(ctx context.Context, id string) ([]Partition, error)
+	// Files returns the files of a succeeded QueryExport, as its manifest lists them.
+	Files(ctx context.Context, id string) ([]string, error)
+	// ErrorObjects returns, in order, the names of the objects in stream's error prefix that
+	// come after after and were last written at or after since.
+	ErrorObjects(ctx context.Context, stream, after string, since time.Time) ([]string, error)
+	// Open reads an export's file, one archive record per line, or an error object.
+	Open(ctx context.Context, name string) (io.ReadCloser, error)
 }
 
 // Runs stores a job's staged objects.

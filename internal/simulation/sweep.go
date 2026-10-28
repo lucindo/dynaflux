@@ -47,7 +47,7 @@ func (w *sweeper) expire(table string, it store.Item) {
 	if w.rg.streams[table] != nil {
 		r.pending++
 	}
-	w.queue.add(sweep{due: time.Unix(sec, 0).Add(between(r.topo, 0, r.sc.Sweep.Delay)), table: table, key: keyOf(it), ttl: ttl.Str})
+	w.queue.add(sweep{due: time.Unix(sec, 0).Add(between(r.topo, 0, r.sc.Sweep.Delay)), table: table, key: store.KeyOf(it), ttl: ttl.Str})
 }
 
 func (w *sweeper) run() {

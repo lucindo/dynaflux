@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/deployed"
 )
 
 // lagWindow is how far back Lag looks: Lambda publishes a minute's IteratorAge a minute or
@@ -63,6 +64,9 @@ func IteratorAges(ctx context.Context, c CloudWatch, functions []string, since, 
 			return nil, fmt.Errorf("awsbackfill: read the projectors' IteratorAge: %w", err)
 		}
 		for _, r := range out.MetricDataResults {
+			if err = deployed.CheckMetricResult(r, out.NextToken == nil); err != nil {
+				return nil, fmt.Errorf("awsbackfill: read the projectors' IteratorAge: %w", err)
+			}
 			i, ierr := strconv.Atoi(aws.ToString(r.Id)[1:])
 			if ierr != nil || i >= len(functions) || len(r.Values) == 0 {
 				continue
@@ -99,4 +103,54 @@ func (l *Lag) Lag(ctx context.Context) (time.Duration, error) {
 		return 0, err
 	}
 	return slices.Max(append(slices.Collect(maps.Values(ages)), 0)), nil
+}
+
+// CloudWatch's statistics that the adapters read.
+const (
+	statMaximum = "Maximum"
+	statSum     = "Sum"
+)
+
+// point is a datapoint: its period's start and its value.
+type point struct {
+	at    time.Time
+	value float64
+}
+
+// metricQuery returns the query, by id, of statistic stat of a metric, in periods of period.
+func metricQuery(id, namespace, metric string, dims []types.Dimension, period time.Duration, stat string) types.MetricDataQuery {
+	return types.MetricDataQuery{
+		Id: aws.String(id),
+		MetricStat: &types.MetricStat{
+			Metric: &types.Metric{Namespace: aws.String(namespace), MetricName: aws.String(metric), Dimensions: dims},
+			Period: aws.Int32(int32(period / time.Second)), //nolint:gosec // a period is at most a day
+			Stat:   aws.String(stat),
+		},
+	}
+}
+
+// metricData reads queries over [start, end), every page, and returns each query's
+// datapoints by its ID. A series that CloudWatch couldn't read whole fails it.
+func metricData(ctx context.Context, c CloudWatch, queries []types.MetricDataQuery, start, end time.Time) (map[string][]point, error) {
+	data := map[string][]point{}
+	pages := cloudwatch.NewGetMetricDataPaginator(c, &cloudwatch.GetMetricDataInput{MetricDataQueries: queries, StartTime: &start, EndTime: &end})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("awsbackfill: read metrics: %w", err)
+		}
+		for _, r := range page.MetricDataResults {
+			id := aws.ToString(r.Id)
+			if err = deployed.CheckMetricResult(r, !pages.HasMorePages()); err != nil {
+				return nil, fmt.Errorf("awsbackfill: read metrics: %w", err)
+			}
+			if len(r.Timestamps) != len(r.Values) {
+				return nil, fmt.Errorf("awsbackfill: CloudWatch returned %d timestamps for %d values of %s", len(r.Timestamps), len(r.Values), id)
+			}
+			for i, v := range r.Values {
+				data[id] = append(data[id], point{at: r.Timestamps[i], value: v})
+			}
+		}
+	}
+	return data, nil
 }

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lucindo/dynaflux/internal/backfill"
 	"github.com/lucindo/dynaflux/internal/backfill/awsbackfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/deployed"
@@ -31,18 +32,21 @@ func statusCommand() command {
 		doc: `Status reads each region of the deployed store at once. It shows the state of every
 view version (docs/spec/lifecycle.md §3) as a table of versions by region, then
 for each region its catalog, the backfill jobs, and for each stream the
-projector's lag, the event source mappings and the archive's freshness. Last, on
-stderr, it lists what needs an action, each with the command that takes it: a
-broken version, a version that needs a backfill, an interrupted backfill, a gap
-Lambda recorded in the bucket, projectors blocked on a version their catalog
-doesn't know, projector lag, another reader of a stream, a mapping that isn't
-enabled, and a stale archive. It reads the newest 100 of Lambda's records, and
+projector's lag, the event source mappings, how far the archive is delivered, and
+whether it is complete (§5.5). Last, on stderr, it lists what needs an action,
+each with the command that takes it: a broken version, a version that needs a
+backfill, an interrupted backfill, a gap Lambda recorded in the bucket, a
+suspected gap or an incomplete archive that affects a version, a young stream
+without an origin, projectors blocked on a version their catalog doesn't know,
+projector lag, another reader of a stream, a mapping that isn't enabled, and a
+stale archive. It reads the newest 100 of Lambda's records, and
 none written before every version's activation. -verbose adds each delivery
 unit's progress and fences. -json prints one JSON document instead, with
 "format": 1.
 
 With -endpoint it reads DynamoDB Local, where mappings, metrics, gaps and the
-jobs' executions aren't available.
+jobs' executions aren't available, and judges an archive by the holes its meta
+table records.
 
 Exit status: 0 when nothing needs an action or only warnings do, 1 when an error
 does, and 2 for usage and AWS access problems, and when a region, or part of
@@ -67,7 +71,8 @@ type statusOptions struct {
 type regionStatus struct {
 	*deployment
 
-	local bool // on DynamoDB Local: no executions, mappings, metrics or gaps
+	local bool      // on DynamoDB Local: no executions, mappings, metrics or gaps
+	now   time.Time // when status started
 	// execs is what runs each running job on AWS; a job whose execution couldn't be read is
 	// absent.
 	execs   map[string]deployed.Execution
@@ -89,10 +94,26 @@ type streamStatus struct {
 	lagUnread     bool
 	archive       string // the delivery stream that archives it in the region; "" for none
 	freshness     *time.Duration
+	delivered     *time.Time // Firehose had delivered every record it took before then
 	failed        int64
 	archiveUnread bool
-	gaps          []deployed.Gap
-	units         []meta.Unit // with -verbose
+	check         *archiveCheck // with events: all in the region; nil locally without an origin
+	// suspects are the gaps suspected in the views applied live (lifecycle.md §7.2), from the
+	// stream item and, with an origin, AWS's facts.
+	suspects []backfill.Verdict
+	gaps     []deployed.Gap
+	units    []meta.Unit // with -verbose
+}
+
+// archiveCheck is what status read of the completeness of the region's archive of a stream
+// that it archives with events: all.
+type archiveCheck struct {
+	since     time.Time // the origin's time; zero without one
+	born      time.Time // the stream table's; zero locally
+	verdict   backfill.Verdict
+	noOrigin  bool      // no origin, or one that the stream table voids
+	unchecked time.Time // hours since the origin before it went unchecked
+	unread    bool
 }
 
 func (c *cli) status(o statusOptions, args []string) int {
@@ -116,7 +137,7 @@ func (c *cli) status(o statusOptions, args []string) int {
 	rs := make([]*regionStatus, len(f.regions))
 	var wg sync.WaitGroup
 	for i, d := range f.regions {
-		rs[i] = &regionStatus{deployment: d, local: f.endpoint != ""}
+		rs[i] = &regionStatus{deployment: d, local: f.endpoint != "", now: now}
 		if d.err == nil && d.cat != nil {
 			wg.Go(func() { rs[i].read(ctx, f, o.verbose, now) })
 		}
@@ -163,6 +184,12 @@ func (r *regionStatus) read(ctx context.Context, f *fleet, verbose bool, now tim
 				r.unread = append(r.unread, fmt.Errorf("the units of stream %s couldn't be read: %w", s.Name, err))
 			}
 		}
+		if err := r.readArchive(ctx, f, &ss); err != nil {
+			r.unread = append(r.unread, fmt.Errorf("the history of stream %s couldn't be read: %w", s.Name, err))
+			if r.cat.ExactHandoff(r.region, s.Name) {
+				ss.check = &archiveCheck{unread: true}
+			}
+		}
 		r.streams = append(r.streams, ss)
 	}
 	if !r.local {
@@ -170,11 +197,53 @@ func (r *regionStatus) read(ctx context.Context, f *fleet, verbose bool, now tim
 	}
 }
 
-// readExecutions reads what runs each running job that doesn't wait.
+// readArchive reads the gaps suspected in the views of s's stream, and, where the region
+// archives it with events: all, the completeness of its archive: on AWS by every rule; locally,
+// where AWS's facts aren't available, by the holes of the stream item alone, which needs an
+// origin for a check.
+func (r *regionStatus) readArchive(ctx context.Context, f *fleet, s *streamStatus) error {
+	exact := r.cat.ExactHandoff(r.region, s.name)
+	if r.local {
+		item, _, err := r.meta.Stream(ctx, s.name)
+		if err != nil {
+			return err
+		}
+		e := backfill.Evidence{Stream: item, Exact: exact}
+		if o := item.Origin; o != nil {
+			e.Facts = backfill.Facts{ARN: o.ARN, Mapping: true}
+			if exact {
+				s.check = &archiveCheck{since: o.At, verdict: backfill.Completeness(e)}
+			}
+		}
+		s.suspects = backfill.Suspected(e)
+		return nil
+	}
+	e, err := backfill.Gather(ctx, f.backfillEnv(r.deployment), s.name)
+	if err != nil {
+		return err
+	}
+	s.suspects = backfill.Suspected(e)
+	if !exact {
+		return nil
+	}
+	table := f.naming.StreamTable(s.name)
+	born, _, err := r.clients.tables.Born(ctx, table)
+	if err != nil {
+		return fmt.Errorf("describe %s: %w", table, err)
+	}
+	a := &archiveCheck{born: born, verdict: backfill.Completeness(e), noOrigin: true, unchecked: e.Unchecked}
+	if o := e.Stream.Origin; o != nil {
+		a.since, a.noOrigin = o.At, o.Void(e.ARN)
+	}
+	s.check = a
+	return nil
+}
+
+// readExecutions reads what runs each running job.
 func (r *regionStatus) readExecutions(ctx context.Context, f *fleet) {
 	r.execs = map[string]deployed.Execution{}
 	for _, j := range r.jobs {
-		if j.State != meta.JobRunning || j.Waits != "" {
+		if j.State != meta.JobRunning {
 			continue
 		}
 		e, err := deployed.Running(ctx, r.clients.sfn, f.machine(r.region), j)
@@ -240,7 +309,8 @@ func (r *regionStatus) readDelivery(ctx context.Context, f *fleet, now time.Time
 			s.lag = &lag
 		}
 		if fresh, ok := m.Freshness[s.archive]; ok {
-			s.freshness = &fresh
+			delivered := m.Delivered[s.archive]
+			s.freshness, s.delivered = &fresh, &delivered
 		}
 		s.failed = m.FailedRows[s.archive]
 	}

@@ -42,8 +42,10 @@ func TestStepFillsAVersionFromTheArchive(t *testing.T) {
 		}
 		f.record("delivered", "u3", 1, "a", 4)
 		f.record("delivered", "u3", 2, "a", 4)
-		// A record Firehose delivered twice, the second time to the error prefix.
-		f.repeat("delivered", 2, "errors")
+		// A record Firehose delivered twice, the second time to the error prefix, which also
+		// holds a line of a test record that Dynaflux didn't write.
+		f.repeat("delivered", 2, "errors/firehose/events/1")
+		f.archive.addError("errors/firehose/events/1", []byte(`{"probe":true}`))
 		f.start()
 		f.run()
 		if got, want := f.rows("a", "b"), []string{"a 5 69", "b 2 2"}; !slices.Equal(got, want) {
@@ -53,8 +55,10 @@ func TestStepFillsAVersionFromTheArchive(t *testing.T) {
 		if j.State != meta.JobDone || j.Phase != meta.PhaseLive || j.Fresh || j.Error != nil {
 			t.Errorf("job %s in %s, fresh %v, error %v; want done in live, not fresh, no error", j.State, j.Phase, j.Fresh, j.Error)
 		}
-		if j.Staged != 10 || j.Applied != 7 || j.Skipped != 3 || j.Chunks != 3 {
-			t.Errorf("staged %d, applied %d, skipped %d, chunks %d; want 10, 7, 3, 3", j.Staged, j.Applied, j.Skipped, j.Chunks)
+		// The repeat is staged in the error prefix's run, and skipped with the 3 records above
+		// fences.
+		if j.Staged != 11 || j.Applied != 7 || j.Skipped != 4 || j.Chunks != 3 || j.Archive.Errors.Foreign != 1 {
+			t.Errorf("staged %d, applied %d, skipped %d, chunks %d, foreign %d; want 11, 7, 4, 3, 1", j.Staged, j.Applied, j.Skipped, j.Chunks, j.Archive.Errors.Foreign)
 		}
 		if s := f.state().State; s != meta.Live {
 			t.Errorf("version %s, want live", s)
@@ -65,12 +69,12 @@ func TestStepFillsAVersionFromTheArchive(t *testing.T) {
 	})
 }
 
-// repeat adds the line-th line of file to file to again.
+// repeat adds the record on the line-th line of file to the error object to.
 func (f *fixture) repeat(file string, line int, to string) {
 	f.archive.mu.Lock()
 	lines := strings.SplitAfter(string(f.archive.files[file]), "\n")
 	f.archive.mu.Unlock()
-	f.archive.add(to, []byte(strings.TrimSuffix(lines[line-1], "\n")))
+	f.archive.addError(to, []byte(strings.TrimSuffix(lines[line-1], "\n")))
 }
 
 // A stream that never held an event in the region goes live right after its fences, without
@@ -148,7 +152,7 @@ func TestStepFencesEveryVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 		firehose := pausedArchiver{entered: make(chan struct{}), release: make(chan struct{})}
-		core := projector.New(older.Projector(), f.b, firehose, projector.Config{Naming: f.env.Naming})
+		core := projector.New(older.Projector(), f.b, firehose, projector.Config{Naming: f.env.Naming, Region: "us-east-1"})
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 		defer cancel()
 		// The older build's batch reads the unit, then waits at its archive write.
@@ -172,7 +176,7 @@ func TestStepFencesEveryVersion(t *testing.T) {
 			t.Fatalf("the older build's batch: %v; want it to fail on the fence", err)
 		}
 		// Lambda retries the batch, now on a build with the version.
-		current := projector.New(f.cat.Projector(), f.b, nil, projector.Config{Naming: f.env.Naming})
+		current := projector.New(f.cat.Projector(), f.b, nil, projector.Config{Naming: f.env.Naming, Region: "us-east-1"})
 		if _, err = current.Handle(ctx, batch); err != nil {
 			t.Fatal(err)
 		}
@@ -194,9 +198,8 @@ func (a pausedArchiver) Archive(context.Context, string, string, []projector.Rec
 	return nil
 }
 
-// Where the archive can't be read yet, a stream that isn't fresh parks the job at the
-// watermark: the step ends done, without an error that would fail its execution, and the job
-// item says what it waits for. A step of it again changes nothing.
+// A job split by fences of a stream with events fails each step at the watermark in an
+// environment without the region's archive, and stays running for a step that has one.
 func TestStepWithoutAnArchive(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -204,17 +207,11 @@ func TestStepWithoutAnArchive(t *testing.T) {
 		f.env.Archive = nil
 		f.putEvent()
 		f.start()
-		for range 2 {
-			if wait, done, err := f.step(); wait != 0 || !done || err != nil {
-				t.Fatalf("wait %v, done %v, error %v; want done", wait, done, err)
-			}
+		if _, done, err := f.step(); done || err == nil || !strings.Contains(err.Error(), "can't read its archive") {
+			t.Fatalf("done %v, error %v; want the archive unreadable", done, err)
 		}
-		if j := f.job(); j.State != meta.JobRunning || j.Phase != meta.PhaseWatermark || j.Waits != meta.WaitArchive || j.Error != nil {
-			t.Errorf("job %s in %s, waits %q, error %+v; want running at the watermark, waiting for the archive read", j.State, j.Phase, j.Waits, j.Error)
-		}
-		// A later release that reads the archive resumes it with a claim.
-		if j, err := backfill.Start(t.Context(), f.m, request()); err != nil || j.Attempt != 2 || j.Waits != "" {
-			t.Errorf("claimed: attempt %d, waits %q, %v; want attempt 2 waiting for nothing", j.Attempt, j.Waits, err)
+		if j := f.job(); j.State != meta.JobRunning || j.Phase != meta.PhaseWatermark {
+			t.Errorf("job %s in %s; want running at the watermark", j.State, j.Phase)
 		}
 	})
 }
@@ -292,6 +289,7 @@ CREATE MATERIALIZED VIEW counts ORDER BY (account) AS SELECT account, count() AS
 						t.Fatal(err)
 					}
 				}
+				f.recordOrigin()
 				f.start()
 				_, _, err := f.step()
 				checkActivation(t, f, err, tt.want)
@@ -519,7 +517,7 @@ func TestStepRestagesAMissingRun(t *testing.T) {
 }
 
 // A step that reaches its cutoff while it stages the archive commits what it read: the next
-// step resumes at the first file it didn't read.
+// step resumes after the last row it read.
 func TestStepCommitsTheArchiveAtItsCutoff(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -542,8 +540,12 @@ func TestStepCommitsTheArchiveAtItsCutoff(t *testing.T) {
 			t.Fatal(err)
 		}
 		j := f.job()
-		if len(j.Runs) != 1 || j.Staged != 2 || !strings.HasSuffix(j.Runs[0].Name, "-f2") || j.Phase != meta.PhaseStage {
-			t.Errorf("job in %s, staged %d in runs %+v; want 2 in a run of 2 files, in stage", j.Phase, j.Staged, j.Runs)
+		if len(j.Runs) != 1 || j.Staged != 2 || j.Archive.File != 1 || j.Archive.Skip != 1 || j.Phase != meta.PhaseStage {
+			t.Errorf("job in %s at %+v, staged %d in runs %+v; want 2 in a run, in stage after file 1's first row", j.Phase, j.Archive, j.Staged, j.Runs)
+		}
+		f.run()
+		if got, want := f.rows("a"), []string{"a 3 30"}; !slices.Equal(got, want) {
+			t.Errorf("rows %q, want %q", got, want)
 		}
 	})
 }
@@ -571,7 +573,7 @@ func TestStepStagesAgainAfterARestageItDidNotSee(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := f.m.UpdateJob(t.Context(), totals, func(j *meta.Job) (bool, error) {
-				j.Runs, j.Phase = nil, meta.PhaseStage
+				j.Runs, j.Phase, j.Archive = nil, meta.PhaseStage, meta.ArchiveStage{Scanned: j.Archive.Scanned, Tries: j.Archive.Tries}
 				return true, nil
 			}); err != nil {
 				t.Fatal(err)

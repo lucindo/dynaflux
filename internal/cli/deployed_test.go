@@ -114,7 +114,7 @@ func project(t *testing.T, b store.Backend, naming catalog.Naming, cat *engine.C
 		{expr.String("u1"), expr.String("/home"), expr.Uint(300), tags("it's"), at("1999-12-30T09:00:00Z")},
 		{expr.String("u1"), expr.String("/cart"), expr.Uint(50), tags(), at("1999-12-31T12:00:00.123456Z")},
 	}
-	core := projector.New(cat.Projector(), b, nil, projector.Config{Naming: naming})
+	core := projector.New(cat.Projector(), b, nil, projector.Config{Naming: naming, Region: "us-east-1"})
 	for i, ev := range events {
 		res, err := e.Append(ctx, cat, "page_views", [][]expr.Value{ev}, engine.AppendMode{})
 		if err == nil {

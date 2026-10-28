@@ -32,25 +32,31 @@ func backfillCommand() command {
 the region's backfill state machine runs (docs/spec/lifecycle.md §5). A view
 without @v<N> names the version that dynaflux.lock makes current. -all names every
 version of each region's deployed catalog that isn't live, broken or retired, and
-whose job wasn't cancelled and doesn't wait for a later release.
+whose job wasn't cancelled.
 
-Before it writes, backfill prints what it will do in each region: start a job,
-resume an interrupted or cancelled one, leave a running one, or nothing for a live
-version. A new job activates its version, which can't be undone, so backfill asks
-first; -yes answers for it. A new job of a version that counts or sums reads the
-region's archive when its stream has no events yet and the region archives it
-with events: all; otherwise the stream table, split by time for a version that
-counts or sums. -source chooses.
+First, in each region that archives a stream with events: all, backfill records
+the stream's origin while the stream has no events yet, so that the region's
+archive of it is complete from then on (docs/spec/lifecycle.md §5.5): -all for
+every stream, and otherwise for the streams of the versions it names. It prints a
+line for each origin it records, and with -all warns about a stream table less
+than 23 hours old that still has none.
+
+Before it starts jobs, backfill prints what it will do in each region: start a
+job, resume an interrupted or cancelled one, leave a running one, or nothing for a
+live version. A new job activates its version, which can't be undone, so backfill
+asks first; -yes answers for it. A new job reads the region's archive when it is
+complete; otherwise the stream table, split by time for a version that counts or
+sums. -source chooses.
 
 -rate limits the records each job applies a second, and changes it on a running
-job. -cancel stops the jobs; the versions stay activating. -watch follows the jobs
-until they end; interrupting it leaves them running. With -json, -watch prints a
-JSON line with "format": 1, then one for each change of a job, and the plan goes
-to stderr.
+job. -cancel stops the jobs, and the Athena query a job runs on the archive; the
+versions stay activating. -watch follows the jobs until they end; interrupting it leaves them
+running. With -json, -watch prints a JSON line with "format": 1, then one for each
+change of a job, and the plan goes to stderr.
 
 Exit status: 0 when nothing was refused, and with -watch every version is live; 1
-when a version was refused, or with -watch one broke, its job failed or waits, or
-the watch was interrupted; and 2 for usage, I/O and AWS access problems.
+when a version was refused, or with -watch one broke, its job failed, or the
+watch was interrupted; and 2 for usage, I/O and AWS access problems.
 `,
 		setup: func(fs *flag.FlagSet) func(*cli, []string) int {
 			o := backfillOptions{}
@@ -61,7 +67,7 @@ the watch was interrupted; and 2 for usage, I/O and AWS access problems.
 			fs.Var(&o.rate, "rate", "apply at most `n` records a second in each job; 0 for no limit")
 			fs.BoolVar(&o.watch, "watch", false, "follow the jobs until they end")
 			fs.BoolVar(&o.json, "json", false, "with -watch, print JSON lines")
-			fs.BoolVar(&o.cancel, "cancel", false, "stop the jobs")
+			fs.BoolVar(&o.cancel, "cancel", false, "stop the jobs and their archive queries")
 			fs.BoolVar(&o.yes, "yes", false, "start jobs without asking")
 			return func(c *cli, args []string) int { return c.backfill(o, args) }
 		},
@@ -241,13 +247,17 @@ type planItem struct {
 
 // regionPlan is what a run does in a region.
 type regionPlan struct {
-	region string
-	items  []*planItem
-	err    error // the region couldn't be read
+	region   string
+	origins  []string // the streams whose origins the run recorded
+	items    []*planItem
+	findings []finding // warnings about the region's archive
+	err      error     // the region couldn't be read
+	// problems are what couldn't be read of the region's archive, which the plan goes without.
+	problems []error
 }
 
-// plan works out, with reads only, what the run does in each region it can work in, the
-// regions at once. It reports each region it can't work in, and returns the status that
+// plan records the origins it can, and works out, otherwise with reads only, what the run
+// does in each region it can work in, the regions at once. It reports each region it can't work in, and returns the status that
 // calls for.
 func (f *fleet) plan(c *cli, o backfillOptions, targets []string) ([]*regionPlan, int) {
 	status := exitOK
@@ -259,14 +269,15 @@ func (f *fleet) plan(c *cli, o backfillOptions, targets []string) ([]*regionPlan
 			status = max(status, s)
 			continue
 		}
-		wg.Go(func() { plans[i].items, plans[i].err = f.planRegion(c, d, o, targets) })
+		wg.Go(func() { plans[i].err = f.planRegion(c, d, o, targets, plans[i]) })
 	}
 	wg.Wait()
 	return plans, status
 }
 
-// planRegion plans each version that targets name, or with -all each that needs a job.
-func (f *fleet) planRegion(c *cli, d *deployment, o backfillOptions, targets []string) ([]*planItem, error) {
+// planRegion records the origins it can, then plans each version that targets name, or with
+// -all each that needs a job, into rp.
+func (f *fleet) planRegion(c *cli, d *deployment, o backfillOptions, targets []string, rp *regionPlan) error {
 	if o.all {
 		for id := range d.cat.Versions() {
 			if j, ok := d.job(id); allNames(o.cancel, d.states[id].State, j, ok) {
@@ -275,41 +286,128 @@ func (f *fleet) planRegion(c *cli, d *deployment, o backfillOptions, targets []s
 		}
 		slices.Sort(targets)
 	}
-	p := &regionPlanner{f: f, c: c, d: d, o: o, fresh: map[string]freshness{}}
-	items := make([]*planItem, 0, len(targets))
+	p := &regionPlanner{f: f, c: c, d: d, o: o, rp: rp, env: f.backfillEnv(d), archives: map[string]*streamArchive{},
+		origins: map[string]backfill.OriginStatus{}}
+	if !o.cancel {
+		p.recordOrigins(targets)
+	}
 	for _, id := range targets {
 		j, ok := d.job(id)
 		it, err := p.item(id, d.states[id], j, ok)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", id, err)
+			return fmt.Errorf("%s: %w", id, err)
 		}
-		items = append(items, it)
+		rp.items = append(rp.items, it)
 	}
-	return items, nil
+	if o.all && !o.cancel {
+		p.missingOrigins()
+	}
+	return nil
 }
 
 // allNames reports whether -all names a version in state whose job, when ok, is j: with
 // -cancel, one whose job runs; otherwise one that isn't live, broken or retired, and whose
-// job wasn't cancelled and doesn't wait for a later release.
+// job wasn't cancelled.
 func allNames(cancel bool, state meta.State, j meta.Job, ok bool) bool {
 	if cancel {
 		return ok && j.State == meta.JobRunning
 	}
-	return state != meta.Live && state != meta.Broken && state != meta.Retired && (!ok || j.State != meta.JobCancelled && j.Waits == "")
+	return state != meta.Live && state != meta.Broken && state != meta.Retired && (!ok || j.State != meta.JobCancelled)
 }
 
 type regionPlanner struct {
-	f     *fleet
-	c     *cli
-	d     *deployment
-	o     backfillOptions
-	fresh map[string]freshness // by stream
+	f        *fleet
+	c        *cli
+	d        *deployment
+	o        backfillOptions
+	rp       *regionPlan
+	env      *backfill.Env
+	archives map[string]*streamArchive        // by stream
+	origins  map[string]backfill.OriginStatus // by stream: what recordOrigins did
 }
 
-// freshness is what CheckStream found of a stream table.
-type freshness struct {
-	fresh bool
-	born  time.Time
+// streamArchive is what the plan read of a stream in the region: its table's birth, and the
+// completeness of the region's archive of it, once a choice needed it.
+type streamArchive struct {
+	born    time.Time
+	verdict *backfill.Verdict
+}
+
+// recordOrigins records the origin of each stream that the region archives with events: all,
+// with -all, or else of the streams of targets, where ADR 0017 §3 allows it now. One that
+// can't be recorded is a problem of the region that the plan goes without: the jobs that the
+// region's archive can't serve read its tables.
+func (p *regionPlanner) recordOrigins(targets []string) {
+	for _, s := range p.d.cat.Streams {
+		named := p.o.all || slices.ContainsFunc(targets, func(id string) bool {
+			vv, ok := p.d.cat.Version(id)
+			return ok && vv.Stream == s.Name
+		})
+		if !named || !p.d.cat.ExactHandoff(p.d.region, s.Name) {
+			continue
+		}
+		st, err := backfill.RecordOrigin(p.c.ctx, p.env, s.Name)
+		if err != nil {
+			p.rp.problems = append(p.rp.problems, fmt.Errorf("record the origin of stream %s: %w", s.Name, err))
+			continue
+		}
+		p.origins[s.Name] = st
+		if st.State == backfill.OriginRecorded {
+			p.rp.origins = append(p.rp.origins, s.Name)
+		}
+	}
+}
+
+// missingOrigins adds DF7217 for each stream that the region archives with events: all and
+// whose table is less than 23 hours old, where recordOrigins found no origin and recorded none.
+func (p *regionPlanner) missingOrigins() {
+	for _, s := range p.d.cat.Streams {
+		st, tried := p.origins[s.Name]
+		if !tried || st.State == backfill.OriginRecorded || st.State == backfill.OriginHeld {
+			continue
+		}
+		a, err := p.archive(s.Name)
+		if err != nil {
+			p.rp.problems = append(p.rp.problems, err)
+			continue
+		}
+		if time.Since(a.born) < backfill.FreshAge {
+			p.rp.findings = append(p.rp.findings, noOrigin(p.d.region, s.Name, a.born, st, prefixFlag(p.o.prefix)))
+		}
+	}
+}
+
+// archive returns the birth of stream's table, reading it the first time.
+func (p *regionPlanner) archive(stream string) (*streamArchive, error) {
+	if a, ok := p.archives[stream]; ok {
+		return a, nil
+	}
+	table := p.d.naming.StreamTable(stream)
+	born, _, err := p.d.clients.tables.Born(p.c.ctx, table)
+	if err != nil {
+		return nil, fmt.Errorf("describe %s: %w", table, err)
+	}
+	a := &streamArchive{born: born}
+	p.archives[stream] = a
+	return a, nil
+}
+
+// verdict returns the completeness of the region's archive of stream, reading it the first
+// time.
+func (p *regionPlanner) verdict(a *streamArchive, stream string) (backfill.Verdict, error) {
+	if a.verdict != nil {
+		return *a.verdict, nil
+	}
+	v := backfill.Verdict{Rule: backfill.RuleOrigin, Reason: p.d.region + " doesn't archive it with events: all"}
+	if p.d.cat.ExactHandoff(p.d.region, stream) {
+		e, err := backfill.Gather(p.c.ctx, p.env, stream)
+		if err != nil {
+			return backfill.Verdict{}, err
+		}
+		v = backfill.Completeness(e)
+	}
+	a.verdict = &v
+	return v, nil
 }
 
 // item plans version id, whose state is vs and whose job, when ok, is j.
@@ -382,12 +480,6 @@ func (p *regionPlanner) jobItem(it *planItem, vv *catalog.ViewVersion, vs meta.V
 			"read its error with dynaflux status, then rebuild the view"), nil
 	case meta.JobCancelled, meta.JobRunning:
 	}
-	if j.Waits != "" {
-		view, _, _ := strings.Cut(it.version, "@")
-		return it.refuse("DF7505", fmt.Sprintf("%s's job in %s waits for the archive read of a later release", it.version, p.d.region),
-			"wait for that release, or fill a new version from the stream table: dynaflux generate -rebuild "+view+
-				", deploy regional.yaml, dynaflux backfill "+view+", then dynaflux retire "+it.version), nil
-	}
 	var running []string
 	if j.State == meta.JobRunning {
 		var err error
@@ -441,31 +533,38 @@ func (p *regionPlanner) cancelItem(it *planItem, ok bool) (*planItem, error) {
 }
 
 // chooseSplit returns the split of a job of vv that isn't activated yet, from the source the
-// region serves now (lifecycle.md §5.2), and the notes that the plan line adds to it. A source
-// that -source asks for and the region can't serve refuses it, as DF7503.
+// region serves now (lifecycle.md §5.2), and the notes that the plan line adds to it. The
+// archive source that -source asks for, of an archive that isn't complete, refuses it, as
+// DF7503. With -source table, an archive whose completeness can't be read is a problem of the
+// region, not of the job: a table rebuild is how a gap is repaired.
 func (p *regionPlanner) chooseSplit(it *planItem, vv *catalog.ViewVersion) (meta.Split, string, error) {
-	fr, ok := p.fresh[vv.Stream]
-	if !ok {
-		var err error
-		if fr.fresh, fr.born, err = backfill.CheckStream(p.c.ctx, p.d.clients.tables, p.d.clients.data, p.d.naming.StreamTable(vv.Stream)); err != nil {
-			return "", "", err
-		}
-		p.fresh[vv.Stream] = fr
+	a, err := p.archive(vv.Stream)
+	if err != nil {
+		return "", "", err
 	}
-	split, err := backfill.Choose(p.d.cat, p.d.region, it.version, fr.fresh, p.o.source)
-	if errors.Is(err, backfill.ErrArchiveSource) {
-		it.refuse("DF7503", strings.TrimPrefix(err.Error(), "backfill: "), "fill it with -source table")
+	v, err := p.verdict(a, vv.Stream)
+	switch {
+	case err != nil && p.o.source == backfill.SourceTable:
+		p.rp.problems = append(p.rp.problems, fmt.Errorf("the completeness of the archive of stream %s: %w", vv.Stream, err))
+	case err != nil:
+		return "", "", fmt.Errorf("the completeness of the archive of stream %s, which -source table doesn't need: %w", vv.Stream, err)
+	}
+	split, err := backfill.Choose(p.d.cat, p.d.region, it.version, v, p.o.source)
+	if errors.Is(err, backfill.ErrIncomplete) {
+		it.refuse("DF7503", fmt.Sprintf("the archive of %s in %s isn't complete: %s", vv.Stream, p.d.region, v.Reason),
+			"fill it with -source table")
 		return "", "", nil
 	}
 	if err != nil {
 		return "", "", err
 	}
 	var notes string
-	if since := partialSince(p.d.cat, vv.Stream, split, fr.born); !since.IsZero() {
+	if since := partialSince(p.d.cat, vv.Stream, split, a.born); !since.IsZero() {
 		notes += "; partial since about " + since.UTC().Format(time.DateOnly)
 	}
-	if split == meta.SplitFence {
-		notes += "; if " + vv.Stream + " gets an event before the job's check, the version waits for a later release"
+	s, _ := p.d.cat.Stream(vv.Stream)
+	if r, expires := s.LogRetention.Period(); expires && v.Complete && split != meta.SplitFence {
+		notes += "; the archive is complete, and a table source covers only the last " + r.String()
 	}
 	return split, notes, nil
 }
@@ -536,6 +635,10 @@ func (c *cli) printPlan(plans []*regionPlan, o backfillOptions) int {
 	}
 	status, items := exitOK, 0
 	for _, p := range plans {
+		for _, err := range p.problems {
+			c.errorf("dynaflux backfill: %s: %v", p.region, err)
+			status = exitUsage
+		}
 		if p.err != nil {
 			c.errorf("dynaflux backfill: %s: %v", p.region, p.err)
 			status = exitUsage
@@ -562,16 +665,22 @@ func (c *cli) printPlan(plans []*regionPlan, o backfillOptions) int {
 				status = max(status, exitErrors)
 			}
 		}
+		for _, f := range p.findings {
+			f.write(&c.errOut)
+		}
 	}
 	return status
 }
 
-// print prints the region's plan lines.
+// print prints the region's plan lines, after the origins the run recorded.
 func (p *regionPlan) print(out *strings.Builder) {
-	if len(p.items) == 0 {
+	if len(p.items) == 0 && len(p.origins) == 0 {
 		return
 	}
 	fmt.Fprintf(out, "%s:\n", p.region)
+	for _, s := range p.origins {
+		fmt.Fprintf(out, "  stream %s: origin recorded; the region's archive of it is complete from now on\n", s)
+	}
 	width := 0
 	for _, it := range p.items {
 		width = max(width, len(it.version))

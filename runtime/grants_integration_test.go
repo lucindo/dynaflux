@@ -31,7 +31,7 @@ const account = "000000000000"
 // checks that a call used each action the role grants, except where the role acts for
 // others, and that controls that break the role fail the check.
 func runTests(m *testing.M) int {
-	s, err := loadSuite()
+	s, err := loadSuite(simStore)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rule suite:", err)
 		return 1
