@@ -169,6 +169,13 @@ us-east-1: error DF7506: plan_counts@v1's job failed in us-east-1 on an archive 
 us-east-1:
   stream signups: origin recorded; the region's archive of it is complete from now on
   plan_counts@v1  refused
+-- want/idempotent_from_a_complete_archive.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/idempotent_from_a_complete_archive.stdout --
+us-east-1:
+  page_seen@v1  start    archive source, split by fences
+us-east-1: page_seen@v1: started in execution page_seen-v1-2fd4c9-a1
 -- want/interrupted.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/interrupted.stdout --

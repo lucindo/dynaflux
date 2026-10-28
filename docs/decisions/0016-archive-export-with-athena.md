@@ -7,7 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 - Status: Accepted. Amends [ADR 0011](0011-backfill-coordinator.md), whose decision
   stands: the `backfill.Archive` seam is reshaped, the job item's `stage` gains the
-  archive fields, and its `waits` goes, since no job waits for a later release.
+  archive fields, and its `waits` goes, since no job waits for a later release. Every
+  version, idempotent ones included, reads the archive when the region's archive of its
+  stream is complete, where ADR 0011 §5 had an idempotent version read the table.
 - Date: 2026-10-27
 
 ## Context

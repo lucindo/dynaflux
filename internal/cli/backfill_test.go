@@ -484,6 +484,18 @@ func backfillCases() []backfillCase {
 			change: func(_ *testing.T, s *backfillStore) { s.backends["us-west-2"] = mem.New() },
 		},
 		{name: "archive without an origin", args: []string{"-source", "archive", "page_counts", "-region", "us-west-2"}, status: 1},
+		{
+			// An idempotent version reads a complete archive, as any other does.
+			name: "idempotent from a complete archive", args: slices.Concat([]string{"page_seen", "-yes"}, east),
+			change: func(t *testing.T, s *backfillStore) {
+				t.Helper()
+				s.origin(t, "us-east-1", "page_views", time.Now().Add(-71*time.Hour))
+			},
+			check: func(t *testing.T, s *backfillStore) {
+				t.Helper()
+				checkJob(t, s, "us-east-1", "page_seen@v1", meta.SplitFence, 1)
+			},
+		},
 		{name: "archive of a fresh stream", args: slices.Concat([]string{"-source", "archive", "plan_counts", "-yes"}, east)},
 		{name: "table of a fresh stream", args: slices.Concat([]string{"-source", "table", "plan_counts", "-yes"}, east)},
 		{

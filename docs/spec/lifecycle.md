@@ -275,7 +275,7 @@ version is activated and kept for its life:
 
 | Source | Holds | Used when |
 |--------|-------|-----------|
-| The region's **archive** | Every event since the region's archive began | The region's archive of the stream is complete ([§5.5](#55-when-the-archive-is-complete)), unless `-source table` asks for the table. |
+| The region's **archive** | Every event since the region's archive began | The region's archive of the stream is complete ([§5.5](#55-when-the-archive-is-complete)), for every version, idempotent ones included, unless `-source table` asks for the table. |
 | The region's **stream table** replica | Events inside the stream's `LOG RETENTION` | Otherwise |
 
 `-source table|archive` chooses for a new job; `backfill` refuses `archive` when the
