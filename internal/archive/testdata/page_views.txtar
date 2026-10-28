@@ -21,8 +21,13 @@ PRIMARY KEY (path);
 -- events/page_views --
 ["/pricing","18446744073709551615",null,["a","b"],"12.50","3","01JB8Z9X4Q7M3N2P5R6S8T0V1W","2025-10-26 10:40:00.123456","2025-10-26 10:40:00.130000","us-east-1"]
 ["/a?x=1&y=<2>","0","https://example.com/",[],"-0.05","0","01JB8Z9X4Q7M3N2P5R6S8T0V1X","2025-10-26 10:40:01.000000","2025-10-26 10:40:01.000001","us-west-2"]
+-- unload/page_views --
+{"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V1W","event_time":"2025-10-26 10:40:00.123456","ingest_time":"2025-10-26 10:40:00.130000","origin_region":"us-east-1","path":"/pricing","user_id":"18446744073709551615","tags":["a","b"],"amount":"12.50","clicks":"3","_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":"2025-10-26 10:40:00.000000"}
+{"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V1X","event_time":"2025-10-26 10:40:01.000000","ingest_time":"2025-10-26 10:40:01.000001","origin_region":"us-west-2","path":"/a?x=1&y=<2>","user_id":"0","referrer":"https://example.com/","tags":[],"amount":"-0.05","clicks":"0","_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":"2025-10-26 10:40:00.000000"}
 -- events/page --
 ["/","01JB8Z9X4Q7M3N2P5R6S8T0V1Y","1970-01-01 00:00:00.000000","2025-10-26 10:40:02.000000","us-east-1"]
+-- unload/page --
+{"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V1Y","event_time":"1970-01-01 00:00:00.000000","ingest_time":"2025-10-26 10:40:02.000000","origin_region":"us-east-1","path":"/","_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":"2025-10-26 10:40:00.000000"}
 -- want/fingerprint --
 sha256:4508e0c737b6b831ac5c03d18f47f4921b77af3e3dd18776499609e273de49f9
 -- want/page.create.sql --
@@ -51,8 +56,26 @@ FROM (
     PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
   FROM "prod_analytics"."page")
 WHERE "_dedup_rn" = 1
+-- want/page.partitions.sql --
+SELECT CAST("partition"."event_time_day" AS varchar) AS "day", "record_count", "total_size"
+FROM "prod_analytics"."page$partitions"
 -- want/page.records --
 {"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V1Y","event_time":0,"ingest_time":1761475202000000,"origin_region":"us-east-1","path":"/","_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":1761475200000000}
+-- want/page.unload.sql --
+UNLOAD (
+  SELECT
+    "event_id",
+    CAST("event_time" AS varchar) AS "event_time",
+    CAST("ingest_time" AS varchar) AS "ingest_time",
+    "origin_region",
+    "path",
+    "_shard",
+    "_seq",
+    CAST("_arrival" AS varchar) AS "_arrival"
+  FROM "prod_analytics"."page"
+  WHERE "event_time" >= TIMESTAMP '2025-10-26 00:00:00.000000' AND "event_time" < TIMESTAMP '2025-10-26 06:00:00.123456')
+TO 's3://prod-analytics-123456789012-us-east-1-an/backfill/daily_views@v2/1761436800000000/unload/plan-1-7d1c0e/1761436800000000-1761458400123456/0/'
+WITH (format = 'JSON')
 -- want/page_views.create.sql --
 CREATE TABLE `prod_analytics`.`page_views` (
   `event_id` string,
@@ -89,6 +112,29 @@ FROM (
     PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
   FROM "prod_analytics"."page_views")
 WHERE "_dedup_rn" = 1
+-- want/page_views.partitions.sql --
+SELECT CAST("partition"."event_time_day" AS varchar) AS "day", "record_count", "total_size"
+FROM "prod_analytics"."page_views$partitions"
 -- want/page_views.records --
 {"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V1W","event_time":1761475200123456,"ingest_time":1761475200130000,"origin_region":"us-east-1","path":"/pricing","user_id":"18446744073709551615","tags":["a","b"],"amount":"12.50","clicks":3,"_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":1761475200000000}
 {"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V1X","event_time":1761475201000000,"ingest_time":1761475201000001,"origin_region":"us-west-2","path":"/a?x=1&y=<2>","user_id":"0","referrer":"https://example.com/","tags":[],"amount":"-0.05","clicks":0,"_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":1761475200000000}
+-- want/page_views.unload.sql --
+UNLOAD (
+  SELECT
+    "event_id",
+    CAST("event_time" AS varchar) AS "event_time",
+    CAST("ingest_time" AS varchar) AS "ingest_time",
+    "origin_region",
+    "path",
+    CAST("user_id" AS varchar) AS "user_id",
+    "referrer",
+    "tags",
+    CAST("amount" AS varchar) AS "amount",
+    CAST("clicks" AS varchar) AS "clicks",
+    "_shard",
+    "_seq",
+    CAST("_arrival" AS varchar) AS "_arrival"
+  FROM "prod_analytics"."page_views"
+  WHERE "event_time" >= TIMESTAMP '2025-10-26 00:00:00.000000' AND "event_time" < TIMESTAMP '2025-10-26 06:00:00.123456')
+TO 's3://prod-analytics-123456789012-us-east-1-an/backfill/daily_views@v2/1761436800000000/unload/plan-1-7d1c0e/1761436800000000-1761458400123456/0/'
+WITH (format = 'JSON')

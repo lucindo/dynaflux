@@ -26,17 +26,30 @@ const (
 	minimalConfig = "store: analytics\nregions: [us-east-1]\n"
 	wantPrefix    = "want/"
 	eventsPrefix  = "events/"
+	unloadPrefix  = "unload/"
 	db            = "prod_analytics"
 	warehouse     = "s3://prod-analytics-123456789012-us-east-1-an/warehouse"
+	unloadDest    = "s3://prod-analytics-123456789012-us-east-1-an/backfill/daily_views@v2/1761436800000000/unload/plan-1-7d1c0e/" +
+		"1761436800000000-1761458400123456/0/"
+)
+
+// The slice of every golden export: from midnight UTC to 6 a.m. UTC and a fraction, given in
+// another zone. The statement writes both in UTC.
+var (
+	sliceFrom = time.Date(2025, 10, 26, 0, 0, 0, 0, time.UTC)                              //nolint:gochecknoglobals // test fixture
+	sliceTo   = time.Date(2025, 10, 26, 8, 0, 0, 123456000, time.FixedZone("UTC+2", 7200)) //nolint:gochecknoglobals // test fixture
 )
 
 // TestGolden writes the archive schema of us-east-1 for each archive under testdata:
 //   - Its files, other than the want/ sections, are a project. An archive without
 //     dynaflux.yaml gets a minimal one.
 //   - "-- want/<table>.create.sql --" and "-- want/<table>.dedup.sql --" hold each table's
-//     CREATE TABLE and dedup view, and "-- want/fingerprint --" the schema's fingerprint.
+//     CREATE TABLE and dedup view, "-- want/<table>.unload.sql --" and
+//     "-- want/<table>.partitions.sql --" a backfill's export of one slice and its partitions
+//     query, and "-- want/fingerprint --" the schema's fingerprint.
 //   - "-- events/<stream> --" holds events, one per line ([readEvents]), and
-//     "-- want/<stream>.records --" their archive records.
+//     "-- want/<stream>.records --" their archive records. "-- unload/<stream> --" holds
+//     the same events as rows of an export, written by hand ([TestDecodeReadsExports]).
 //
 // go test -update rewrites the want/ sections; review the diff.
 func TestGolden(t *testing.T) {
@@ -63,6 +76,20 @@ func TestGolden(t *testing.T) {
 	}
 }
 
+// A quote in the destination stays inside its string literal.
+func TestUnloadQuotesItsDestination(t *testing.T) {
+	t.Parallel()
+	cat := loadProject(t, fstest.MapFS{
+		"dynaflux.yaml":  {Data: []byte(minimalConfig)},
+		"dynaflux/s.sql": {Data: []byte("CREATE STREAM clicks (page String) PRIMARY KEY (page);")},
+	})
+	stream, _ := cat.Stream("clicks")
+	got := archive.Unload(db, stream, sliceFrom, sliceTo, "s3://bucket/it's/")
+	if want := "\nTO 's3://bucket/it''s/'\nWITH (format = 'JSON')"; !strings.HasSuffix(got, want) {
+		t.Errorf("got\n%s\nwant it to end with%s", got, want)
+	}
+}
+
 func TestAddColumns(t *testing.T) {
 	t.Parallel()
 	got := archive.AddColumns(db, archive.Table{Name: "page_views"}, []archive.Column{
@@ -86,6 +113,9 @@ func generate(t *testing.T, ar *txtar.Archive) map[string][]byte {
 		}
 		files[tb.Name+".create.sql"] = []byte(archive.CreateTable(db, archive.Location(warehouse, db, tb.Name), tb) + "\n")
 		files[tb.Name+".dedup.sql"] = []byte(archive.DedupView(db, tb) + "\n")
+		stream, _ := cat.Stream(tb.Name)
+		files[tb.Name+".unload.sql"] = []byte(archive.Unload(db, stream, sliceFrom, sliceTo, unloadDest) + "\n")
+		files[tb.Name+".partitions.sql"] = []byte(archive.PartitionsQuery(db, stream) + "\n")
 	}
 	for stream, events := range readEvents(t, cat, ar) {
 		enc := archive.NewEncoder(stream)
@@ -98,16 +128,17 @@ func generate(t *testing.T, ar *txtar.Archive) map[string][]byte {
 	return files
 }
 
-// project loads the project that ar's files other than its want/ and events/ sections hold.
-func project(t *testing.T, ar *txtar.Archive) *catalog.Catalog {
-	t.Helper()
+// project loads the project that ar's files other than its want/, events/ and unload/
+// sections hold.
+func project(tb testing.TB, ar *txtar.Archive) *catalog.Catalog {
+	tb.Helper()
 	fsys := fstest.MapFS{"dynaflux.yaml": {Data: []byte(minimalConfig)}}
 	for _, f := range ar.Files {
-		if !strings.HasPrefix(f.Name, wantPrefix) && !strings.HasPrefix(f.Name, eventsPrefix) {
+		if !strings.HasPrefix(f.Name, wantPrefix) && !strings.HasPrefix(f.Name, eventsPrefix) && !strings.HasPrefix(f.Name, unloadPrefix) {
 			fsys[f.Name] = &fstest.MapFile{Data: f.Data}
 		}
 	}
-	return loadProject(t, fsys)
+	return loadProject(tb, fsys)
 }
 
 func checkWant(t *testing.T, ar *txtar.Archive, files map[string][]byte) {

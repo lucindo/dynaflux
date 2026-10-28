@@ -127,6 +127,12 @@ func Location(warehouse, db, stream string) string {
 	return warehouse + "/" + db + "/" + stream + "/iceberg/"
 }
 
+// ErrorPrefix is where in the bucket Firehose writes the records of stream that it fails to
+// deliver.
+func ErrorPrefix(stream string) string {
+	return "errors/firehose/" + stream + "/"
+}
+
 // The forms of names, types and DEFAULT literals that [SchemaFor] writes. Arrays don't nest.
 const (
 	scalarType    = `(?:int|bigint|decimal\([0-9]{1,2},[0-9]{1,2}\)|double|boolean|date|timestamp|string)`

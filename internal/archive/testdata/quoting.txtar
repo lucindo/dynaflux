@@ -15,6 +15,8 @@ CREATE STREAM order (
 PRIMARY KEY (user);
 -- events/order --
 ["2024-05-31","it's \"quoted\" \\ here","1",["it's","tab\there"],null,"line\nbreak","01JB8Z9X4Q7M3N2P5R6S8T0V1Z","2024-05-31 13:45:00.000123","2024-05-31 13:45:01.000000","eu-west-1"]
+-- unload/order --
+{"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V1Z","event_time":"2024-05-31 13:45:00.000123","ingest_time":"2024-05-31 13:45:01.000000","origin_region":"eu-west-1","date":"2024-05-31","user":"it's \"quoted\" \\ here","select":1,"from":["it's","tab\there"],"table":null,"values":"line\nbreak","_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":"2025-10-26 10:40:00.000000"}
 -- want/fingerprint --
 sha256:4ae9651e706a6a01747af860357d07b1cf4d60208daac22e0603c3145144be54
 -- want/order.create.sql --
@@ -53,5 +55,28 @@ FROM (
     PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
   FROM "prod_analytics"."order")
 WHERE "_dedup_rn" = 1
+-- want/order.partitions.sql --
+SELECT CAST("partition"."event_time_day" AS varchar) AS "day", "record_count", "total_size"
+FROM "prod_analytics"."order$partitions"
 -- want/order.records --
 {"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V1Z","event_time":1717163100000123,"ingest_time":1717163101000000,"origin_region":"eu-west-1","date":"2024-05-31","user":"it's \"quoted\" \\ here","select":1,"from":["it's","tab\there"],"values":"line\nbreak","_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":1761475200000000}
+-- want/order.unload.sql --
+UNLOAD (
+  SELECT
+    "event_id",
+    CAST("event_time" AS varchar) AS "event_time",
+    CAST("ingest_time" AS varchar) AS "ingest_time",
+    "origin_region",
+    CAST("date" AS varchar) AS "date",
+    "user",
+    "select",
+    "from",
+    "table",
+    "values",
+    "_shard",
+    "_seq",
+    CAST("_arrival" AS varchar) AS "_arrival"
+  FROM "prod_analytics"."order"
+  WHERE "event_time" >= TIMESTAMP '2025-10-26 00:00:00.000000' AND "event_time" < TIMESTAMP '2025-10-26 06:00:00.123456')
+TO 's3://prod-analytics-123456789012-us-east-1-an/backfill/daily_views@v2/1761436800000000/unload/plan-1-7d1c0e/1761436800000000-1761458400123456/0/'
+WITH (format = 'JSON')

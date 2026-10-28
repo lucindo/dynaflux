@@ -39,6 +39,9 @@ PRIMARY KEY (s);
 -- events/types --
 ["<a href=\"x\">&amp;</a>\u2028\u0001\u001f\u007f é😀","","61f0c404-5cb3-11e7-907b-a6006ad3dba0","255","65535","4294967295","18446744073709551615","-128","-32768","-2147483648","-9223372036854775808","1e+21","-9999999999999999999999999999.9999999999","99999","true","2106-02-07","1970-01-01 00:00:00.001","2024-05-31 13:45:00.000123","9223372036854775807",["0.01","-1.00","12345678.90"],["00000000-0000-0000-0000-000000000000"],["true","false"],["1970-01-01"],["0","255"],["-9223372036854775808"],["0.1","-1.5e-07"],["2106-02-07 06:28:14.999999"],["","é"],"01JB8Z9X4Q7M3N2P5R6S8T0V20","2025-10-26 10:40:00.123456","2025-10-26 10:40:00.130000","us-east-1"]
 ["","x","ffffffff-ffff-ffff-ffff-ffffffffffff","0","0","0","0","0","0","0","9223372036854775807","-1.5e-07","0.0000000001","-1","false","1970-01-01","2024-05-31 13:45:00.123","1970-01-01 00:00:00.000000",null,[],[],[],[],[],[],[],[],[],"01JB8Z9X4Q7M3N2P5R6S8T0V21","2025-10-26 10:40:00.123456","2025-10-26 10:40:00.130000","us-east-1"]
+-- unload/types --
+{"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V20","event_time":"2025-10-26 10:40:00.123456","ingest_time":"2025-10-26 10:40:00.130000","origin_region":"us-east-1","s":"\u003ca href=\"x\"\u003e\u0026amp;\u003c/a\u003e\u2028\u0001\u001f\u007f \u00e9\ud83d\ude00","lc":"","u":"61f0c404-5cb3-11e7-907b-a6006ad3dba0","u8":255,"u16":65535,"u32":"4294967295","u64":"18446744073709551615","i8":-128,"i16":-32768,"i32":-2147483648,"i64":"-9223372036854775808","f":1.0E21,"d":"-9999999999999999999999999999.9999999999","d0":"99999","b":true,"day":"2106-02-07","ms":"1970-01-01 00:00:00.001000","us":"2024-05-31 13:45:00.000123","n":"9223372036854775807","ad":["0.01","-1.00","12345678.90"],"au":["00000000-0000-0000-0000-000000000000"],"ab":[true,false],"ay":["1970-01-01"],"as8":[0,255],"ai64":["-9223372036854775808"],"af":[0.1,-1.5E-7],"at":["2106-02-07 06:28:14.999999"],"astr":["","\u00e9"],"_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":"2025-10-26 10:40:00.000000"}
+{"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V21","event_time":"2025-10-26 10:40:00.123456","ingest_time":"2025-10-26 10:40:00.130000","origin_region":"us-east-1","s":"","lc":"x","u":"ffffffff-ffff-ffff-ffff-ffffffffffff","u8":0,"u16":0,"u32":"0","u64":"0","i8":0,"i16":0,"i32":0,"i64":"9223372036854775807","f":-1.5E-7,"d":"0.0000000001","d0":"-1","b":false,"day":"1970-01-01","ms":"2024-05-31 13:45:00.123000","us":"1970-01-01 00:00:00.000000","n":null,"ad":[],"au":[],"ab":[],"ay":[],"as8":[],"ai64":[],"af":[],"at":[],"astr":[],"_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":"2025-10-26 10:40:00.000000"}
 -- want/fingerprint --
 sha256:220275188c90bd962f3c0fda0885ff09e6edbd04e585508d1aeb56fea944481e
 -- want/types.create.sql --
@@ -121,6 +124,51 @@ FROM (
     PARTITION BY "event_time", "event_id" ORDER BY "_arrival", "_shard", "_seq") AS "_dedup_rn"
   FROM "prod_analytics"."types")
 WHERE "_dedup_rn" = 1
+-- want/types.partitions.sql --
+SELECT CAST("partition"."event_time_day" AS varchar) AS "day", "record_count", "total_size"
+FROM "prod_analytics"."types$partitions"
 -- want/types.records --
 {"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V20","event_time":1761475200123456,"ingest_time":1761475200130000,"origin_region":"us-east-1","s":"<a href=\"x\">&amp;</a>\u2028\u0001\u001f é😀","lc":"","u":"61f0c404-5cb3-11e7-907b-a6006ad3dba0","u8":255,"u16":65535,"u32":4294967295,"u64":"18446744073709551615","i8":-128,"i16":-32768,"i32":-2147483648,"i64":"-9223372036854775808","f":1e+21,"d":"-9999999999999999999999999999.9999999999","d0":"99999","b":true,"day":"2106-02-07","ms":1000,"us":1717163100000123,"n":"9223372036854775807","ad":["0.01","-1.00","12345678.90"],"au":["00000000-0000-0000-0000-000000000000"],"ab":[true,false],"ay":["1970-01-01"],"as8":[0,255],"ai64":["-9223372036854775808"],"af":[0.1,-1.5e-7],"at":[4294967294999999],"astr":["","é"],"_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":1761475200000000}
 {"event_id":"01JB8Z9X4Q7M3N2P5R6S8T0V21","event_time":1761475200123456,"ingest_time":1761475200130000,"origin_region":"us-east-1","s":"","lc":"x","u":"ffffffff-ffff-ffff-ffff-ffffffffffff","u8":0,"u16":0,"u32":0,"u64":"0","i8":0,"i16":0,"i32":0,"i64":"9223372036854775807","f":-1.5e-7,"d":"0.0000000001","d0":"-1","b":false,"day":"1970-01-01","ms":1717163100123000,"us":0,"ad":[],"au":[],"ab":[],"ay":[],"as8":[],"ai64":[],"af":[],"at":[],"astr":[],"_shard":"shardId-00000001761475200000-1a2b3c4d","_seq":"0000000000000000000049668893422340000000","_arrival":1761475200000000}
+-- want/types.unload.sql --
+UNLOAD (
+  SELECT
+    "event_id",
+    CAST("event_time" AS varchar) AS "event_time",
+    CAST("ingest_time" AS varchar) AS "ingest_time",
+    "origin_region",
+    "s",
+    "lc",
+    "u",
+    "u8",
+    "u16",
+    CAST("u32" AS varchar) AS "u32",
+    CAST("u64" AS varchar) AS "u64",
+    "i8",
+    "i16",
+    "i32",
+    CAST("i64" AS varchar) AS "i64",
+    "f",
+    CAST("d" AS varchar) AS "d",
+    CAST("d0" AS varchar) AS "d0",
+    "b",
+    CAST("day" AS varchar) AS "day",
+    CAST("ms" AS varchar) AS "ms",
+    CAST("us" AS varchar) AS "us",
+    CAST("n" AS varchar) AS "n",
+    transform("ad", x -> CAST(x AS varchar)) AS "ad",
+    "au",
+    "ab",
+    transform("ay", x -> CAST(x AS varchar)) AS "ay",
+    "as8",
+    transform("ai64", x -> CAST(x AS varchar)) AS "ai64",
+    "af",
+    transform("at", x -> CAST(x AS varchar)) AS "at",
+    "astr",
+    "_shard",
+    "_seq",
+    CAST("_arrival" AS varchar) AS "_arrival"
+  FROM "prod_analytics"."types"
+  WHERE "event_time" >= TIMESTAMP '2025-10-26 00:00:00.000000' AND "event_time" < TIMESTAMP '2025-10-26 06:00:00.123456')
+TO 's3://prod-analytics-123456789012-us-east-1-an/backfill/daily_views@v2/1761436800000000/unload/plan-1-7d1c0e/1761436800000000-1761458400123456/0/'
+WITH (format = 'JSON')

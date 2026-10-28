@@ -270,15 +270,15 @@ func load(t *testing.T, sql string) *catalog.Catalog {
 	})
 }
 
-func loadProject(t *testing.T, fsys fstest.MapFS) *catalog.Catalog {
-	t.Helper()
+func loadProject(tb testing.TB, fsys fstest.MapFS) *catalog.Catalog {
+	tb.Helper()
 	_, cat, ds := validate.Load(fsys, "/project")
 	if cat == nil {
 		var b bytes.Buffer
 		if err := diag.Write(&b, ds); err != nil {
-			t.Fatal(err)
+			tb.Fatal(err)
 		}
-		t.Fatalf("the project doesn't compile:\n%s", b.Bytes())
+		tb.Fatalf("the project doesn't compile:\n%s", b.Bytes())
 	}
 	return cat
 }

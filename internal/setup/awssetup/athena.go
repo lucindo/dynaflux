@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	"github.com/aws/aws-sdk-go-v2/service/athena/types"
 
+	"github.com/lucindo/dynaflux/internal/archive/athenafail"
 	"github.com/lucindo/dynaflux/internal/setup"
 )
 
@@ -30,13 +31,7 @@ const (
 	stopTimeout = 10 * time.Second
 )
 
-// Athena's error types (https://docs.aws.amazon.com/athena/latest/ug/error-reference.html).
 const (
-	errorThrottling      = 1400 // through 1406: Athena, Glue or S3 throttling
-	errorTableVersions   = 1402 // too many Glue table versions, which waiting doesn't fix
-	errorThrottlingLast  = 1406
-	errorPermission      = 1500
-	errorPermissionS3    = 1501
 	commitConflictReason = "ICEBERG_COMMIT_ERROR"
 	// Two CREATE TABLEs of one table race, such as a request CloudFormation delivered twice.
 	alreadyExistsReason = "AlreadyExistsException"
@@ -71,10 +66,10 @@ func (a *athenaRunner) Exec(ctx context.Context, workgroup, sql string) error {
 // again, doesn't commit later.
 func (a *athenaRunner) run(ctx context.Context, workgroup, sql string) error {
 	start, err := a.c.StartQueryExecution(ctx, &athena.StartQueryExecutionInput{QueryString: &sql, WorkGroup: &workgroup})
-	if _, ok := errors.AsType[*types.TooManyRequestsException](err); ok {
-		return fmt.Errorf("%w: %w", errThrottled, err)
-	}
 	if err != nil {
+		if athenafail.CallFailure(err) == athenafail.Throttled {
+			return fmt.Errorf("%w: %w", errThrottled, err)
+		}
 		return classify(err)
 	}
 	id := aws.ToString(start.QueryExecutionId)
@@ -116,17 +111,15 @@ func (a *athenaRunner) wait(ctx context.Context, id string) (bool, error) {
 func failure(id string, st *types.QueryExecutionStatus) error {
 	reason := aws.ToString(st.StateChangeReason)
 	err := fmt.Errorf("query %s %s: %s", id, st.State, reason)
-	var typ int32
-	var retryable bool
-	if e := st.AthenaError; e != nil {
-		typ, retryable = aws.ToInt32(e.ErrorType), e.Retryable
-	}
+	f := athenafail.QueryFailure(st.AthenaError)
 	switch {
-	case typ == errorPermission || typ == errorPermissionS3:
+	case f == athenafail.Permission:
 		return fmt.Errorf("%w: %w", setup.ErrAccessDenied, err)
 	case strings.Contains(reason, commitConflictReason) || strings.Contains(reason, alreadyExistsReason):
 		return fmt.Errorf("%w: %w", setup.ErrConflict, err)
-	case typ != errorTableVersions && (retryable || typ >= errorThrottling && typ <= errorThrottlingLast):
+	case f == athenafail.Retryable, (f == athenafail.TimedOut || f == athenafail.Exhausted) && st.AthenaError.Retryable:
+		// An export halves a slice that timed out or ran out of resources; a statement can't
+		// be split, so it is sent again whenever Athena says it may pass.
 		return fmt.Errorf("%w: %w", errThrottled, err)
 	}
 	return err

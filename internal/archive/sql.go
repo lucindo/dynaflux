@@ -6,6 +6,7 @@ package archive
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -56,6 +57,62 @@ WHERE "_dedup_rn" = 1`,
 		dmlIdent(db), dmlIdent(catalog.DedupView(t.Name)), strings.Join(cols, ",\n  "),
 		dmlIdent(catalog.ColumnEventTime), dmlIdent(catalog.ColumnEventID),
 		dmlIdent(ColumnArrival), dmlIdent(ColumnShard), dmlIdent(ColumnSeq), dmlIdent(db), dmlIdent(t.Name))
+}
+
+// Unload returns the Athena statement that exports the records of s's table in database db
+// whose event_time is in [from, to) to dest, an S3 prefix, as gzip JSON files (ADR 0016
+// §5). It reads the columns of the binary's catalog, _arrival too, by which a backfill leaves
+// out the records of an older stream table. 64-bit integers, decimals, dates and times are
+// cast to text, whose form the decoder knows, since Athena doesn't document the JSON it
+// writes for them.
+func Unload(db string, s *catalog.Stream, from, to time.Time, dest string) string {
+	var cols []string
+	for _, c := range columns(s) {
+		name := dmlIdent(c.Name)
+		switch {
+		case !castToText(c.Type.Kind):
+			cols = append(cols, name)
+		case c.Type.Array:
+			cols = append(cols, "transform("+name+", x -> CAST(x AS varchar)) AS "+name)
+		default:
+			cols = append(cols, "CAST("+name+" AS varchar) AS "+name)
+		}
+	}
+	at := dmlIdent(catalog.ColumnEventTime)
+	return fmt.Sprintf(`UNLOAD (
+  SELECT
+    %s
+  FROM %s.%s
+  WHERE %s >= TIMESTAMP '%s' AND %s < TIMESTAMP '%s')
+TO %s
+WITH (format = 'JSON')`,
+		strings.Join(cols, ",\n    "), dmlIdent(db), dmlIdent(catalog.IcebergTable(s.Name)),
+		at, from.UTC().Format(timestampLayout), at, to.UTC().Format(timestampLayout), sqlString(dest))
+}
+
+// PartitionsQuery returns the Athena query of the day partitions of s's table in database
+// db: each day as text, then its record count and the bytes of its data files.
+func PartitionsQuery(db string, s *catalog.Stream) string {
+	// Iceberg names a partition field after its source column and transform.
+	day := dmlIdent(catalog.ColumnEventTime + "_" + partitionTransform)
+	return `SELECT CAST("partition".` + day + ` AS varchar) AS "day", "record_count", "total_size"` + "\n" +
+		"FROM " + dmlIdent(db) + "." + dmlIdent(catalog.IcebergTable(s.Name)+"$partitions")
+}
+
+// timestampLayout writes a timestamp(6) literal.
+const timestampLayout = "2006-01-02 15:04:05.000000"
+
+// castToText reports whether an export casts a column of kind k to text: the bigint,
+// decimal, date and timestamp columns.
+func castToText(k catalog.Kind) bool {
+	switch k {
+	case catalog.KindUInt32, catalog.KindInt64, catalog.KindUInt64, catalog.KindDecimal,
+		catalog.KindDate, catalog.KindDateTime, catalog.KindDateTime64:
+		return true
+	case catalog.KindUInt8, catalog.KindUInt16, catalog.KindInt8, catalog.KindInt16, catalog.KindInt32,
+		catalog.KindFloat64, catalog.KindBool, catalog.KindString, catalog.KindUUID:
+	}
+	return false
 }
 
 func columnDefs(cols []Column, sep string) string {

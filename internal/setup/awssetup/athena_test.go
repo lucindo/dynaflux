@@ -121,6 +121,9 @@ func TestExecFailures(t *testing.T) {
 		{"Athena throttling", failed(1406, false, "Query failed due to Amazon Athena throttling."), nil, 2},
 		{"past the throttling types", failed(1407, false, "Query failed."), nil, 1},
 		{"retryable", failed(100, true, "Internal service error."), nil, 2},
+		{"retryable timeout", failed(206, true, "Query timeout"), nil, 2},
+		{"retryable exhaustion", failed(4, true, "Query exhausted resources at this scale factor"), nil, 2},
+		{"timeout", failed(206, false, "Query timeout"), nil, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
