@@ -29,7 +29,7 @@ const (
 
 // env is the function's configuration, from its environment.
 type env struct {
-	mode   string // catalog.EnvModeProjector, catalog.EnvModeSetup or catalog.EnvModeBackfill
+	mode   string // a value of catalog.EnvMode
 	prefix string
 	region string
 	// archiveSchema is DYNAFLUX_ARCHIVE_SCHEMA, "" when unset: the templates remove it
@@ -40,24 +40,26 @@ type env struct {
 	memory int64
 }
 
-// readEnv reads the function's variables with getenv and checks them against cat. The query
-// mode doesn't start yet.
+// readEnv reads the function's variables with getenv and checks them against cat.
 func readEnv(cat *catalog.Catalog, getenv func(string) string) (env, error) {
 	if getenv(envRuntimeAPI) == "" {
 		return env{}, fmt.Errorf("runtime: %s isn't set: the runtime binary runs only on AWS Lambda", envRuntimeAPI)
 	}
 	mode := getenv(catalog.EnvMode)
 	switch mode {
-	case catalog.EnvModeProjector, catalog.EnvModeSetup, catalog.EnvModeBackfill:
-	case catalog.EnvModeQuery:
-		return env{}, fmt.Errorf("runtime: %s=%s needs a later Dynaflux release", catalog.EnvMode, mode)
+	case catalog.EnvModeProjector, catalog.EnvModeSetup, catalog.EnvModeQuery, catalog.EnvModeBackfill:
 	default:
-		return env{}, fmt.Errorf("runtime: %s is %q; want %s, %s or %s", catalog.EnvMode, mode,
-			catalog.EnvModeProjector, catalog.EnvModeSetup, catalog.EnvModeBackfill)
+		return env{}, fmt.Errorf("runtime: %s is %q; want %s, %s, %s or %s", catalog.EnvMode, mode,
+			catalog.EnvModeProjector, catalog.EnvModeSetup, catalog.EnvModeQuery, catalog.EnvModeBackfill)
 	}
 	if s := getenv(catalog.EnvStore); s != cat.Store {
 		return env{}, fmt.Errorf("runtime: %s is %q, but the catalog's store is %s: deploy the templates and the function "+
 			"from the same dynaflux generate", catalog.EnvStore, s, cat.Store)
+	}
+	if mode == catalog.EnvModeQuery {
+		if err := checkCatalogHash(cat, getenv(catalog.EnvCatalogHash)); err != nil {
+			return env{}, err
+		}
 	}
 	e := env{
 		mode:          mode,
@@ -87,6 +89,21 @@ func readEnv(cat *catalog.Catalog, getenv func(string) string) (env, error) {
 		e.memory = int64(float64(mb) * mebibyte * backfillMemoryShare)
 	}
 	return e, nil
+}
+
+// checkCatalogHash checks that hash, the query function's DYNAFLUX_CATALOG_HASH, names cat.
+// query.yaml deploys with the application, after regional.yaml, so a function from another
+// generate would serve another catalog's queries (ADR 0018).
+func checkCatalogHash(cat *catalog.Catalog, hash string) error {
+	data, err := catalog.Marshal(cat)
+	if err != nil {
+		return err
+	}
+	if own := catalog.Hash(data); hash != own {
+		return fmt.Errorf("runtime: %s is %q, but the binary's catalog is %s: deploy query.yaml and the function from "+
+			"the same dynaflux generate", catalog.EnvCatalogHash, hash, own)
+	}
+	return nil
 }
 
 // logLevel returns the slog level of Lambda's application log level.

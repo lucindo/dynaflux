@@ -7,12 +7,14 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"slices"
 	"time"
 	"unicode/utf8"
 
 	"github.com/aws/aws-lambda-go/lambdacontext"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/emf"
 	"github.com/lucindo/dynaflux/internal/projector"
 )
 
@@ -34,18 +36,6 @@ func newLogger(w io.Writer, level slog.Level) *slog.Logger {
 // errorBytes is how much of the rows' errors a partial failure logs.
 const errorBytes = 1024
 
-// emfDirective is the CloudWatch embedded metric format's metric directive.
-type emfDirective struct {
-	Namespace  string      `json:"Namespace"`
-	Dimensions [][]string  `json:"Dimensions"`
-	Metrics    []emfMetric `json:"Metrics"`
-}
-
-type emfMetric struct {
-	Name string `json:"Name"`
-	Unit string `json:"Unit"`
-}
-
 // logCounts writes the batch's metrics as one line in CloudWatch embedded metric format,
 // when it counted something. The line's level is the most severe of the counts, so the
 // alarms' data survives a raised application log level.
@@ -54,36 +44,15 @@ func logCounts(ctx context.Context, log *slog.Logger, dimension string, b projec
 	if len(st.Broken) > 0 || st.TooLarge > 0 {
 		level = slog.LevelError
 	}
-	var attrs []slog.Attr
-	var metrics []emfMetric
-	for _, m := range []struct {
-		name  string
-		count int
-	}{
-		{catalog.MetricBreakerOpened, len(st.Broken)},
-		{catalog.MetricRowTooLarge, st.TooLarge},
-		{catalog.MetricDivergentDuplicates, st.Divergent},
-	} {
-		if m.count > 0 {
-			attrs = append(attrs, slog.Int(m.name, m.count))
-			metrics = append(metrics, emfMetric{Name: m.name, Unit: "Count"})
-		}
-	}
-	if len(metrics) == 0 {
+	counts := slices.DeleteFunc([]emf.Count{
+		{Name: catalog.MetricBreakerOpened, N: len(st.Broken)},
+		{Name: catalog.MetricRowTooLarge, N: st.TooLarge},
+		{Name: catalog.MetricDivergentDuplicates, N: st.Divergent},
+	}, func(c emf.Count) bool { return c.N == 0 })
+	if len(counts) == 0 {
 		return
 	}
-	attrs = append(attrs,
-		slog.String(catalog.MetricDimensionStore, dimension),
-		slog.Group("_aws",
-			slog.Int64("Timestamp", time.Now().UnixMilli()),
-			slog.Any("CloudWatchMetrics", []emfDirective{{
-				Namespace:  catalog.MetricNamespace,
-				Dimensions: [][]string{{catalog.MetricDimensionStore}},
-				Metrics:    metrics,
-			}}),
-		),
-	)
-	attrs = append(attrs, batchAttrs(ctx, b)...)
+	attrs := append(emf.Attrs(dimension, counts...), batchAttrs(ctx, b)...)
 	if len(st.Broken) > 0 {
 		attrs = append(attrs, slog.Any("broken", st.Broken))
 	}

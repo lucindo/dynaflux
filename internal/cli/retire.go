@@ -142,8 +142,8 @@ func (c *cli) writeTombstones(f *fleet, id string, items []*retireItem, yes bool
 	if len(regions) == 0 {
 		return exitOK
 	}
-	c.errorf("retire can't see application builds: one older than the deployed catalog may still query %s, "+
-		"and gets ErrViewNotReady once it is retired. Deploy the application first.", id)
+	c.errorf("retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still "+
+		"query %s, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.", id)
 	if s := c.confirm(retireName, fmt.Sprintf("retire %s in %s?", id, strings.Join(regions, ", ")), yes); s != exitOK {
 		return s
 	}

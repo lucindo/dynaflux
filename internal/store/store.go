@@ -135,6 +135,9 @@ var (
 	ErrConditionFailed = errors.New("store: condition failed")
 	ErrTooLarge        = errors.New("store: item or key over DynamoDB's size limit")
 	ErrInvalidRequest  = errors.New("store: request DynamoDB rejects")
+	// ErrThrottled is throttling left after the SDK's retries. An earlier attempt of the same
+	// call may have been applied: read again before deciding. Transient.
+	ErrThrottled = errors.New("store: throttled")
 )
 
 // ConditionError is a Put whose condition failed. Current is the stored item, nil when
