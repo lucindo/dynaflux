@@ -74,8 +74,9 @@ type Config struct {
 }
 
 // Open returns a store backed by the DynamoDB tables that the generated templates create
-// for cfg.Prefix in cfg.AWS.Region. It makes no AWS call, so a missing table or grant shows
-// on the first append, read or query.
+// for cfg.Prefix in cfg.AWS.Region, which must be a region code such as us-east-1: for FIPS
+// endpoints, set AWS_USE_FIPS_ENDPOINT instead of naming a FIPS pseudo-region. It makes no
+// AWS call, so a missing table or grant shows on the first append, read or query.
 //
 // A query over a view checks that the view's version is live in the region, in the view
 // states it read from the store's meta table at most 30 seconds before, and returns
@@ -84,6 +85,9 @@ type Config struct {
 func Open(cfg Config) (*Store, error) {
 	if cfg.AWS.Region == "" {
 		return nil, errors.New("dynaflux: Config.AWS has no Region")
+	}
+	if problem, hint := catalog.CheckRegion(cfg.AWS.Region); problem != "" {
+		return nil, fmt.Errorf("dynaflux: Config.AWS.Region %s; %s", problem, hint)
 	}
 	if !catalog.ValidPrefix(cfg.Prefix) {
 		return nil, fmt.Errorf("dynaflux: Config.Prefix is %q; use lowercase letters, digits and -, "+

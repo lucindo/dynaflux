@@ -45,6 +45,20 @@ func TestOpenChecksConfig(t *testing.T) {
 		want                 string // the error; "" for none
 	}{
 		{"no region", "", "prod-", "dynaflux: Config.AWS has no Region"},
+		{
+			"FIPS pseudo-region", "fips-us-east-1", "",
+			`dynaflux: Config.AWS.Region "fips-us-east-1" is a FIPS pseudo-region; ` +
+				"name the region, such as us-east-1, and set AWS_USE_FIPS_ENDPOINT=true to use FIPS endpoints",
+		},
+		{
+			"FIPS suffix", "us-east-1-fips", "",
+			`dynaflux: Config.AWS.Region "us-east-1-fips" is a FIPS pseudo-region; ` +
+				"name the region, such as us-east-1, and set AWS_USE_FIPS_ENDPOINT=true to use FIPS endpoints",
+		},
+		{
+			"uppercase region", "US-EAST-1", "",
+			`dynaflux: Config.AWS.Region "US-EAST-1" isn't an AWS region code; use a code such as us-east-1`,
+		},
 		{"no prefix", "us-east-1", "", ""},
 		{"prefix", "us-east-1", "prod-", ""},
 		{"prefix with digits and dashes", "us-east-1", "a1-b-", ""},

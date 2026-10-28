@@ -235,16 +235,29 @@ func (c *cli) finding(region string, sev diag.Severity, code, msg, hint string) 
 func pickRegion(named, sdk string, regions []string) (string, string) {
 	list := strings.Join(regions, ", ")
 	switch {
+	case named != "" && refusedRegion(named) != "":
+		return "", "-region " + refusedRegion(named)
 	case named != "" && !slices.Contains(regions, named):
 		return "", fmt.Sprintf("-region %s isn't in regions (%s)", named, list)
 	case named != "":
 		return named, ""
 	case sdk == "":
 		return "", fmt.Sprintf("name the region with -region, one of %s", list)
+	case refusedRegion(sdk) != "":
+		return "", "the AWS SDK's region " + refusedRegion(sdk)
 	case !slices.Contains(regions, sdk):
 		return "", fmt.Sprintf("the AWS SDK's region %s isn't in regions (%s); name one with -region", sdk, list)
 	}
 	return sdk, ""
+}
+
+// refusedRegion returns why region can't name a region of the store, with a hint, or "": a
+// FIPS pseudo-region would make the SDK send to a region of another name (ADR 0014).
+func refusedRegion(region string) string {
+	if problem, hint := catalog.CheckRegion(region); problem != "" {
+		return problem + "; " + hint
+	}
+	return ""
 }
 
 // checkEndpoint accepts only a loopback http URL: the fake credentials that -endpoint sends

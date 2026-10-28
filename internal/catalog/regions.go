@@ -4,9 +4,28 @@
 package catalog
 
 import (
+	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 )
+
+var regionCode = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]+$`)
+
+// CheckRegion returns why region isn't a canonical AWS region code such as us-east-1, then a
+// hint, or two empty strings. The AWS SDK sends a FIPS pseudo-region's requests to the region
+// without fips in its name, which would make events record a region no projector runs in
+// (ADR 0014).
+func CheckRegion(region string) (string, string) {
+	switch {
+	case strings.Contains(region, "fips"):
+		return fmt.Sprintf("%q is a FIPS pseudo-region", region),
+			"name the region, such as us-east-1, and set AWS_USE_FIPS_ENDPOINT=true to use FIPS endpoints"
+	case !regionCode.MatchString(region):
+		return fmt.Sprintf("%q isn't an AWS region code", region), "use a code such as us-east-1"
+	}
+	return "", ""
+}
 
 // BucketNamespaceRegion reports whether region offers the S3 account regional namespace, in
 // which the store's bucket is named, as of

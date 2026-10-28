@@ -142,6 +142,12 @@ func TestInitRefuses(t *testing.T) {
 				"dynaflux.yaml:4:11: error DF6103: \"mars-1\" isn't an AWS region code\n  hint: use a code such as us-east-1\n",
 		},
 		{
+			"FIPS pseudo-region", "app", nil, []string{"-store", "shop", "-region", "fips-us-east-1"},
+			2, "dynaflux init: the project wouldn't be valid; nothing written\n" +
+				"dynaflux.yaml:4:11: error DF6103: \"fips-us-east-1\" is a FIPS pseudo-region\n" +
+				"  hint: name the region, such as us-east-1, and set AWS_USE_FIPS_ENDPOINT=true to use FIPS endpoints\n",
+		},
+		{
 			"an argument", "app", nil, []string{"shop"},
 			2, "dynaflux init: unexpected arguments: shop\nRun 'dynaflux help init' for usage.\n",
 		},

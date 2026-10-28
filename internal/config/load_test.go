@@ -184,6 +184,8 @@ func TestLoadDiagnostics(t *testing.T) {
 		{"DF6102 prefix without -", base + "prefix: prod\n", []string{"3:9 error DF6102"}},
 		{"DF6103 bad region", "store: analytics\nregions: [us-east]\n", []string{"2:11 error DF6103"}},
 		{"DF6103 one-word region", "store: analytics\nregions: [useast-1]\n", []string{"2:11 error DF6103"}},
+		{"DF6103 FIPS pseudo-region", "store: analytics\nregions: [fips-us-east-1]\n", []string{"2:11 error DF6103"}},
+		{"DF6103 FIPS in the middle", "store: analytics\nregions: [us-fips-east-1]\n", []string{"2:11 error DF6103"}},
 		{"DF6104 no account regional namespace", "store: analytics\nregions: [us-east-1, me-south-1]\n", []string{"2:22 error DF6104"}},
 		{
 			"DF6110 projector and bucket names",

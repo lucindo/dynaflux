@@ -103,8 +103,8 @@ func (d *decoder) regions(top object, c *Config) {
 	c.RegionsPos = top.at("regions")
 	seen := map[string]bool{}
 	for _, e := range d.list(top, "regions", "[us-east-1]", false) {
-		if !isRegion(e.Value) {
-			d.errorf(at(e), "DF6103", "use a code such as us-east-1", "%q isn't an AWS region code", e.Value)
+		if problem, hint := catalog.CheckRegion(e.Value); problem != "" {
+			d.errorf(at(e), "DF6103", hint, "%s", problem)
 			continue
 		}
 		if !catalog.BucketNamespaceRegion(e.Value) {
@@ -115,18 +115,6 @@ func (d *decoder) regions(top object, c *Config) {
 			c.Regions = append(c.Regions, e.Value)
 		}
 	}
-}
-
-// isRegion reports whether s has the form of an AWS region code, ^[a-z]+(-[a-z]+)+-[0-9]+$.
-func isRegion(s string) bool {
-	parts := strings.Split(s, "-")
-	const minParts = 3
-	if len(parts) < minParts {
-		return false
-	}
-	words, number := parts[:len(parts)-1], parts[len(parts)-1]
-	return number != "" && consists(number, digits) &&
-		!slices.ContainsFunc(words, func(w string) bool { return w == "" || !consists(w, lower) })
 }
 
 // outputs reads go, runtime and infra, and reports whether runtime.split is known.

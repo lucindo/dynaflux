@@ -73,6 +73,9 @@ func someRegions(cfg *config.Config, named repeated, endpoint string) regionPick
 		}
 		var names []string
 		for _, r := range named {
+			if msg := refusedRegion(r); msg != "" {
+				return nil, "-region " + msg
+			}
 			if !slices.Contains(cfg.Regions, r) {
 				return nil, fmt.Sprintf("-region %s isn't in regions (%s)", r, strings.Join(cfg.Regions, ", "))
 			}
