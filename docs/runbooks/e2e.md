@@ -38,7 +38,9 @@ For AWS mode:
   that can:
   - deploy CloudFormation stacks that create IAM roles, Lambda functions, DynamoDB tables,
     S3 buckets, Firehose streams, Athena workgroups, Step Functions state machines,
-    CloudWatch alarms, dashboards and log groups, and AWS FIS experiment templates;
+    CloudWatch alarms, dashboards and log groups, and AWS FIS experiment templates, and for
+    experiments Q1 and Q2 API Gateway APIs, ACM certificates, and Route 53 records and
+    health checks;
   - run the suite's checks: DynamoDB reads and writes on the store's tables, `Scan` and
     `DeleteItem` included, and DynamoDB Streams reads; Lambda `GetFunctionConfiguration`
     and `ListEventSourceMappings`; CloudWatch Logs `FilterLogEvents`; CloudWatch
@@ -210,7 +212,8 @@ A few dollars per run. AWS FIS bills per action-minute, about 10 minutes per run
 price page before the first run. The tables are on demand, the Firehose and Athena volumes
 are tiny, and the optimizers run on little data. Experiments 15 and 16 run for hours and
 cost more Lambda time. Scenario 24 and experiments 28 and 30 add the backfill function's
-time at 3,008 MB and a few hundred thousand writes.
+time at 3,008 MB and a few hundred thousand writes. Experiments Q1 and Q2 add the hosted
+zone's monthly fee and the health checks' fees for the hours they run.
 
 ## 8. Coded scenarios
 
@@ -312,6 +315,21 @@ finding for [infra.md §9.8](../spec/infra.md#98-operators).
 | 32 | Staged runs gone | Backfill a new version with `-rate 10`. During `apply`, delete the job's objects under `backfill/` in the bucket. | Whether S3 answers the backfill role's `GetObject` with 404 or 403; that the job stages again and the version goes `live`. |
 | 33 | State machine definition | Run `aws stepfunctions test-state` on the backfill state machine's `Route` state with a step's output at 1,000 steps, with a wait above 0, and when done; and on `Continue` with the input of a job that ended. | `Route` goes to `Continue`, `Wait` and `Done`; the continuation's name is `<name>-a<attempt>-c<k+1>`, and its input has all five fields, with `steps` 0. |
 
+### Query front doors
+
+These check the doors of `query.yaml` ([infra.md §6.6](../spec/infra.md#66-query-function),
+[http.md](../spec/http.md)). Run them in a kept project whose `dynaflux.yaml` gets the
+`http` section that each step names, and whose `queries.sql` exposes a query. After each
+change, generate, then build and deploy `query.yaml` in both regions as
+[infra.md §11](../spec/infra.md#11-deploying) says. Steps with a custom domain need a public
+Route 53 hosted zone in the sandbox account, and `HostedZoneId` and `DomainName` in
+`--parameter-overrides`; use a subdomain that nothing else uses.
+
+| # | Experiment | Steps | Answers |
+|---|------------|-------|---------|
+| Q1 | Each door end to end | (1) `function_url`, `iam`: call each region's `QueryEndpoint` with the signed Python client of [http.md §9](../spec/http.md#9-a-python-client), and invoke the function directly. (2) `http_api`, `jwt`, with `http.domain`: a Cognito user pool with the resource server scope `dynaflux/query` in `jwt.scopes` and a client-credentials app client in `jwt.audience`; call the domain with an access token, then with an ID token. Read each health check with `aws route53 get-health-check-status`. Deploy a new version of the exposed query's view, backfill it with `-region us-east-1` only, and deploy `query.yaml` in both regions; then backfill `us-west-2`. During that window, send 50 requests a second for a minute to `us-west-2`'s own `/health`. (3) `rest_api`, `api_key`: a key generated in `us-east-1` and imported into `us-west-2` ([http.md §8.4](../spec/http.md#84-api-keys)); call each region's endpoint with it, and without it. With `usage_plan: {rate: 1, burst: 2}`, send 10 requests a second with the key; then set the plan's burst to 0 (`aws apigateway update-usage-plan`, path `/throttle/burstLimit`) and call again. | Each door answers the same bodies as direct invoke, and the stages' access logs have a line per request, so they take the log group ARN that ends in `:*`; an ID token is refused when `jwt.scopes` is set; the health checks are healthy while the views are live; how long after its new version is deployed `us-west-2` leaves the domain, and returns after its backfill; how many of the 50 requests a second get `429`, and whether the health check stays healthy meanwhile: it fails the experiment if `us-west-2` leaves the domain during the flood ([http.md §6](../spec/http.md#6-health)); a call without the key gets `403`; about 1 request a second passes the usage plan, the rest get `429`; whether a burst of 0 refuses every request. |
+| Q2 | Door edge cases | (1) Set the query function's `DYNAFLUX_CATALOG_HASH` to another value (`aws lambda update-function-configuration`), so that its Init fails, and call each door of Q1; deploy `query.yaml` again after. (2) With `http.domain`, delete `us-west-2`'s query stack, then list the hosted zone's records and describe `us-east-1`'s certificate. (3) `rest_api`, `cognito`, with a user pool in `us-east-1`: call `us-west-2` with an ID token; then set both `cognito.scopes` and `cognito.app_clients`, and call with an access token and with an ID token. (4) `http_api`, `iam`: sign a request with SigV4a (botocore's `SigV4AsymAuth`, region set `*`). | Each door's status and body for a crashed invocation; whether the certificate validation record stays, and `us-east-1`'s certificate with it; whether a pool of another region works; which token passes with both Cognito settings; that API Gateway refuses SigV4a, which DF6608 assumes. |
+
 ### One-shot checks of the backend and the runtime
 
 These settle what neither DynamoDB Local nor the AWS documentation does
@@ -384,6 +402,13 @@ The open questions, and what answers each one:
 | Does a replicated record's `ApproximateCreationDateTime` follow its arrival in the replica? | 31 | | ADR 0011 |
 | Does S3 answer the backfill role's `GetObject` of a missing staged run with 404 or 403? | 32 | | [infra.md §9.6](../spec/infra.md#96-backfill-role) |
 | Does the backfill state machine route and continue as written? | 24, 33 | | [infra.md §6.5](../spec/infra.md#65-backfill) |
+| Does each door answer as http.md says, and does a stage take a log group ARN that ends in `:*`? | Q1 | | [infra.md §6.6](../spec/infra.md#66-query-function) |
+| Does a usage plan throttle API key callers, and does one with a burst of 0 refuse everything? | Q1 | | [infra.md §16](../spec/infra.md#16-to-be-confirmed-on-aws) |
+| Do the health checks follow the views, and does flooding `/health` take a region out of the domain? | Q1 | | infra.md §6.6 |
+| What does each door answer for a crashed invocation? | Q2 | | [http.md §5](../spec/http.md#5-errors) |
+| Does deleting one region's query stack remove the shared certificate validation record? | Q2 | | infra.md §6.6, [§15](../spec/infra.md#15-not-in-these-templates-yet) |
+| Does a REST Cognito authorizer take a pool of another region, and which tokens pass with both scopes and app clients? | Q2 | | [http.md §8.5](../spec/http.md#85-cognito) |
+| Does API Gateway refuse SigV4a? | Q2 | | [ADR 0018](../decisions/0018-query-handler-and-front-doors.md) |
 | How does DynamoDB sort strings across planes, and what `N` text does it return? | B1 | | encoding.md, [ADR 0009](../decisions/0009-emulator-choice.md) |
 | Does DynamoDB accept U+0000 in a string and in a key? | B2 | | ADR 0009 |
 | What do oversized keys and Query bounds return? | B3 | | encoding.md §3.6 |

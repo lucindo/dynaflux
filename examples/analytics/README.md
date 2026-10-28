@@ -17,7 +17,7 @@ running anything.
 | `dynaflux.lock` | The view versions ([ADR 0002](../../docs/decisions/0002-view-version-lock-file.md)). Generated; commit it. |
 | `internal/flux/` | The typed client. Generated. |
 | `cmd/dynaflux-runtime/main.go` | The Lambda binary that every function runs. Generated. |
-| `infra/dynaflux/` | `global.yaml`, `global.stack-policy.json` and `regional.yaml` ([infra.md](../../docs/spec/infra.md)). Generated. |
+| `infra/dynaflux/` | `global.yaml`, `global.stack-policy.json`, `regional.yaml`, and `query.yaml` for `TagTotals`, the query annotated `-- expose: http` ([infra.md](../../docs/spec/infra.md)). Generated. |
 | `*_test.go` | Tests of the client against the in-memory store of `fluxtest`, and, with the `integration` build tag, against DynamoDB Local. |
 | `e2e/` | The end-to-end suite, which runs this store on DynamoDB Local or on AWS ([runbooks/e2e.md](../../docs/runbooks/e2e.md)). |
 
@@ -67,13 +67,22 @@ done
 
 # 4. Make every view version live, in both regions:
 go run ../../cmd/dynaflux backfill -all -yes
+
+# 5. With the application, the query function of TagTotals, in each region:
+sam build -t infra/dynaflux/query.yaml --build-dir .aws-sam/query
+for region in us-east-1 us-west-2; do
+  sam deploy -t .aws-sam/query/template.yaml --stack-name demo-analytics-query --region "$region" \
+    --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND --resolve-s3
+done
 ```
 
 - The `Prefix` parameter defaults to `demo-`. For another environment, add
   `--parameter-overrides Prefix=<prefix>` to every deploy, `-prefix <prefix>` to the
   backfill, and use new stack names.
-- For alarm notifications, add `AlarmTopicArn=<topic ARN>` to the regional deploys, with a
-  topic in that region.
+- For alarm notifications, add `AlarmTopicArn=<topic ARN>` to the regional and query
+  deploys, with a topic in that region.
+- Each query stack's `QueryEndpoint` output is the region's function URL, which takes
+  SigV4-signed requests ([http.md](../../docs/spec/http.md)).
 - Until a backfill makes a view version live, queries over it return `ErrViewNotReady`
   ([lifecycle.md §2](../../docs/spec/lifecycle.md#2-deploying-changes)). On this store,
   which has no events yet, step 4 takes about two minutes. Deploy the application after it.

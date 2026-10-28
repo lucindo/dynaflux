@@ -29,3 +29,4 @@ whose decision stands, amends it instead: the older record gets the line
 | [0011](0011-backfill-coordinator.md) | Backfills run as a resumable step, driven by Step Functions, with their state in the meta table | Accepted |
 | [0012](0012-view-version-activation.md) | Only a backfill job activates a view version; guards stop older code, and a fresh stream goes live without a read | Accepted |
 | [0013](0013-deployed-catalog-registration.md) | The setup function registers the deployed catalog from its own binary | Accepted |
+| [0018](0018-query-handler-and-front-doors.md) | One query handler serves every front door, from a third template deployed with the application | Accepted |

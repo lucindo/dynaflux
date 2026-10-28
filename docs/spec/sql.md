@@ -163,7 +163,7 @@ blanks      = ( ' ' | tab ) { ' ' | tab } ;
 | Annotation | Applies to | Meaning |
 |------------|------------|---------|
 | `-- name: <Name> :one` or `:many` | `SELECT` | Required. Names the query; `<Name>` becomes the generated Go function name. `:one` and `:many` set the result shape ([§10.9](#109-one-and-many)). |
-| `-- expose: http` | `SELECT` | Serves the query from the generated HTTP handler (see `http` in [config.md](config.md)). Off by default. |
+| `-- expose: http` | `SELECT` | Serves the query from the query function: its HTTP front door and direct invoke (see `http` in [config.md](config.md) and [http.md](http.md)). Off by default; without one exposed query, no query function is generated. |
 | `-- go:type <Name>` | `CREATE STREAM` | Overrides the name of the generated Go event type. |
 
 Rules:
