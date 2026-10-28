@@ -1395,8 +1395,9 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
     applies the event about a second later. Either way it is applied exactly once.
   - The event records the versions its transaction applied, and the projector of the
     append's region skips exactly those ([encoding.md §6](encoding.md#6-stream-items)).
-  - Appends to one row at the same moment conflict and retry. After about ten attempts the
-    append fails with a transient error that names the version and the row.
+  - Appends to one row at the same moment conflict. Each waits a random time, longer after
+    each attempt, then reads the row again and retries. After about ten attempts the append
+    fails with a transient error that names the version and the row.
   - An evaluation error in a `SYNC` view, or a transaction over DynamoDB's 4 MB limit,
     fails the append with a run-time error, and nothing is written.
   - `dynaflux import` and the generated `Import<Stream>` functions never apply `SYNC`

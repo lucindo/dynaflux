@@ -440,10 +440,10 @@ func TestSyncAppendRetries(t *testing.T) {
 	}
 }
 
-// A row or marker that another append changed between the read and the transaction is
-// folded in, and the transaction sent again at once, without a read: the other append's
+// A row or marker that another append changed between the read and the transaction is read
+// again after a wait drawn below 5 ms, and the transaction sent again: the other append's
 // account counts once.
-func TestSyncAppendFoldsChangedItems(t *testing.T) {
+func TestSyncAppendReadsChangedItemsAgain(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		f := newSyncFixture(t)
@@ -455,17 +455,80 @@ func TestSyncAppendFoldsChangedItems(t *testing.T) {
 		}
 		reqs := f.b.requests()
 		transactions := slices.DeleteFunc(slices.Clone(reqs), func(r string) bool { return !strings.HasPrefix(r, "transact") })
-		// The other append's transaction writes the account's marker; the resend follows it
-		// without a read and without the marker.
-		theirs := "transact app-stream-api_calls app-view-endpoint_accounts-v1 app-view-endpoint_accounts-v1 app-view-quota_usage-v1"
-		resend := "transact app-stream-api_calls app-view-endpoint_accounts-v1 app-view-quota_usage-v1"
-		if n := len(reqs); len(transactions) != 3 || reqs[n-2] != theirs || reqs[n-1] != resend {
-			t.Errorf("requests %q, want 3 transactions, the last one without the marker right after the other append's", reqs)
+		// The other append's transaction writes the account's marker; the resend follows a
+		// read of both versions, and leaves the marker out.
+		n := len(reqs)
+		tail := slices.Clone(reqs[n-4:])
+		slices.Sort(tail[1:3]) // the versions are read in parallel
+		want := []string{
+			"transact app-stream-api_calls app-view-endpoint_accounts-v1 app-view-endpoint_accounts-v1 app-view-quota_usage-v1",
+			"batchget app-view-endpoint_accounts-v1 consistent=true",
+			"batchget app-view-quota_usage-v1 consistent=true",
+			"transact app-stream-api_calls app-view-endpoint_accounts-v1 app-view-quota_usage-v1",
+		}
+		if len(transactions) != 3 || !slices.Equal(tail, want) {
+			t.Errorf("requests %q, want 3 transactions, ending with %q", reqs, want)
+		}
+		if wait := f.b.sent[2].Sub(f.b.sent[1]); wait <= 0 || wait >= 5*time.Millisecond {
+			t.Errorf("the resend came %v after the other append's transaction, want a wait under 5ms", wait)
 		}
 		if u, a := f.used(t, "acme"), f.accounts(t, "/search"); u != "2 8" || a != "1" {
 			t.Errorf("Used %s, Accounts %s; want 2 8 and 1", u, a)
 		}
 	})
+}
+
+// Six writers that append to one row at once, each event after the one before, all succeed,
+// and every event counts once. Scenario 34 of the e2e suite runs four such writers.
+func TestSyncAppendsToAHotRow(t *testing.T) {
+	t.Parallel()
+	const writers, appends = 6, 25
+	synctest.Test(t, func(t *testing.T) {
+		f := newSyncFixture(t)
+		b := remote{Backend: f.mem, rtt: 2 * time.Millisecond}
+		var wg sync.WaitGroup
+		for w := range writers {
+			e := engine.New(b, engine.Options{Region: "us-east-1", Entropy: rand.NewChaCha8([32]byte{byte(w)})})
+			wg.Go(func() {
+				for i := range appends {
+					res, err := e.Append(t.Context(), f.cat, "api_calls", [][]expr.Value{call("acme", "/search", fmt.Sprintf("w%d-%d", w, i), 1)}, engine.AppendMode{})
+					if err == nil {
+						err = res[0].Err
+					}
+					if err != nil {
+						t.Errorf("writer %d, append %d: %v", w, i, err)
+					}
+				}
+			})
+		}
+		wg.Wait()
+		want := fmt.Sprintf("%d %d", writers*appends, writers*appends)
+		if u, a := f.used(t, "acme"), f.accounts(t, "/search"); u != want || a != "1" {
+			t.Errorf("Used %s, Accounts %s; want %s and 1", u, a, want)
+		}
+	})
+}
+
+// remote is a store a round trip away: a BatchGet or Transact reaches it after half of rtt,
+// and its response returns after the other half.
+type remote struct {
+	store.Backend
+
+	rtt time.Duration
+}
+
+func (r remote) BatchGet(ctx context.Context, table string, ks []store.Key, consistent bool) ([]store.Item, error) {
+	time.Sleep(r.rtt / 2)
+	items, err := r.Backend.BatchGet(ctx, table, ks, consistent)
+	time.Sleep(r.rtt / 2)
+	return items, err
+}
+
+func (r remote) Transact(ctx context.Context, puts []store.TxPut) error {
+	time.Sleep(r.rtt / 2)
+	err := r.Backend.Transact(ctx, puts)
+	time.Sleep(r.rtt / 2)
+	return err
 }
 
 // An event stored before at the key is a duplicate unless it is the call's own: the rows

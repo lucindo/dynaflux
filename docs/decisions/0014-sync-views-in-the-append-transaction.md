@@ -98,13 +98,14 @@ region from `AWS_REGION` (the runtime), the engine's region (`dynaflux dev`) or 
 
 **4. Outcomes and retries.** The event's own condition failing decides as a plain append
 does today: our own earlier attempt (same `_r`, `_it` and payload) is success, any other
-stored event is `ErrDuplicate`. A row or marker condition failing returns the stored items;
-the engine folds them in and retries at once. A conflict or throttling backs off with full
-jitter and re-reads; either may follow an earlier attempt of the same call that was
-applied, and the re-read then finds the event. An evaluation error, or a transaction over
-4 MB, fails the append with nothing written. After about ten attempts the append fails with
-a transient error naming the version and row. Batch appends stay one transaction per event,
-in input order.
+stored event is `ErrDuplicate`. After a row or marker condition fails, or a conflict or
+throttling of the read or the transaction, the engine backs off with full jitter, a wait
+drawn below 5 ms that doubles with each attempt up to 250 ms and ends early with the
+caller's context, and reads the rows and markers again. A conflict or throttling may
+follow an earlier attempt of the same call that was applied, and the re-read then finds
+the event. An evaluation error, or a transaction over 4 MB, fails the append with nothing
+written. After about ten attempts the append fails with a transient error naming the
+version and row. Batch appends stay one transaction per event, in input order.
 
 **5. Idempotency** holds on three layers: the backend sets the transaction's token itself
 and resends an in-doubt transaction (a lost response, a 5xx,
@@ -172,6 +173,10 @@ returns `ErrTooLarge` past 4 MB. There is still no `UpdateItem`, `DeleteItem`,
 - **A string set (`SS`) for `_sync`:** the store would need a set type; Dynaflux never
   writes sets.
 - **Parallel transactions in a batch append:** they would conflict on shared rows.
+- **Folding in the items a failed condition returns and resending:** at once, the writers
+  of a hot row resend in step and one wins each round; after a wait, another write has
+  usually changed the row again. On DynamoDB Local, with four writers on one row as in the
+  e2e suite's scenario 34, resending at once ran out of attempts on about 7% of appends.
 
 ## Consequences
 

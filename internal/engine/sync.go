@@ -20,8 +20,8 @@ import (
 )
 
 // A SYNC append makes at most maxSyncAttempts attempts for one event, each a read and a
-// transaction, or a transaction alone. Before the attempt that follows a conflict or
-// throttling it waits a time drawn below min(syncBackoffCap, syncBackoffBase·2^n).
+// transaction. Before attempt n+1 it waits a time drawn below min(syncBackoffCap,
+// syncBackoffBase·2^n).
 const (
 	maxSyncAttempts = 10
 	syncBackoffBase = 5 * time.Millisecond
@@ -59,10 +59,11 @@ func syncList(versions []string) store.Value {
 
 // putSync writes it, an event of s that names versions in its _sync, with its contributions
 // to their rows in one transaction, and returns the event stored at its key. The rows and
-// markers are read first; a row or marker that changed since is folded in and the
-// transaction sent again, and after a conflict or throttling, of the transaction or the
-// read, everything is read again, which also finds an event that an earlier attempt stored.
-// now is the writer's clock.
+// markers are read first. After a row or marker that changed since the read, or a conflict
+// or throttling, of the transaction or the read, the append waits and reads everything
+// again, which also finds an event that an earlier attempt stored. It doesn't fold in the
+// items a failed condition returns: on a hot row, another write lands while it waits. now
+// is the writer's clock.
 func (e *Engine) putSync(ctx context.Context, cat *Catalog, table string, s *stream, it store.Item, versions []string, now int64) (store.Item, error) {
 	plan, err := cat.p.PlanSync(e.naming(cat), s.Def.Name, it, versions, time.UnixMicro(now))
 	if err != nil {
@@ -71,23 +72,20 @@ func (e *Engine) putSync(ctx context.Context, cat *Catalog, table string, s *str
 	if len(plan.Reads()) == 0 {
 		return e.put(ctx, table, s, it)
 	}
-	var read map[projector.TableKey]store.Item // nil until read, and after a conflict or throttling
 	var cause error
 	for n := range maxSyncAttempts {
-		if read == nil {
-			if n > 0 {
-				if err = backoff(ctx, it, n-1); err != nil {
-					return nil, fmt.Errorf("dynaflux: append to %s: %w", s.Def.Name, err)
-				}
-			}
-			read, err = e.readSync(ctx, plan)
-			switch {
-			case errors.Is(err, store.ErrThrottled):
-				cause = err
-				continue
-			case err != nil:
+		if n > 0 {
+			if err = backoff(ctx, it, n-1); err != nil {
 				return nil, fmt.Errorf("dynaflux: append to %s: %w", s.Def.Name, err)
 			}
+		}
+		read, rerr := e.readSync(ctx, plan)
+		switch {
+		case errors.Is(rerr, store.ErrThrottled):
+			cause = rerr
+			continue
+		case rerr != nil:
+			return nil, fmt.Errorf("dynaflux: append to %s: %w", s.Def.Name, rerr)
 		}
 		rows, perr := plan.Puts(read)
 		if perr != nil {
@@ -102,9 +100,9 @@ func (e *Engine) putSync(ctx context.Context, cat *Catalog, table string, s *str
 		case failed && tx.Conds[0] != nil:
 			return s.claimed(tx.Conds[0].Current, it)
 		case failed:
-			cause = changed(read, puts, tx)
+			cause = changed(puts, tx)
 		case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrThrottled):
-			read, cause = nil, err
+			cause = err
 		case errors.Is(err, store.ErrTooLarge):
 			return nil, fmt.Errorf("dynaflux: append to %s: %w: the SYNC transaction: %w", s.Def.Name, ErrInvalidValue, err)
 		default:
@@ -140,25 +138,16 @@ func (e *Engine) readSync(ctx context.Context, plan *projector.SyncPlan) (map[pr
 	return read, nil
 }
 
-// changed folds the stored items that tx returned for puts into read, and returns why the
-// transaction failed: a row or marker that another write changed since it was read.
-func changed(read map[projector.TableKey]store.Item, puts []store.TxPut, tx *store.TxError) error {
-	var cause error
+// changed returns why tx, of puts, failed: a row or marker that another write changed since
+// it was read.
+func changed(puts []store.TxPut, tx *store.TxError) error {
 	for i, c := range tx.Conds {
-		if c == nil {
-			continue
-		}
-		k := projector.TableKey{Table: puts[i].Table, Key: store.KeyOf(puts[i].Item)}
-		if c.Current == nil {
-			delete(read, k)
-		} else {
-			read[k] = c.Current
-		}
-		if cause == nil {
-			cause = fmt.Errorf("%s item %q/%q changed: %w", k.Table, k.Key.PK, k.Key.SK, store.ErrConflict)
+		if c != nil {
+			k := store.KeyOf(puts[i].Item)
+			return fmt.Errorf("%s item %q/%q changed: %w", puts[i].Table, k.PK, k.SK, store.ErrConflict)
 		}
 	}
-	return cause
+	return nil
 }
 
 // backoff waits before attempt n+1 of the event it, a time drawn below min(syncBackoffCap,
