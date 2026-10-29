@@ -49,7 +49,7 @@ SHELL_SCRIPTS = $(shell git ls-files --cached --others --exclude-standard -- 'sc
 
 .PHONY: help check-git-hooks warn-git-hooks setup-git-hooks tools tools-update \
         test bench bench-compare bench-smoke cross-arch lambda-build fmt fix lint vuln osv gomod notices check-go-bound mod-download verify \
-        check-clean sim sim-controls sim-seed emulators-up emulators-down integration \
+        check-clean clean sim sim-controls sim-seed emulators-up emulators-down integration \
         e2e-emulator e2e-aws bench-emulator bench-aws hadolint checkov infra-lint shellcheck trivy semgrep
 
 .DEFAULT_GOAL := help
@@ -96,6 +96,10 @@ tools-update: ## Reinstall all Go tools at their latest release and bump the gol
 
 test: ## Run `go test -race -shuffle=on ./...`.
 	go test -race -shuffle=on ./... $(GO_TEST_FLAGS)
+
+# Literal paths, not BENCH_OUT: an override can point outside the repo.
+clean: ## Remove build outputs from the repo root: a stray mutants binary, bench.txt and dist/.
+	rm -rf mutants bench.txt dist
 
 # docs/runbooks/benchmarks.md. The baseline is recorded on the maintainer's idle machine.
 BENCH_COUNT    ?= 6
