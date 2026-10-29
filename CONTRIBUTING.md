@@ -40,8 +40,10 @@ make setup-git-hooks
   starts from an empty emulator: DynamoDB Local keeps about 200 MB from every run even after
   the tests delete their tables, and its requests time out once it holds a few GB. Run one
   at a time on a machine, because a second run would recreate the emulator under the first.
-  The container keeps running afterwards; `make emulators-down` stops it, and
-  `make emulators-up` starts it without recreating a running one, for tests you run by hand.
+  `make integration`, `make e2e-emulator` and `make bench-emulator` stop the container when
+  they finish if they started it (`KEEP_EMULATOR=1` keeps it). `make emulators-up` starts it
+  without recreating a running one, for tests you run by hand; `make emulators-down` or
+  `make clean` stops it.
   These tests never call AWS: they reach DynamoDB Local at the loopback address in
   `DYNAFLUX_DYNAMODB_ENDPOINT`, which the target sets, and fail without it. CI runs
   `make verify` and `make integration` on every push and pull request. The lane takes about

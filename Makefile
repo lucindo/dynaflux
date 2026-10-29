@@ -98,8 +98,10 @@ test: ## Run `go test -race -shuffle=on ./...`.
 	go test -race -shuffle=on ./... $(GO_TEST_FLAGS)
 
 # Literal paths, not BENCH_OUT: an override can point outside the repo.
-clean: ## Remove build outputs from the repo root: a stray mutants binary, bench.txt and dist/.
+clean: ## Remove build outputs from the repo root (a stray mutants binary, bench.txt, dist/) and stop DynamoDB Local.
 	rm -rf mutants bench.txt dist
+	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then \
+		docker compose --file $(EMULATORS_COMPOSE) down; fi
 
 # docs/runbooks/benchmarks.md. The baseline is recorded on the maintainer's idle machine.
 BENCH_COUNT    ?= 6
@@ -238,15 +240,14 @@ emulators-down: ## Stop DynamoDB Local and drop its tables.
 	docker compose --file $(EMULATORS_COMPOSE) down
 
 # Packages are found by their *_integration_test.go files, so a new one needs no edit here.
-integration: ## Run the tests of every package with a *_integration_test.go file against a fresh DynamoDB Local.
+integration: ## Run the tests of every package with a *_integration_test.go file against a fresh DynamoDB Local, then stop it.
 	$(call require_cmd,docker,brew install --cask docker)
-	scripts/emulators/up.sh --fresh
 	@set -euo pipefail; \
 	pkgs="$$(go list -tags integration -f '{{.ImportPath}} {{.TestGoFiles}} {{.XTestGoFiles}}' ./... | \
 		awk '/_integration_test\.go/ { print $$1 }')"; \
 	if [ -z "$$pkgs" ]; then echo "No *_integration_test.go files found."; exit 0; fi; \
 	echo "go test -race -shuffle=on -tags integration" $$pkgs; \
-	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' \
+	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' scripts/emulators/with.sh --fresh \
 		go test -race -shuffle=on -tags integration $$pkgs $(GO_TEST_FLAGS)
 
 # === End to end
@@ -254,8 +255,10 @@ integration: ## Run the tests of every package with a *_integration_test.go file
 # docs/runbooks/e2e.md. The suite is the example's, behind the e2e build tag.
 E2E_PKG := ./examples/analytics/e2e
 
-e2e-emulator: emulators-up ## Run the end-to-end suite on DynamoDB Local (needs docker).
-	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' go test -race -tags e2e $(E2E_PKG) -run '^TestE2E$$' -target=emulator $(GO_TEST_FLAGS)
+e2e-emulator: ## Run the end-to-end suite on DynamoDB Local (needs docker).
+	$(call require_cmd,docker,brew install --cask docker)
+	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' scripts/emulators/with.sh \
+		go test -race -tags e2e $(E2E_PKG) -run '^TestE2E$$' -target=emulator $(GO_TEST_FLAGS)
 
 # Maintainer only: it deploys to AWS with your credentials. common.sh checks the variables and
 # the account before the trap, which tears the run down even after a later failure;
@@ -274,9 +277,11 @@ e2e-aws: ## Deploy the e2e store, run the suite on AWS, and tear it down: make e
 # docs/runbooks/benchmarks.md. A low rate on DynamoDB Local checks the load, the probes and the
 # oracle; the report reads CloudWatch, so only bench-aws prints one. The result goes in a new
 # directory, so that two runs, or a link someone put in a shared /tmp, can't take its place.
-bench-emulator: emulators-up ## Run the throughput benchmark for 30 s at 50 events/s on DynamoDB Local (needs docker).
+bench-emulator: ## Run the throughput benchmark for 30 s at 50 events/s on DynamoDB Local (needs docker).
+	$(call require_cmd,docker,brew install --cask docker)
 	@set -eu; out="$$(mktemp -d)/bench-emulator.json"; echo "The result goes to $$out."; \
-	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' go test -race -tags e2e $(E2E_PKG) -run '^TestThroughput$$' -target=emulator \
+	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' scripts/emulators/with.sh \
+		go test -race -tags e2e $(E2E_PKG) -run '^TestThroughput$$' -target=emulator \
 		-throughput.rate=50 -throughput.warmup=5s -throughput.duration=30s -throughput.out="$$out" \
 		$(GO_TEST_FLAGS)
 
