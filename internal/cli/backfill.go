@@ -50,9 +50,9 @@ sums. -source chooses.
 
 -rate limits the records each job applies a second, and changes it on a running
 job. -cancel stops the jobs, and the Athena query a job runs on the archive; the
-versions stay activating. -watch follows the jobs until they end; interrupting it leaves them
-running. With -json, -watch prints a JSON line with "format": 1, then one for each
-change of a job, and the plan goes to stderr.
+versions stay activating. -watch follows the jobs until they end; interrupting it
+leaves them running. With -json, -watch prints a JSON line with "format": 1, then
+one for each change of a job, and the plan goes to stderr.
 
 Exit status: 0 when nothing was refused, and with -watch every version is live; 1
 when a version was refused, or with -watch one broke, its job failed, or the

@@ -823,7 +823,7 @@ us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:0
 -- want/local.stderr --
 store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
 us-east-1: error DF7201: page_counts@v1 broke at 2000-01-01T00:00:00Z: event e5 failed to evaluate: division by zero
-  hint: fix page_counts, then run dynaflux generate, deploy regional.yaml and run dynaflux backfill page_counts; the event in Athena: SELECT * FROM "shop"."page_views_dedup" WHERE "event_id" = 'e5'
+  hint: fix page_counts, then run dynaflux generate and restart dynaflux dev -endpoint http://127.0.0.1:8000, which fills the new version
 -- want/local.stdout --
 version         us-east-1
 page_counts@v1  broken
@@ -839,6 +839,51 @@ us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:0
   stream signups: archive complete since 1999-12-29T01:00:00Z
     unit shardId-0003: no progress
   backfill plan_counts@v2: running, attempt 1, phase activate, 0 of 0 records applied; rate no limit; table source, split by time (the archive wasn't complete when the job started, or -source table chose it); execution not available locally
+-- want/local_blocked.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+us-east-1: error DF7209: the projector of stream page_views fails every batch: page_seen@v1 is live, and the deployed catalog neither defines nor retires it; records are lost 24 hours after they were written to every view and the archive
+  hint: restart dynaflux dev -endpoint http://127.0.0.1:8000 from a dynaflux.lock that defines page_seen@v1
+-- want/local_blocked.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 5e89ba4633eb (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  mappings, metrics, gaps and the jobs' executions aren't available locally
+  stream page_views: archive complete since 1999-12-29T01:00:00Z
+  stream signups: archive complete since 1999-12-29T01:00:00Z
+-- want/local_broken_by_the_time_split.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+us-east-1: error DF7201: plan_counts@v1 broke at 2000-01-01T00:00:00Z: event e2 can't be placed by the time split: the event landed after the split's late bound
+  hint: run dynaflux generate -rebuild plan_counts and restart dynaflux dev -endpoint http://127.0.0.1:8000, which fills the new version
+-- want/local_broken_by_the_time_split.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  broken
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  mappings, metrics, gaps and the jobs' executions aren't available locally
+  stream page_views: archive complete since 1999-12-29T01:00:00Z
+  stream signups: archive complete since 1999-12-29T01:00:00Z
+-- want/local_broken_retained_version.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+us-east-1: error DF7201: plan_counts@v1 broke at 2000-01-01T00:00:00Z: event e3 failed to evaluate: division by zero
+  hint: retire it with dynaflux retire plan_counts@v1 -endpoint http://127.0.0.1:8000
+us-east-1: warning DF7202: plan_counts@v2 needs a backfill
+  hint: run dynaflux dev -endpoint http://127.0.0.1:8000, which fills it
+-- want/local_broken_retained_version.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  broken
+plan_counts@v2  pending_backfill
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  mappings, metrics, gaps and the jobs' executions aren't available locally
+  stream page_views: archive complete since 1999-12-29T01:00:00Z
+  stream signups: archive complete since 1999-12-29T01:00:00Z
 -- want/local_json.stderr --
 store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
 -- want/local_json.stdout --
@@ -904,6 +949,50 @@ store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
   ],
   "findings": []
 }
+-- want/local_needs_a_backfill.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+us-east-1: warning DF7202: plan_counts@v2 needs a backfill
+  hint: run dynaflux dev -endpoint http://127.0.0.1:8000, which fills it
+-- want/local_needs_a_backfill.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  pending_backfill
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  mappings, metrics, gaps and the jobs' executions aren't available locally
+  stream page_views: archive complete since 1999-12-29T01:00:00Z
+  stream signups: archive complete since 1999-12-29T01:00:00Z
+-- want/local_no_longer_current.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+us-east-1: warning DF7220: plan_counts@v1 is no longer current, and still live: projectors still update its table
+  hint: retire it with dynaflux retire plan_counts@v1 -region us-east-1 -endpoint http://127.0.0.1:8000 -prefix ""
+-- want/local_no_longer_current.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  live
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  mappings, metrics, gaps and the jobs' executions aren't available locally
+  stream page_views: archive complete since 1999-12-29T01:00:00Z
+  stream signups: archive complete since 1999-12-29T01:00:00Z
+-- want/local_suspected_gap.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+us-east-1: warning DF7204: a gap is suspected in stream page_views: a projector handled a record almost 24 hours old at 2000-01-01T01:00:00Z; page_counts@v1, page_seen@v1 may miss its records
+  hint: run dynaflux generate -rebuild page_counts, dynaflux generate -rebuild page_seen, then restart dynaflux dev -endpoint http://127.0.0.1:8000, which fills the new versions
+-- want/local_suspected_gap.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  mappings, metrics, gaps and the jobs' executions aren't available locally
+  stream page_views: archive not complete: a projector handled a record almost 24 hours old at 2000-01-01T01:00:00Z
+  stream signups: archive complete since 1999-12-29T01:00:00Z
 -- want/mappings_unreadable.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T00:00:00Z: event e6 failed to evaluate: division by zero
@@ -966,6 +1055,45 @@ us-east-1: error DF7001: the deployed catalog has format 2; this dynaflux reads 
   hint: upgrade dynaflux to the version that generated it, v9.0.0
 -- want/newer_catalog_format.stdout --
 us-east-1: catalog 0b0a51ca69f8 (dynaflux v9.0.0), registered 2000-01-01T00:00:00Z
+-- want/no_longer_current.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+us-east-1: warning DF7220: plan_counts@v1 is no longer current, and still live: projectors still update its table
+  hint: retire it with dynaflux retire plan_counts@v1
+us-west-2: warning DF7220: plan_counts@v1 is no longer current, and still live: projectors still update its table
+  hint: retire it with dynaflux retire plan_counts@v1
+-- want/no_longer_current.stdout --
+version         us-east-1  us-west-2
+page_counts@v1  live       live
+page_seen@v1    live       live
+plan_counts@v1  live       live
+plan_counts@v2  live       live
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+us-west-2: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+-- want/no_longer_current_in_one_region.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+us-east-1: warning DF7220: plan_counts@v1 is no longer current, and still live: projectors still update its table
+  hint: retire it with dynaflux retire plan_counts@v1 -region us-east-1
+us-west-2: warning DF7202: plan_counts@v2 needs a backfill
+  hint: dynaflux backfill plan_counts@v2 -region us-west-2
+-- want/no_longer_current_in_one_region.stdout --
+version         us-east-1  us-west-2
+page_counts@v1  live       live
+page_seen@v1    live       live
+plan_counts@v1  live       live
+plan_counts@v2  live       pending_backfill
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  note: plan_counts@v2 is partial since 1999-12-30T00:00:00Z: it misses the events before then
+us-west-2: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-west-2-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-west-2-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/not_deployed.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
 -- want/not_deployed.stdout --
@@ -1003,6 +1131,8 @@ us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:0
   stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
 -- want/partial.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: warning DF7220: plan_counts@v1 is no longer current, and still live: projectors still update its table
+  hint: retire it with dynaflux retire plan_counts@v1 -region us-east-1
 -- want/partial.stdout --
 version         us-east-1
 page_counts@v1  live

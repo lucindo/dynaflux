@@ -533,7 +533,8 @@ environment:
    - no backfill job of the version is running.
 2. It warns that it can't see application builds or `query.yaml` stacks older than the
    deployed catalog, which may still query the version: a query function answers `503` for
-   it once it is retired. Deploy the application and `query.yaml` first.
+   it once it is retired. Deploy the application and `query.yaml` first. The warning names
+   `query.yaml` only when the project has one.
 3. After confirmation, it sets the version `retired` in each region. Within 30 seconds
    projectors and `SYNC` appends stop applying it, queries return `ErrViewNotReady`, and
    its fences stop holding back any delivery unit.
@@ -667,6 +668,7 @@ and the findings read from the meta table still print. Codes are stable as in
 | DF7217 | retired | Was: `status`: a backfill waits for the archive read of a later release. Retired in M6, when backfills read the archive. |
 | DF7218 | warning | `status`, `backfill -all`, `import`: a stream table is less than 23 hours old and has no origin in a region that archives it with `events: all`; run `backfill -all` before its first event, or the region's archive of it is never complete ([§5.5](#55-when-the-archive-is-complete)). `backfill -all` says why it recorded none, and `import` warns of a table that holds an event already, whose archive is never complete. |
 | DF7219 | error | `status`: a version's backfill job failed on an archive that wasn't complete, with the job's error; the version stays `activating` and can't go live. Rebuild the view ([§7.3](#73-rebuilding-a-version)). |
+| DF7220 | warning | `status`: a version that the deployed catalog keeps but no longer makes current is still `live`, and the view's current version is `live` too, or the view has no current version; retire it ([§8](#8-retiring-a-version)). The hint retires it in the regions that `status` read, or in its region alone when another of them would refuse it with DF7303. |
 | DF7301 | error | `retire`: the version isn't `retained` or `retired` in the lock. |
 | DF7302 | error | `retire`: a deployed catalog makes the version current. |
 | DF7303 | error | `retire`: the view's current version isn't `live` in a region. |

@@ -30,10 +30,24 @@ func HeaderVersion(bi *debug.BuildInfo) string {
 	return headerVersion(bi)
 }
 
+// GoMod is what dynaflux reads of a go.mod file: the module path, the Dynaflux version
+// that it requires, and the target of a replace directive that names the module.
+type GoMod struct{ Module, Library, Replace string }
+
+// ParseGoMod is parseGoMod.
+func ParseGoMod(data []byte) GoMod {
+	m := parseGoMod(data)
+	return GoMod{m.module, m.library, m.replace}
+}
+
 // Env is what [RunEnv] gives a run in place of the process's.
 type Env struct {
 	Vars     map[string]string // the environment
 	Terminal bool              // whether stdin is a terminal
+	// Build describes the binary in place of the test binary's build information.
+	Build *debug.BuildInfo
+	// GoModCeiling is the highest directory where a go.mod is looked for, "" for the root.
+	GoModCeiling string
 	// Region is the AWS SDK's region, Account the caller's account, and Backends the
 	// DynamoDB tables of each region.
 	Region   string
@@ -72,10 +86,15 @@ const LocalAccessKey = localAccessKey
 
 // RunEnv runs dynaflux as Run does, in env.
 func RunEnv(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, workdir string, env Env) int {
+	bi := env.Build
+	if bi == nil {
+		bi, _ = debug.ReadBuildInfo()
+	}
 	c := &cli{
-		ctx: ctx, workdir: workdir, stdin: stdin, terminal: env.Terminal, stdout: stdout, stderr: stderr,
-		getenv:  func(k string) string { return env.Vars[k] },
-		connect: func(context.Context, string) (cloud, error) { return fakeCloud(env), nil },
+		ctx: ctx, workdir: workdir, stdin: stdin, terminal: env.Terminal, stdout: stdout, stderr: stderr, build: bi,
+		goModCeiling: env.GoModCeiling,
+		getenv:       func(k string) string { return env.Vars[k] },
+		connect:      func(context.Context, string) (cloud, error) { return fakeCloud(env), nil },
 	}
 	return c.exit(c.run(args))
 }

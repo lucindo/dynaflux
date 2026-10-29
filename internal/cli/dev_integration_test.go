@@ -306,7 +306,7 @@ func TestDev(t *testing.T) {
 	if got, want := s.run("query", "PageUsers", "-param", "page=/home"), (result{0, "visitors  longest\n2         300\n", s.head()}); got != want {
 		t.Errorf("query PageUsers:\ngot  %+v\nwant %+v", got, want)
 	}
-	if got, want := s.run("inspect", "page_users", "-key", "page=/cart"), (result{0, "page   longest  visitors\n/cart  50       1\n", s.head()}); got != want {
+	if got, want := s.run("inspect", "page_users", "-key", "page=/cart"), (result{0, "page   visitors  longest\n/cart  1         50\n", s.head()}); got != want {
 		t.Errorf("inspect page_users:\ngot  %+v\nwant %+v", got, want)
 	}
 
@@ -654,7 +654,7 @@ func TestDevLosesDynamoDBLocal(t *testing.T) {
 	}
 	head := "dynaflux dev: DynamoDB Local stopped answering at " + s.endpoint + ": "
 	_, port, _ := strings.Cut(strings.TrimPrefix(s.endpoint, "http://"), ":")
-	tail := "\n  hint: start it with docker run --rm -p 127.0.0.1:" + port + ":8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -sharedDb -inMemory, then run dynaflux dev again\n"
+	tail := "\n  hint: start it with docker run --rm -p 127.0.0.1:" + port + ":8000 -e DDB_LOCAL_TELEMETRY=0 amazon/dynamodb-local:3.3.2 -jar DynamoDBLocal.jar -sharedDb -inMemory -disableTelemetry, then run dynaflux dev again\n"
 	stderr := r.stderr.String()
 	if r.status != 2 || !strings.Contains(stderr, "\n"+head) || !strings.HasSuffix(stderr, tail) {
 		t.Errorf("dev: status %d, stderr\n%s\nwant status 2 and\n%s…%s", r.status, stderr, head, tail)

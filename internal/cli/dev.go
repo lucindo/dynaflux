@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"runtime/debug"
 	"strings"
 	"time"
 
@@ -68,7 +67,7 @@ projected before. -reset deletes the store's tables first, with their events.
 
 Start DynamoDB Local with
 
-  docker run --rm -p 127.0.0.1:8000:8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -sharedDb -inMemory
+  ` + dockerRun(defaultDevEndpoint) + `
 
 Exit status: 0 when interrupted; 1 for errors in the project, an out-of-date
 dynaflux.lock and a batch that fails; and 2 for usage and I/O problems, and
@@ -204,13 +203,15 @@ func (c *cli) openDev(p *project, o devOptions, staging string) (*devRun, int) {
 	return d, exitOK
 }
 
-// dockerRun is the command that starts DynamoDB Local at endpoint.
+// dockerRun is the command that starts DynamoDB Local at endpoint, with the image that the
+// integration tests run, and telemetry off.
 func dockerRun(endpoint string) string {
 	port := "80"
 	if u, err := url.Parse(endpoint); err == nil && u.Port() != "" {
 		port = u.Port()
 	}
-	return "docker run --rm -p 127.0.0.1:" + port + ":8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -sharedDb -inMemory"
+	return "docker run --rm -p 127.0.0.1:" + port + ":8000 -e DDB_LOCAL_TELEMETRY=0 amazon/dynamodb-local:3.3.2 " +
+		"-jar DynamoDBLocal.jar -sharedDb -inMemory -disableTelemetry"
 }
 
 // createDevTables creates the store's tables that are missing, after deleting them all with
@@ -264,8 +265,7 @@ func (c *cli) registerDevCatalog(m *meta.Meta, p *project, region string) ([]byt
 		c.errorf("dynaflux dev: %v", err)
 		return nil, exitErrors
 	}
-	bi, _ := debug.ReadBuildInfo() // A nil BuildInfo reads as (devel).
-	if reg, err = m.RegisterCatalog(c.ctx, data, headerVersion(bi)); err != nil {
+	if reg, err = m.RegisterCatalog(c.ctx, data, headerVersion(c.build)); err != nil {
 		c.errorf("dynaflux dev: register the catalog: %v", err)
 		return nil, exitUsage
 	}

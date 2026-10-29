@@ -222,7 +222,7 @@ type statusCase struct {
 func TestStatus(t *testing.T) {
 	t.Parallel()
 	g := readGoldens(t, "status")
-	for _, tt := range slices.Concat(statusCases(), statusJobCases(), statusDeliveryCases(), statusArchiveCases()) {
+	for _, tt := range slices.Concat(statusCases(), statusJobCases(), statusDeliveryCases(), statusArchiveCases(), statusLocalCases()) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
@@ -235,8 +235,24 @@ func TestStatus(t *testing.T) {
 					t.Errorf("status %d, want %d; stderr:\n%s", got.status, tt.status, got.stderr)
 				}
 				g.check(t, strings.ReplaceAll(tt.name, " ", "_"), got)
+				checkLocalHints(t, tt.args, got.stderr)
 			})
 		})
+	}
+}
+
+// checkLocalHints checks that after -endpoint, each hint names it, so that a command pasted
+// from one reaches DynamoDB Local rather than AWS.
+func checkLocalHints(t *testing.T, args []string, stderr string) {
+	t.Helper()
+	i := slices.Index(args, "-endpoint")
+	if i < 0 {
+		return
+	}
+	for line := range strings.Lines(stderr) {
+		if strings.HasPrefix(line, "  hint: ") && !strings.Contains(line, " -endpoint "+args[i+1]) {
+			t.Errorf("a hint after -endpoint %s doesn't name it:\n%s", args[i+1], line)
+		}
 	}
 }
 
@@ -281,14 +297,16 @@ func statusCases() []statusCase {
 			t.Helper()
 			s.pending(t)
 		}},
-		{"partial", east, 0, func(t *testing.T, s *statusStore) {
+		{"no longer current", nil, 0, func(t *testing.T, s *statusStore) {
 			t.Helper()
 			s.pending(t)
-			m := s.metas["us-east-1"]
-			_, err := m.Activate(t.Context(), "plan_counts@v2", "signups", meta.SplitTime, meta.DefaultBounds)
-			must(t, err)
-			must(t, m.MakeLive(t.Context(), "plan_counts@v2", time.Date(1999, 12, 30, 0, 0, 0, 0, time.UTC)))
+			for _, m := range s.metas {
+				makeLive(t, m, "plan_counts@v2")
+			}
 		}},
+		{"partial", east, 0, partial},
+		// retire would refuse us-west-2, where the current version isn't live (DF7303).
+		{"no longer current in one region", nil, 0, partial},
 		{"blocked", east, 1, func(t *testing.T, s *statusStore) {
 			t.Helper()
 			cat := *s.cat
@@ -318,6 +336,17 @@ func statusCases() []statusCase {
 		{"local json", []string{"-endpoint", "http://127.0.0.1:8000", "-json"}, 0, nil},
 		{"timeout zero", []string{"-timeout", "0s"}, 2, nil},
 	}
+}
+
+// partial makes plan_counts@v2 the current version, live in us-east-1 alone and partial
+// there.
+func partial(t *testing.T, s *statusStore) {
+	t.Helper()
+	s.pending(t)
+	m := s.metas["us-east-1"]
+	_, err := m.Activate(t.Context(), "plan_counts@v2", "signups", meta.SplitTime, meta.DefaultBounds)
+	must(t, err)
+	must(t, m.MakeLive(t.Context(), "plan_counts@v2", time.Date(1999, 12, 30, 0, 0, 0, 0, time.UTC)))
 }
 
 // statusJobCases are the runs with a backfill job of plan_counts@v2.
@@ -522,6 +551,45 @@ func statusArchiveCases() []statusCase {
 			t.Helper()
 			s.fenceJob(t, meta.PhaseStage)
 			failJob(t, s.metas["us-east-1"], "plan_counts@v2", "signups in us-east-1: rule 3: no event source mapping reads the stream")
+		}},
+	}
+}
+
+// statusLocalCases are the runs on DynamoDB Local. Their hints name dev where backfill
+// doesn't run.
+func statusLocalCases() []statusCase {
+	local := []string{"-endpoint", "http://127.0.0.1:8000"}
+	return []statusCase{
+		{"local needs a backfill", local, 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.pending(t)
+		}},
+		{"local no longer current", slices.Concat(local, []string{"-prefix", "", "-region", "us-east-1"}), 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.pending(t)
+			makeLive(t, s.metas["us-east-1"], "plan_counts@v2")
+		}},
+		{"local broken by the time split", local, 1, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			markBroken(t, s.metas["us-east-1"], "plan_counts@v1", "signups", meta.Failure{Cause: meta.CauseSplit,
+				EventID: "e2", Error: "the event landed after the split's late bound", At: time.Now()})
+		}},
+		{"local broken retained version", local, 1, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.pending(t)
+			markBroken(t, s.metas["us-east-1"], "plan_counts@v1", "signups", meta.Failure{Cause: meta.CauseRecord,
+				EventID: "e3", Error: "division by zero", At: time.Now()})
+		}},
+		{"local blocked", local, 1, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			cat := *s.cat
+			cat.Views = slices.DeleteFunc(slices.Clone(cat.Views), func(v catalog.View) bool { return v.Name == "page_seen" })
+			s.register(t, &cat)
+		}},
+		{"local suspected gap", slices.Concat(local, []string{"-region", "us-east-1"}), 0, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			time.Sleep(time.Hour)
+			must(t, s.metas["us-east-1"].MarkLag(t.Context(), "page_views", time.Now()))
 		}},
 	}
 }

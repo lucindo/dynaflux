@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -58,6 +59,11 @@ type cli struct {
 	// tests replace them.
 	connect func(ctx context.Context, endpoint string) (cloud, error)
 	getenv  func(key string) string
+	// build describes this binary, nil without build information; tests replace it.
+	build *debug.BuildInfo
+	// goModCeiling is the highest directory where a go.mod is looked for, "" for the root;
+	// tests set it, so that a go.mod above their temporary directory doesn't count.
+	goModCeiling string
 	// Commands write to out and errOut, and flush copies them to stdout and stderr, so a
 	// failed write is checked in one place. A long-running command flushes to stream.
 	out, errOut    strings.Builder
@@ -71,8 +77,9 @@ type cli struct {
 // and AWS access problems. Cancelling ctx stops a long-running command; main cancels it on
 // an interrupt. stdin is read only to confirm a write that can't be undone.
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, workdir string) int {
+	bi, _ := debug.ReadBuildInfo()
 	c := &cli{
-		ctx: ctx, workdir: workdir, stdin: stdin, terminal: isTerminal(stdin), connect: connectAWS, getenv: os.Getenv,
+		ctx: ctx, workdir: workdir, stdin: stdin, terminal: isTerminal(stdin), connect: connectAWS, getenv: os.Getenv, build: bi,
 		stdout: stdout, stderr: stderr,
 	}
 	return c.exit(c.run(args))

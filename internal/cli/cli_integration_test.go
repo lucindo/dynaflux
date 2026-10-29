@@ -59,7 +59,7 @@ func TestEndpoint(t *testing.T) {
 		{
 			"query of a version that isn't live", []string{"query", "UserViews", "-param", "users=['u1']"},
 			result{1, "", head + "dynaflux query: view version not ready: user_pages@v1 is pending_backfill in us-east-1\n" +
-				"  hint: make it live with dynaflux backfill user_pages@v1 -region us-east-1 -prefix " + naming.Prefix + ", or read it anyway with -allow-partial\n"},
+				"  hint: dynaflux dev -endpoint " + *cfg.BaseEndpoint + " fills it; wait for \"user_pages@v1: live\" in its output, or read it anyway with -allow-partial\n"},
 		},
 		{
 			"a prefix without tables", []string{"query", "PageStats", "-prefix", "none-"},
@@ -68,9 +68,9 @@ func TestEndpoint(t *testing.T) {
 		},
 		{
 			"inspect of a view's partition", []string{"inspect", "page_daily", "-key", "page=/home"},
-			result{0, "page   day                   avg_ms  views  visitors\n" +
-				"/home  1999-12-30T00:00:00Z  300     1      1\n" +
-				"/home  1999-12-31T00:00:00Z  150     2      2\n", head},
+			result{0, "page   day                   views  visitors  avg_ms\n" +
+				"/home  1999-12-30T00:00:00Z  1      1         300\n" +
+				"/home  1999-12-31T00:00:00Z  2      2         150\n", head},
 		},
 	}
 	for _, tt := range tests {

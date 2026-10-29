@@ -35,7 +35,7 @@ Commands:
   inspect         read a stream's events or a view's rows in the deployed store
   query           run a named query on the deployed store
   import          load past events from JSON Lines into a stream of the deployed store
-  version         show the versions of the CLI, the runtime library and generated code
+  version         show the versions of the CLI, the library and generated code
   help            show help for a command
 
 Run 'dynaflux help <command>' for more about a command.
@@ -56,6 +56,13 @@ type result struct {
 func run(dir string, args ...string) result {
 	var stdout, stderr strings.Builder
 	status := cli.Run(context.Background(), args, strings.NewReader(""), &stdout, &stderr, dir)
+	return result{status, stdout.String(), stderr.String()}
+}
+
+// runAlone runs dynaflux as run does, but as if no directory above dir held a go.mod.
+func runAlone(dir string, args ...string) result {
+	var stdout, stderr strings.Builder
+	status := cli.RunEnv(context.Background(), args, strings.NewReader(""), &stdout, &stderr, dir, cli.Env{GoModCeiling: dir})
 	return result{status, stdout.String(), stderr.String()}
 }
 
@@ -137,7 +144,7 @@ error, and 2 for usage and I/O problems.
 		},
 		{
 			"version", []string{"version"},
-			result{0, "cli              (devel)\nruntime library  (devel)\ngenerated code   version 1\n", ""},
+			result{0, "cli             (devel)\nlibrary         (no go.mod)\ngenerated code  version 1\n", ""},
 		},
 		{
 			"version with an argument", []string{"version", "x"},
@@ -147,7 +154,7 @@ error, and 2 for usage and I/O problems.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := run(t.TempDir(), tt.args...); got != tt.want {
+			if got := runAlone(t.TempDir(), tt.args...); got != tt.want {
 				t.Errorf("dynaflux %q:\ngot  %+v\nwant %+v", tt.args, got, tt.want)
 			}
 		})
@@ -164,6 +171,23 @@ func TestHelpMatchesDashH(t *testing.T) {
 	for _, want := range []string{"Usage: dynaflux explain [flags] <stream|view|query>\n", "  -rows view=N\n", "(default 365d)"} {
 		if !strings.Contains(help.stdout, want) {
 			t.Errorf("help explain lacks %q:\n%s", want, help.stdout)
+		}
+	}
+}
+
+// TestHelpWidth checks that each command's help wraps its prose within helpWidth columns.
+// An indented line, such as a flag's line or a command to copy, may run longer.
+func TestHelpWidth(t *testing.T) {
+	t.Parallel()
+	const helpWidth = 86
+	_, list, _ := strings.Cut(run(t.TempDir(), "help").stdout, "Commands:\n")
+	list, _, _ = strings.Cut(list, "\n\n")
+	for line := range strings.Lines(list) {
+		name := strings.Fields(line)[0]
+		for l := range strings.Lines(run(t.TempDir(), "help", name).stdout) {
+			if l = strings.TrimSuffix(l, "\n"); len(l) > helpWidth && !strings.HasPrefix(l, " ") {
+				t.Errorf("help %s: a line of %d columns, more than %d:\n%s", name, len(l), helpWidth, l)
+			}
 		}
 	}
 }

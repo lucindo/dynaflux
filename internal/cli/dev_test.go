@@ -6,8 +6,11 @@ package cli_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v4"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 )
@@ -68,8 +71,47 @@ func TestDevWithoutDynamoDBLocal(t *testing.T) {
 	got := run(dir, "dev", "-endpoint", closedEndpoint)
 	head := "store devshop  prefix (none)  endpoint http://127.0.0.1:1  region us-east-1\n" +
 		"dynaflux dev: DynamoDB Local doesn't answer at http://127.0.0.1:1: "
-	tail := "\n  hint: start it with docker run --rm -p 127.0.0.1:1:8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -sharedDb -inMemory\n"
+	tail := "\n  hint: start it with docker run --rm -p 127.0.0.1:1:8000 -e DDB_LOCAL_TELEMETRY=0 amazon/dynamodb-local:3.3.2 -jar DynamoDBLocal.jar -sharedDb -inMemory -disableTelemetry\n"
 	if got.status != 2 || got.stdout != "" || !strings.HasPrefix(got.stderr, head) || !strings.HasSuffix(got.stderr, tail) {
 		t.Errorf("got %+v\nwant exit 2 with stderr\n%s…%s", got, head, tail)
+	}
+}
+
+// The command in dev's help starts DynamoDB Local as scripts/emulators/compose.yaml does for
+// the integration tests: the same tag, bound to loopback, in memory, with telemetry off by
+// both the variable and the flag. -sharedDb is dev's own: it reads the tables with any key.
+func TestDevHelpStartsTheTestedImage(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "emulators", "compose.yaml"))
+	must(t, err)
+	var compose struct {
+		Services map[string]struct {
+			Image       string
+			Command     []string
+			Environment map[string]string
+			Ports       []string
+		}
+	}
+	must(t, yaml.Unmarshal(data, &compose))
+	ddb := compose.Services["dynamodb"]
+	image, _, _ := strings.Cut(ddb.Image, "@")
+	if len(ddb.Ports) != 1 || len(ddb.Environment) != 1 {
+		t.Fatalf("compose.yaml's dynamodb service: %+v; want one port and one variable", ddb)
+	}
+	want := []string{"docker", "run", "--rm", "-p", ddb.Ports[0]}
+	for k, v := range ddb.Environment {
+		want = append(want, "-e", k+"="+v)
+	}
+	want = append(append(want, image), ddb.Command...)
+
+	help := run(t.TempDir(), "help", "dev").stdout
+	i := strings.Index(help, "\n  docker run ")
+	if i < 0 {
+		t.Fatalf("dev's help has no docker run line:\n%s", help)
+	}
+	line, _, _ := strings.Cut(help[i+3:], "\n")
+	got := slices.DeleteFunc(strings.Fields(line), func(f string) bool { return f == "-sharedDb" })
+	if !slices.Equal(got, want) {
+		t.Errorf("dev's help starts DynamoDB Local with\n%q\nwant, as compose.yaml and with -sharedDb,\n%q", got, want)
 	}
 }

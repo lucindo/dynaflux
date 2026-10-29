@@ -133,9 +133,16 @@ func (s *retireStore) register(t *testing.T, region string, data []byte) {
 // catalog, and no view state.
 func recreated(t *testing.T, s *retireStore) {
 	t.Helper()
-	b := mem.New()
-	s.backends["us-west-2"], s.metas["us-west-2"] = b, meta.New(b, catalog.Naming{Store: "shop"}.MetaTable())
-	s.register(t, "us-west-2", s.current)
+	recreatedIn("us-west-2")(t, s)
+}
+
+func recreatedIn(region string) func(*testing.T, *retireStore) {
+	return func(t *testing.T, s *retireStore) {
+		t.Helper()
+		b := mem.New()
+		s.backends[region], s.metas[region] = b, meta.New(b, catalog.Naming{Store: "shop"}.MetaTable())
+		s.register(t, region, s.current)
+	}
 }
 
 func deployedCurrent(t *testing.T, s *retireStore) {
@@ -179,6 +186,14 @@ func retireCases() []retireCase {
 	yes := []string{retiring, "-yes"}
 	checks := []retireCase{
 		{name: "retire", args: yes, retired: both},
+		{
+			name: "with query.yaml", args: yes, retired: both,
+			change: func(t *testing.T, s *retireStore) {
+				t.Helper()
+				must(t, os.MkdirAll(filepath.Join(s.dir, "infra", "dynaflux"), 0o755))
+				must(t, os.WriteFile(filepath.Join(s.dir, "infra", "dynaflux", "query.yaml"), nil, 0o644))
+			},
+		},
 		{name: "deployed current", args: yes, status: 1, change: deployedCurrent},
 		{name: "current not live", args: yes, status: 1, change: recreated},
 		{name: "current broken", args: yes, status: 1, change: currentBroken("us-west-2")},
@@ -240,6 +255,12 @@ func retireCases() []retireCase {
 			},
 		},
 		{name: "one region", args: []string{retiring, "-yes", "-region", "us-east-1"}, retired: []string{"us-east-1"}, lockKept: true},
+		// DynamoDB Local serves every region from one database, so retire checks them all.
+		{name: "on DynamoDB Local", args: []string{retiring, "-yes", "-endpoint", "http://127.0.0.1:8000"}, retired: []string{"us-east-1"}},
+		{
+			name: "current not live on DynamoDB Local", args: []string{retiring, "-yes", "-endpoint", "http://127.0.0.1:8000"}, status: 1,
+			change: recreatedIn("us-east-1"),
+		},
 		{
 			name: "every region after one", args: yes, retired: both,
 			change: func(t *testing.T, s *retireStore) {

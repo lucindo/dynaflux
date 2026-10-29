@@ -25,8 +25,8 @@ import (
 // valueForms describes the text form of values, for the help of commands that take them.
 const valueForms = `Values are written as in -json output, without quotes: integers and decimals in
 plain notation, true or false, UUIDs as 8-4-4-4-12 hex digits, a Date as
-2026-10-26, a time in RFC 3339 such as 2026-10-26T13:45:00.250Z, and an array as a
-ClickHouse literal such as ['/a','/b'].
+2026-10-26, a time in RFC 3339 such as 2026-10-26T13:45:00.250Z, and an array as
+a ClickHouse literal such as ['/a','/b'].
 `
 
 func queryCommand() command {
@@ -36,10 +36,11 @@ func queryCommand() command {
 		summary: "run a named query on the deployed store",
 		doc: `Query runs the named query with the deployed catalog of one region, so it reads what
 the region serves, and prints the rows as a table, or as JSON Lines with -json.
--param gives each parameter as name=value. ` + valueForms + `
-A query over a view needs the view's version to be live in the region;
--allow-partial reads it anyway, and the rows may then miss events.
+-param gives each parameter as name=value. A query over a view needs the view's
+version to be live in the region; -allow-partial reads it anyway, and the rows may
+then miss events.
 
+` + valueForms + `
 Exit status: 0 when the query ran, also without rows; 1 when a :one query found no
 row, the version isn't live, or the query failed to evaluate; and 2 for usage and
 I/O problems, AWS access, and a query the deployed catalog doesn't define.
@@ -143,7 +144,13 @@ func (c *cli) notReadyHint(d *deployment, f *awsFlags, q *catalog.Query) {
 	if f.prefix.set {
 		where += " -prefix " + cmp.Or(f.prefix.value, `""`)
 	}
-	switch states[id].State {
+	state := states[id].State
+	if f.endpoint != "" && (state == "" || state == meta.PendingBackfill || state == meta.Activating) {
+		// dev fills versions on DynamoDB Local, where backfill doesn't run.
+		c.errorf("  hint: dynaflux dev -endpoint %s fills it; wait for %q in its output, or read it anyway with -allow-partial", f.endpoint, id+": live")
+		return
+	}
+	switch state {
 	case "", meta.PendingBackfill:
 		c.errorf("  hint: make it live with dynaflux backfill %s%s, or read it anyway with -allow-partial", id, where)
 	case meta.Activating:

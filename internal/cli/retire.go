@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"slices"
 	"strings"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/diag"
+	"github.com/lucindo/dynaflux/internal/infra/cloudformation"
 	"github.com/lucindo/dynaflux/internal/meta"
 )
 
@@ -40,7 +42,8 @@ regional.yaml in every region, which deletes the version's table. Each other
 environment that deploys the same dynaflux.lock needs retire too, with its
 -prefix, before its deploy.
 
-With -endpoint it works on DynamoDB Local.
+With -endpoint it works on DynamoDB Local, where a restart of dynaflux dev after
+dynaflux generate takes the place of the deploy.
 
 Exit status: 0 when the version is retired, 1 when a check failed or the
 question was declined, and 2 for usage, I/O and AWS access problems, and when a
@@ -107,7 +110,9 @@ func (c *cli) retire(o retireOptions, args []string) int {
 	if status = max(status, c.printRetirePlan(f, id, entry, items, unchecked)); status != exitOK {
 		return status
 	}
-	if status = c.writeTombstones(f, id, items, o.yes); status != exitOK {
+	// Only a project with a query exposed over HTTP has a query.yaml stack to deploy first.
+	_, err := root.Stat(path.Join(cfg.Infra.Out, cloudformation.QueryTemplate))
+	if status = c.writeTombstones(f, id, items, o.yes, !errors.Is(err, fs.ErrNotExist)); status != exitOK {
 		return status
 	}
 	fmt.Fprintf(&c.out, "\nChecked prefix %s in %s.\n", cmp.Or(f.naming.Prefix, "(none)"), strings.Join(f.names, ", "))
@@ -124,7 +129,12 @@ func (c *cli) retire(o retireOptions, args []string) int {
 		}
 		fmt.Fprintf(&c.out, "%s: %s retired\n", catalog.LockFileName, id)
 	}
-	fmt.Fprintf(&c.out, "Next: run dynaflux generate, and deploy regional.yaml in every region, which deletes the table of %s.\n", id)
+	if f.endpoint == "" {
+		fmt.Fprintf(&c.out, "Next: run dynaflux generate, and deploy regional.yaml in every region, which deletes the table of %s.\n", id)
+	} else {
+		fmt.Fprintf(&c.out, "Next: run dynaflux generate, then restart dynaflux dev -endpoint %s, which registers the catalog that retires %s.\n",
+			f.endpoint, id)
+	}
 	fmt.Fprintf(&c.out, "Before you deploy another environment with this %s, run dynaflux retire %s -prefix <its prefix> there, with its credentials.\n",
 		catalog.LockFileName, id)
 	return exitOK
@@ -132,7 +142,7 @@ func (c *cli) retire(o retireOptions, args []string) int {
 
 // writeTombstones asks, then sets version id retired in each region whose item needs it.
 // When a write fails, dynaflux.lock stays as it is, so that a run again finishes the job.
-func (c *cli) writeTombstones(f *fleet, id string, items []*retireItem, yes bool) int {
+func (c *cli) writeTombstones(f *fleet, id string, items []*retireItem, yes, queryStack bool) int {
 	var regions []string
 	for i, it := range items {
 		if it.write {
@@ -142,8 +152,13 @@ func (c *cli) writeTombstones(f *fleet, id string, items []*retireItem, yes bool
 	if len(regions) == 0 {
 		return exitOK
 	}
-	c.errorf("retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still "+
-		"query %s, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.", id)
+	if queryStack {
+		c.errorf("retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still "+
+			"query %s, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.", id)
+	} else {
+		c.errorf("retire can't see application builds: one older than the deployed catalog may still query %s, "+
+			"and gets ErrViewNotReady once it is retired. Deploy the application first.", id)
+	}
 	if s := c.confirm(retireName, fmt.Sprintf("retire %s in %s?", id, strings.Join(regions, ", ")), yes); s != exitOK {
 		return s
 	}
@@ -207,14 +222,15 @@ func (f *fleet) planRetire(c *cli, id, prefix string) ([]*retireItem, int) {
 			continue
 		}
 		items[i] = &retireItem{}
-		items[i].plan(d, id, prefix)
+		items[i].plan(d, id, prefix, f.endpoint)
 	}
 	return items, status
 }
 
-// plan runs retire's checks on version id in region d (lifecycle.md §8). A region that
-// already holds the version retired, or never held it, needs nothing.
-func (it *retireItem) plan(d *deployment, id, prefix string) {
+// plan runs retire's checks on version id in region d (lifecycle.md §8), on DynamoDB Local
+// at endpoint when it isn't "". A region that already holds the version retired, or never
+// held it, needs nothing.
+func (it *retireItem) plan(d *deployment, id, prefix, endpoint string) {
 	vv, defined := d.cat.Version(id)
 	vs, held := d.states[id]
 	switch {
@@ -237,8 +253,11 @@ func (it *retireItem) plan(d *deployment, id, prefix string) {
 		cur := catalog.VersionID(view, n)
 		if s := d.state(cur).State; cur != id && s != meta.Live {
 			hint := "fill it first: dynaflux backfill " + cur + " -region " + d.region + prefix
-			if s == meta.Broken {
+			switch {
+			case s == meta.Broken:
 				hint = "rebuild it first with dynaflux generate -rebuild " + view + ", then deploy and backfill the new version"
+			case endpoint != "": // backfill doesn't run there
+				hint = "fill it first: restart dynaflux dev -endpoint " + endpoint + ", which fills it"
 			}
 			it.refuse(d.region, "DF7303", fmt.Sprintf("%s, the view's current version in the deployed catalog, is %s in %s", cur, s, d.region), hint)
 		}

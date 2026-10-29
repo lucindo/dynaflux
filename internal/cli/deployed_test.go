@@ -259,6 +259,16 @@ func TestDeployed(t *testing.T) {
 				}
 			},
 		},
+		{"query version not live on DynamoDB Local", []string{"query", "UserViews", "-param", "users=['u1']", "-endpoint", "http://127.0.0.1:8000"}, 1, nil},
+		{
+			"query version activating on DynamoDB Local", []string{"query", "UserViews", "-param", "users=['u1']", "-endpoint", "http://127.0.0.1:8000"}, 1,
+			func(t *testing.T, d *deployed) {
+				t.Helper()
+				if _, err := d.meta.Activate(t.Context(), "user_pages@v1", "page_views", meta.SplitFence, meta.DefaultBounds); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
 		{"query version not live allowed", slices.Concat([]string{"query", "UserViews", "-allow-partial", "-param", "users=['u1']"}, us), 0, nil},
 		{"query unknown", slices.Concat([]string{"query", "PageStat"}, us), 2, nil},
 		{"query unknown parameter", slices.Concat([]string{"query", "PageStats", "-param", "pge=/home"}, us), 2, nil},
@@ -291,11 +301,21 @@ func TestDeployed(t *testing.T) {
 				"-key", "day=1999-12-31", "-key", "kind=7", "-from", "1999-12-01T00:00:00Z", "-to", "1999-12-31T00:00:00.5Z"}, us), 0, nil,
 		},
 		{"inspect stream not archived", slices.Concat([]string{"inspect", "orders", "-key", "order_id=o'1"}, us), 0, nil},
+		{"inspect stream on DynamoDB Local", []string{"inspect", "page_views", "-key", "user_id=u1", "-endpoint", "http://127.0.0.1:8000"}, 0, nil},
 		{"inspect stream without its key", slices.Concat([]string{"inspect", "page_views"}, us), 2, nil},
 		{"inspect stream with -raw", slices.Concat([]string{"inspect", "page_views", "-raw", "-key", "user_id=u1"}, us), 2, nil},
 		{"inspect view row", slices.Concat([]string{"inspect", "page_daily", "-key", "page=/home", "-key", "day=1999-12-31T00:00:00Z"}, us), 0, nil},
 		{"inspect view partition", slices.Concat([]string{"inspect", "page_daily@v1", "-key", "page=/home"}, us), 0, nil},
 		{"inspect view json", slices.Concat([]string{"inspect", "page_daily", "-json", "-key", "page=/home"}, us), 0, nil},
+		{
+			"inspect view in a reordered SELECT", slices.Concat([]string{"inspect", "page_daily", "-key", "page=/home"}, us), 0,
+			editSQL("count()                  AS views,\n    uniqExact(user_id)       AS visitors,\n    avg(duration_ms)         AS avg_ms",
+				"uniqExact(user_id) AS visitors, avg(duration_ms) AS avg_ms, count() AS views"),
+		},
+		{
+			"inspect view whose SQL changed", slices.Concat([]string{"inspect", "page_daily", "-key", "page=/home"}, us), 0,
+			editSQL("AS avg_ms\n", "AS avg_ms,\n    max(duration_ms) AS longest\n"),
+		},
 		{"inspect view raw row", slices.Concat([]string{"inspect", "page_daily", "-raw", "-key", "page=/home", "-key", "day=1999-12-31T00:00:00Z"}, us), 0, nil},
 		{"inspect view raw partition", slices.Concat([]string{"inspect", "page_daily", "-raw", "-limit", "1", "-key", "page=/home"}, us), 0, nil},
 		{"inspect view raw empty partition", slices.Concat([]string{"inspect", "page_daily", "-raw", "-key", "page=/none"}, us), 0, nil},
@@ -330,6 +350,24 @@ func TestDeployed(t *testing.T) {
 				g.check(t, strings.ReplaceAll(tt.name, " ", "_"), got)
 			})
 		})
+	}
+}
+
+// editSQL replaces from with to in the project's SQL file, after the deploy.
+func editSQL(from, to string) func(t *testing.T, d *deployed) {
+	return func(t *testing.T, d *deployed) {
+		t.Helper()
+		path := filepath.Join(d.dir, "dynaflux", "shop.sql")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), from) {
+			t.Fatalf("%s doesn't hold %q", path, from)
+		}
+		if err = os.WriteFile(path, []byte(strings.Replace(string(data), from, to, 1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

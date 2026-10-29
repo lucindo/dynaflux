@@ -25,7 +25,7 @@ FROM page_views
 GROUP BY page;
 -- want/already_retired_skips_the_checks.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
-retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 -- want/already_retired_skips_the_checks.stdout --
 page_counts@v1:
   us-east-1      retire   live
@@ -39,7 +39,7 @@ Next: run dynaflux generate, and deploy regional.yaml in every region, which del
 Before you deploy another environment with this dynaflux.lock, run dynaflux retire page_counts@v1 -prefix <its prefix> there, with its credentials.
 -- want/broken_version.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
-retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 -- want/broken_version.stdout --
 page_counts@v1:
   us-east-1      retire   live
@@ -74,9 +74,17 @@ page_counts@v1:
   us-east-1      retire   live
   us-west-2      refused  pending_backfill
   dynaflux.lock  retire   retained
+-- want/current_not_live_on_DynamoDB_Local.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+us-east-1: error DF7303: page_counts@v2, the view's current version in the deployed catalog, is pending_backfill in us-east-1
+  hint: fill it first: restart dynaflux dev -endpoint http://127.0.0.1:8000, which fills it
+-- want/current_not_live_on_DynamoDB_Local.stdout --
+page_counts@v1:
+  us-east-1      refused  pending_backfill
+  dynaflux.lock  retire   retained
 -- want/declined.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
-retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 retire page_counts@v1 in us-east-1, us-west-2? [y/N] dynaflux retire: nothing written
 -- want/declined.stdout --
 page_counts@v1:
@@ -159,7 +167,7 @@ page_counts@v1:
   dynaflux.lock  retire   retained
 -- want/every_region_after_one.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
-retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 -- want/every_region_after_one.stdout --
 page_counts@v1:
   us-east-1      retire   live
@@ -184,7 +192,7 @@ Next: run dynaflux generate, and deploy regional.yaml in every region, which del
 Before you deploy another environment with this dynaflux.lock, run dynaflux retire page_counts@v1 -prefix <its prefix> there, with its credentials.
 -- want/no_terminal.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
-retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 dynaflux retire: retire page_counts@v1 in us-east-1, us-west-2?: confirm with -yes when not on a terminal
 Run 'dynaflux help retire' for usage.
 -- want/no_terminal.stdout --
@@ -198,7 +206,7 @@ Run 'dynaflux help retire' for usage.
 -- want/not_a_version.stdout --
 -- want/not_deployed.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
-retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 -- want/not_deployed.stdout --
 page_counts@v1:
   us-east-1      retire   live
@@ -214,9 +222,22 @@ Before you deploy another environment with this dynaflux.lock, run dynaflux reti
 dynaflux.lock:1:1: error DF7301: dynaflux.lock doesn't hold page_counts@v3
   hint: name a version that dynaflux.lock keeps; dynaflux status lists the deployed ones
 -- want/not_in_the_lock.stdout --
+-- want/on_DynamoDB_Local.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
+-- want/on_DynamoDB_Local.stdout --
+page_counts@v1:
+  us-east-1      retire   live
+  dynaflux.lock  retire   retained
+us-east-1: page_counts@v1 retired
+
+Checked prefix (none) in us-east-1.
+dynaflux.lock: page_counts@v1 retired
+Next: run dynaflux generate, then restart dynaflux dev -endpoint http://127.0.0.1:8000, which registers the catalog that retires page_counts@v1.
+Before you deploy another environment with this dynaflux.lock, run dynaflux retire page_counts@v1 -prefix <its prefix> there, with its credentials.
 -- want/one_region.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
-retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 -- want/one_region.stdout --
 page_counts@v1:
   us-east-1      retire   live
@@ -235,7 +256,7 @@ page_counts@v1:
   dynaflux.lock  retire   retained
 -- want/rerun_broken_version.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
-retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 -- want/rerun_broken_version.stdout --
 page_counts@v1:
   us-east-1      retire   live
@@ -289,7 +310,7 @@ page_counts@v1:
   dynaflux.lock  none     already retired
 -- want/rerun_retire.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
-retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 -- want/rerun_retire.stdout --
 page_counts@v1:
   us-east-1      retire   live
@@ -310,9 +331,23 @@ page_counts@v1:
   us-east-1      retire   live
   us-west-2      refused  pending_backfill
   dynaflux.lock  none     already retired
--- want/retire.stderr --
+-- want/rerun_with_query.yaml.stderr --
 store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
 retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+-- want/rerun_with_query.yaml.stdout --
+page_counts@v1:
+  us-east-1      retire   live
+  us-west-2      retire   pending_backfill
+  dynaflux.lock  none     already retired
+us-east-1: page_counts@v1 retired
+us-west-2: page_counts@v1 retired
+
+Checked prefix (none) in us-east-1, us-west-2.
+Next: run dynaflux generate, and deploy regional.yaml in every region, which deletes the table of page_counts@v1.
+Before you deploy another environment with this dynaflux.lock, run dynaflux retire page_counts@v1 -prefix <its prefix> there, with its credentials.
+-- want/retire.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+retire can't see application builds: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady once it is retired. Deploy the application first.
 -- want/retire.stdout --
 page_counts@v1:
   us-east-1      retire   live
@@ -338,3 +373,18 @@ page_counts@v1:
 dynaflux retire: name one view version, such as page_daily@v1
 Run 'dynaflux help retire' for usage.
 -- want/two_versions.stdout --
+-- want/with_query.yaml.stderr --
+store shop  prefix (none)  account 123456789012  regions us-east-1, us-west-2
+retire can't see application builds or query.yaml stacks: one older than the deployed catalog may still query page_counts@v1, and gets ErrViewNotReady, or answers 503, once it is retired. Deploy the application and query.yaml first.
+-- want/with_query.yaml.stdout --
+page_counts@v1:
+  us-east-1      retire   live
+  us-west-2      retire   pending_backfill
+  dynaflux.lock  retire   retained
+us-east-1: page_counts@v1 retired
+us-west-2: page_counts@v1 retired
+
+Checked prefix (none) in us-east-1, us-west-2.
+dynaflux.lock: page_counts@v1 retired
+Next: run dynaflux generate, and deploy regional.yaml in every region, which deletes the table of page_counts@v1.
+Before you deploy another environment with this dynaflux.lock, run dynaflux retire page_counts@v1 -prefix <its prefix> there, with its credentials.

@@ -21,7 +21,7 @@ import (
 	"github.com/lucindo/dynaflux/internal/txtar"
 )
 
-var update = flag.Bool("update", false, "rewrite the want/dynaflux.lock sections from the actual output") //nolint:gochecknoglobals // go test flags are package variables
+var update = flag.Bool("update", false, "rewrite the want/dynaflux.lock sections, and the outputs in the README and the guides, from the actual output") //nolint:gochecknoglobals // go test flags are package variables
 
 const (
 	wantPrefix = "want/"
@@ -84,7 +84,7 @@ func TestGenerate(t *testing.T) {
 			name := "generate/" + tt.name
 			dir := writeProject(t, name)
 			before := snapshot(t, dir)
-			got := run(dir, "generate")
+			got := runAlone(dir, "generate")
 			if got.status != tt.want.status || got.stdout != tt.want.stdout || !strings.HasPrefix(got.stderr, tt.want.stderr) {
 				t.Fatalf("got  %+v\nwant %+v, with stderr as a prefix", got, tt.want)
 			}
@@ -428,6 +428,14 @@ func TestHeaderVersion(t *testing.T) {
 			"(devel)",
 		},
 		{
+			"run with go tool, replaced by a local directory",
+			&debug.BuildInfo{Main: debug.Module{
+				Path: module, Version: "v0.0.0-00010101000000-000000000000",
+				Replace: &debug.Module{Path: "/home/ana/dynaflux", Version: "(devel)"},
+			}},
+			"(devel)",
+		},
+		{
 			"replaced by a fork",
 			shop(debug.Module{Path: module, Version: "v0.3.0", Replace: &debug.Module{Path: "example.com/fork/dynaflux", Version: "v0.3.1"}}),
 			"v0.3.1",
@@ -439,6 +447,48 @@ func TestHeaderVersion(t *testing.T) {
 			t.Parallel()
 			if got := cli.HeaderVersion(tt.bi); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Generate warns when go.mod requires another release of the runtime library than the
+// CLI's, whose generated code may not build with it.
+func TestGenerateWarnsOfAnotherLibrary(t *testing.T) {
+	t.Parallel()
+	const module = "github.com/lucindo/dynaflux"
+	installed := &debug.BuildInfo{Main: debug.Module{Path: module, Version: "v1.2.0"}}
+	checkout := &debug.BuildInfo{Main: debug.Module{Path: module, Version: "v1.2.1-0.20261026052951-3ca2f74900fe+dirty"},
+		Settings: []debug.BuildSetting{{Key: "vcs", Value: "git"}}}
+	tests := []struct {
+		name   string
+		build  *debug.BuildInfo
+		gomod  string
+		stderr string
+	}{
+		{
+			"another release", installed, "module example.com/app\nrequire github.com/lucindo/dynaflux v1.1.0\n",
+			"dynaflux generate: warning: this dynaflux is v1.2.0, and go.mod requires github.com/lucindo/dynaflux v1.1.0: " +
+				"code that one release generates may not build with another\n" +
+				"  hint: run the release that go.mod requires with go tool dynaflux, or require this one with go get github.com/lucindo/dynaflux@v1.2.0\n",
+		},
+		{"the same release", installed, "module example.com/app\nrequire github.com/lucindo/dynaflux v1.2.0\n", ""},
+		{
+			"a replaced library", installed,
+			"module example.com/app\nrequire github.com/lucindo/dynaflux v1.1.0\nreplace github.com/lucindo/dynaflux => ../dynaflux\n", "",
+		},
+		{"a CLI from a checkout", checkout, "module example.com/app\nrequire github.com/lucindo/dynaflux v1.1.0\n", ""},
+		{"no library in go.mod", installed, "module example.com/app\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := writeProject(t, "generate/new")
+			writeFile(t, filepath.Join(dir, "go.mod"), tt.gomod)
+			var stdout, stderr strings.Builder
+			status := cli.RunEnv(t.Context(), []string{"generate"}, nil, &stdout, &stderr, dir, cli.Env{Build: tt.build})
+			if got, want := (result{status, stdout.String(), stderr.String()}), (result{0, "page_daily@v1: new\n", tt.stderr}); got != want {
+				t.Errorf("got  %+v\nwant %+v", got, want)
 			}
 		})
 	}

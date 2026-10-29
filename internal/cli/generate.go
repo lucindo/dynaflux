@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -117,8 +116,20 @@ func (c *cli) generate(opts infra.Options, rebuild string, args []string) int {
 		return exitUsage
 	}
 	defer root.Close()
-	bi, _ := debug.ReadBuildInfo() // A nil BuildInfo reads as (devel).
-	version := headerVersion(bi)
+	version := headerVersion(c.build)
+	mod, gm, err := c.readGoMod(p.dir)
+	if err != nil {
+		c.errorf("dynaflux generate: %v", err)
+		return exitUsage
+	}
+	if w := gm.otherLibrary(version); w != "" {
+		c.errorf("dynaflux generate: warning: %s", w)
+	}
+	importPath, err := goOutImportPath(p.dir, p.cfg.Go.Out, mod, gm.module)
+	if err != nil {
+		c.errorf("dynaflux generate: %v", err)
+		return exitUsage
+	}
 	infraFiles, err := templates(p, version, opts)
 	if err != nil {
 		c.errorf("dynaflux generate: %v", err)
@@ -127,7 +138,7 @@ func (c *cli) generate(opts infra.Options, rebuild string, args []string) int {
 	if status = c.checkPrevious(root, p, infraFiles); status != exitOK {
 		return status
 	}
-	outputs, err := render(p, version, infraFiles)
+	outputs, err := render(p, version, importPath, infraFiles)
 	if err != nil {
 		c.errorf("dynaflux generate: %v", err)
 		return exitUsage
@@ -217,17 +228,13 @@ func templates(p *project, version string, opts infra.Options) ([]output, error)
 
 // render returns the files to write: the Go client package, the templates, and
 // dynaflux.lock last, so that a failed run leaves the old lock in place.
-func render(p *project, version string, templates []output) ([]output, error) {
+func render(p *project, version, importPath string, templates []output) ([]output, error) {
 	lockData, err := catalog.MarshalLock(p.lock)
 	if err != nil {
 		return nil, err
 	}
 	o := codegen.Options{Package: p.cfg.Go.Package, Version: version}
 	files, err := codegen.Package(p.cat, o)
-	if err != nil {
-		return nil, err
-	}
-	importPath, err := goOutImportPath(p.dir, p.cfg.Go.Out)
 	if err != nil {
 		return nil, err
 	}
@@ -245,49 +252,21 @@ func render(p *project, version string, templates []output) ([]output, error) {
 }
 
 // goOutImportPath returns the import path of go.out, which is relative to the project root
-// dir: the path of the module whose go.mod is in dir or the nearest directory above it,
-// joined with go.out's directory in that module.
-func goOutImportPath(dir, goOut string) (string, error) {
-	for mod := dir; ; {
-		data, err := os.ReadFile(filepath.Join(mod, "go.mod"))
-		if err == nil {
-			modPath := goModulePath(data)
-			if modPath == "" {
-				return "", fmt.Errorf("%s has no module line", filepath.Join(mod, "go.mod"))
-			}
-			rel, relErr := filepath.Rel(mod, filepath.Join(dir, filepath.FromSlash(goOut)))
-			if relErr != nil {
-				return "", relErr
-			}
-			return path.Join(modPath, filepath.ToSlash(rel)), nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", err
-		}
-		parent := filepath.Dir(mod)
-		if parent == mod {
-			return "", fmt.Errorf("no go.mod in %s or a directory above it: the main.go in runtime.out imports go.out "+
-				"by its import path, so the project must be in a Go module", dir)
-		}
-		mod = parent
+// dir: the path of module modPath, whose go.mod is in mod, joined with go.out's directory in
+// that module. mod is "" when no go.mod holds dir.
+func goOutImportPath(dir, goOut, mod, modPath string) (string, error) {
+	switch {
+	case mod == "":
+		return "", fmt.Errorf("no go.mod in %s or a directory above it: the main.go in runtime.out imports go.out "+
+			"by its import path, so the project must be in a Go module", dir)
+	case modPath == "":
+		return "", fmt.Errorf("%s has no module line", filepath.Join(mod, "go.mod"))
 	}
-}
-
-// goModulePath returns the path in go.mod's module directive, or "" without one.
-func goModulePath(gomod []byte) string {
-	for line := range strings.Lines(string(gomod)) {
-		line, _, _ = strings.Cut(line, "//")
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module")
-		if !ok || rest == strings.TrimLeft(rest, " \t") {
-			continue // another directive, or a word that starts with module
-		}
-		rest = strings.TrimSpace(rest)
-		if unquoted, err := strconv.Unquote(rest); err == nil {
-			return unquoted
-		}
-		return rest
+	rel, err := filepath.Rel(mod, filepath.Join(dir, filepath.FromSlash(goOut)))
+	if err != nil {
+		return "", err
 	}
-	return ""
+	return path.Join(modPath, filepath.ToSlash(rel)), nil
 }
 
 // write writes the outputs whose bytes changed, each through a temporary file and a
@@ -381,24 +360,14 @@ func isGeneratedTemplate(src []byte) bool {
 // release that go.mod pins, or (devel) for a CLI built from a checkout or a module
 // replaced by a local directory, whose versions change with each commit or name a path.
 func headerVersion(bi *debug.BuildInfo) string {
-	const devel = "(devel)"
+	m, checkout := builtModule(bi)
 	switch {
-	case bi == nil:
-		return devel
-	case bi.Main.Path == modulePath:
-		if slices.ContainsFunc(bi.Settings, func(s debug.BuildSetting) bool { return s.Key == "vcs" }) {
-			return devel
-		}
-		return bi.Main.Version
+	case m == nil:
+		return develVersion
+	case m.Replace != nil: // a local directory has no version
+		return cmp.Or(m.Replace.Version, develVersion)
+	case checkout:
+		return develVersion
 	}
-	for _, m := range bi.Deps {
-		if m.Path != modulePath {
-			continue
-		}
-		if m.Replace != nil {
-			m = m.Replace
-		}
-		return cmp.Or(m.Version, devel)
-	}
-	return devel
+	return cmp.Or(m.Version, develVersion)
 }

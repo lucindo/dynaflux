@@ -114,8 +114,13 @@ func (c *cli) init(o initOptions, args []string) int {
 			return exitUsage
 		}
 	}
-	if _, serr := root.Stat("go.mod"); errors.Is(serr, fs.ErrNotExist) {
+	gomod, err := root.ReadFile("go.mod")
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		c.errorf("dynaflux init: warning: no go.mod here; dynaflux.yaml belongs at the root of a Go module (go mod init)")
+	case err != nil:
+		c.errorf("dynaflux init: %v", err)
+		return exitUsage
 	}
 	for _, name := range names {
 		if werr := writeNew(root, name, files[name].Data); werr != nil {
@@ -124,12 +129,30 @@ func (c *cli) init(o initOptions, args []string) int {
 		}
 		fmt.Fprintf(&c.out, "wrote %s\n", name)
 	}
-	c.out.WriteString(`
-Next:
-  dynaflux generate   write the Go client package, the runtime's main.go and the templates
-  dynaflux dev        run the store on DynamoDB Local
-`)
+	c.printNext(parseGoMod(gomod), errors.Is(err, fs.ErrNotExist))
 	return exitOK
+}
+
+// printNext prints the steps after init in module m, which is made first when noModule:
+// then go get when m doesn't require the library, of this CLI's release unless it is built
+// from a checkout, which generate would otherwise warn about.
+func (c *cli) printNext(m goMod, noModule bool) {
+	c.out.WriteString("\nNext:\n")
+	var steps [][]string
+	if noModule {
+		steps = append(steps, []string{"  go mod init <module path>", "make this directory a Go module"})
+	}
+	if m.needsLibrary() {
+		get := "  go get " + modulePath
+		if v := headerVersion(c.build); v != develVersion {
+			get += "@" + v
+		}
+		steps = append(steps, []string{get, "add the Dynaflux library to go.mod"})
+	}
+	alignColumns(&c.out, append(steps,
+		[]string{"  dynaflux generate", "write the Go client package, the runtime's main.go and the templates"},
+		[]string{"  go mod tidy", "add the modules that the generated code imports to go.mod"},
+		[]string{"  dynaflux dev", "run the store on DynamoDB Local"}))
 }
 
 // checkStarter compiles the files before init writes them, so a store name or region that

@@ -72,7 +72,7 @@ func TestStatusOnDynamoDBLocal(t *testing.T) {
 	status := cli.Run(t.Context(), []string{"status", "-endpoint", s.endpoint, "-prefix", s.naming.Prefix, "-verbose"}, nil, &stdout, &stderr, s.dir)
 	for _, want := range []string{
 		"us-east-1: error DF7201: page_seen@v1 broke at ",
-		"us-east-1: warning DF7202: plan_counts@v1 needs a backfill\n  hint: dynaflux backfill plan_counts@v1 -region us-east-1 -prefix " + s.naming.Prefix + "\n",
+		"us-east-1: warning DF7202: plan_counts@v1 needs a backfill\n  hint: run dynaflux dev -endpoint " + s.endpoint + ", which fills it\n",
 		"us-east-1: error DF7209: the projector of stream page_views fails every batch: gone@v1 is live, " +
 			"and the deployed catalog neither defines nor retires it; records are lost 24 hours after they were written",
 	} {
@@ -139,8 +139,8 @@ func TestStatusArchiveOnDynamoDBLocal(t *testing.T) {
 		"us-east-1: warning DF7204: a gap is suspected in stream page_views: a projector handled a record almost 24 hours old at " + when +
 			"; gone@v1, page_counts@v1 may miss its records\n",
 		"us-east-1: warning DF7204: the archive of stream signups isn't complete: a deploy changed its archive mode from all to off at " + when +
-			"; plan_counts@v1 can't go live from it\n  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, " +
-			"and run dynaflux backfill plan_counts -prefix " + s.naming.Prefix + "\n",
+			"; plan_counts@v1 can't go live from it\n  hint: run dynaflux generate -rebuild plan_counts, then restart dynaflux dev -endpoint " +
+			s.endpoint + ", which fills the new versions\n",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr.String())

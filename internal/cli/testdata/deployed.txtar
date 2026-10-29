@@ -88,6 +88,14 @@ store shop  prefix (none)  account 123456789012  region us-east-1
 note: events that arrived before 1999-12-30T00:00:00Z are past LOG RETENTION 2 DAY, and orders isn't archived in us-east-1
 -- want/inspect_stream_not_archived.stdout --
 event_id  event_time  ingest_time  origin_region  order_id  total
+-- want/inspect_stream_on_DynamoDB_Local.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+note: events that arrived before 1999-12-30T00:00:00Z are past LOG RETENTION 2 DAY; inspect leaves them out, and DynamoDB Local has no archive
+-- want/inspect_stream_on_DynamoDB_Local.stdout --
+event_id                    event_time                   ingest_time                  origin_region  user_id  page   duration_ms  tags
+00VHNCZB00V63QXKKD6T5AR6KH  1999-12-30T09:00:00.000000Z  2000-01-01T00:00:00.000002Z  us-east-1      u1       /home  300          ['it\'s']
+00VHNCZB00V63QXKKD6T5AR6KF  1999-12-31T10:00:00.000000Z  2000-01-01T00:00:00.000000Z  us-east-1      u1       /home  100          ['a','b']
+00VHNCZB00V63QXKKD6T5AR6KJ  1999-12-31T12:00:00.123456Z  2000-01-01T00:00:00.000003Z  us-east-1      u1       /cart  50           []
 -- want/inspect_stream_range.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 note: stopped after 1 events; -limit 0 prints them all
@@ -115,10 +123,16 @@ store shop  prefix (none)  account 123456789012  region us-east-1
 dynaflux inspect: the deployed catalog of us-east-1 has no stream or view page_dayly; did you mean page_daily?
 Run 'dynaflux help inspect' for usage.
 -- want/inspect_unknown.stdout --
+-- want/inspect_view_in_a_reordered_SELECT.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/inspect_view_in_a_reordered_SELECT.stdout --
+page   day                   visitors  avg_ms  views
+/home  1999-12-30T00:00:00Z  1         300     1
+/home  1999-12-31T00:00:00Z  2         150     2
 -- want/inspect_view_json.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/inspect_view_json.stdout --
-{"format":1,"region":"us-east-1","version":"page_daily@v1","state":"live","rows":[{"page":"/home","day":"1999-12-30T00:00:00Z","avg_ms":300,"views":"1","visitors":"1"},{"page":"/home","day":"1999-12-31T00:00:00Z","avg_ms":150,"views":"2","visitors":"2"}]}
+{"format":1,"region":"us-east-1","version":"page_daily@v1","state":"live","rows":[{"page":"/home","day":"1999-12-30T00:00:00Z","views":"1","visitors":"1","avg_ms":300},{"page":"/home","day":"1999-12-31T00:00:00Z","views":"2","visitors":"2","avg_ms":150}]}
 -- want/inspect_view_not_live.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 note: user_pages@v1 is pending_backfill in us-east-1, so its rows may miss events
@@ -132,9 +146,9 @@ Run 'dynaflux help inspect' for usage.
 -- want/inspect_view_partition.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/inspect_view_partition.stdout --
-page   day                   avg_ms  views  visitors
-/home  1999-12-30T00:00:00Z  300     1      1
-/home  1999-12-31T00:00:00Z  150     2      2
+page   day                   views  visitors  avg_ms
+/home  1999-12-30T00:00:00Z  1      1         300
+/home  1999-12-31T00:00:00Z  2      2         150
 -- want/inspect_view_raw_empty_partition.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/inspect_view_raw_empty_partition.stdout --
@@ -164,12 +178,18 @@ item pk "/home" sk "1999-12-31T00:00:00Z#p01": 122 of DynamoDB's 409600 bytes
 -- want/inspect_view_row.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/inspect_view_row.stdout --
-page   day                   avg_ms  views  visitors
-/home  1999-12-31T00:00:00Z  150     2      2
+page   day                   views  visitors  avg_ms
+/home  1999-12-31T00:00:00Z  2      2         150
 -- want/inspect_view_row_not_found.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 dynaflux inspect: page_daily@v1 has no row with that key in us-east-1
 -- want/inspect_view_row_not_found.stdout --
+-- want/inspect_view_whose_SQL_changed.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+-- want/inspect_view_whose_SQL_changed.stdout --
+page   day                   avg_ms  views  visitors
+/home  1999-12-30T00:00:00Z  300     1      1
+/home  1999-12-31T00:00:00Z  150     2      2
 -- want/inspect_view_with_-from.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 dynaflux inspect: -from and -to apply to streams
@@ -256,6 +276,11 @@ store shop  prefix (none)  account 123456789012  region us-east-1
 dynaflux query: view version not ready: user_pages@v1 is activating in us-east-1
   hint: a backfill is filling it; follow it with dynaflux backfill user_pages@v1 -watch -region us-east-1 -prefix "", or read it anyway with -allow-partial
 -- want/query_version_activating.stdout --
+-- want/query_version_activating_on_DynamoDB_Local.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+dynaflux query: view version not ready: user_pages@v1 is activating in us-east-1
+  hint: dynaflux dev -endpoint http://127.0.0.1:8000 fills it; wait for "user_pages@v1: live" in its output, or read it anyway with -allow-partial
+-- want/query_version_activating_on_DynamoDB_Local.stdout --
 -- want/query_version_broken.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 dynaflux query: view version not ready: user_pages@v1 is broken in us-east-1: event e1: division by zero
@@ -270,6 +295,11 @@ dynaflux query: view version not ready: user_pages@v1 is pending_backfill in us-
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/query_version_not_live_allowed.stdout --
 user_id  views
+-- want/query_version_not_live_on_DynamoDB_Local.stderr --
+store shop  prefix (none)  endpoint http://127.0.0.1:8000  region us-east-1
+dynaflux query: view version not ready: user_pages@v1 is pending_backfill in us-east-1
+  hint: dynaflux dev -endpoint http://127.0.0.1:8000 fills it; wait for "user_pages@v1: live" in its output, or read it anyway with -allow-partial
+-- want/query_version_not_live_on_DynamoDB_Local.stdout --
 -- want/query_without_rows.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 -- want/query_without_rows.stdout --

@@ -35,18 +35,19 @@ for each region its catalog, the backfill jobs, and for each stream the
 projector's lag, the event source mappings, how far the archive is delivered, and
 whether it is complete (§5.5). Last, on stderr, it lists what needs an action,
 each with the command that takes it: a broken version, a version that needs a
-backfill, an interrupted backfill, a gap Lambda recorded in the bucket, a
-suspected gap or an incomplete archive that affects a version, a young stream
-without an origin, projectors blocked on a version their catalog doesn't know,
-projector lag, another reader of a stream, a mapping that isn't enabled, and a
-stale archive. It reads the newest 100 of Lambda's records, and
-none written before every version's activation. -verbose adds each delivery
-unit's progress and fences. -json prints one JSON document instead, with
-"format": 1.
+backfill, a live version that is no longer current, an interrupted backfill, a
+gap Lambda recorded in the bucket, a suspected gap or an incomplete archive that
+affects a version, a young stream without an origin, projectors blocked on a
+version their catalog doesn't know, projector lag, another reader of a stream, a
+mapping that isn't enabled, and a stale archive. The commands repeat -endpoint
+and -prefix as given. It reads the newest 100 of Lambda's records, and none
+written before every version's activation. -verbose adds each delivery unit's
+progress and fences. -json prints one JSON document instead, with "format": 1.
 
 With -endpoint it reads DynamoDB Local, where mappings, metrics, gaps and the
 jobs' executions aren't available, and judges an archive by the holes its meta
-table records.
+table records. Its commands repeat -region there too, and name dynaflux dev
+where a backfill would run on AWS.
 
 Exit status: 0 when nothing needs an action or only warnings do, 1 when an error
 does, and 2 for usage and AWS access problems, and when a region, or part of
@@ -145,7 +146,7 @@ func (c *cli) status(o statusOptions, args []string) int {
 	wg.Wait()
 	var fs []finding
 	for _, r := range rs {
-		fs = append(fs, r.findings(f, prefixFlag(o.prefix), now)...)
+		fs = append(fs, r.findings(f, hintFlags{endpoint: o.endpoint, prefix: o.prefix, regions: o.regions}, now)...)
 	}
 	if o.json {
 		status = c.writeJSON(statusJSONOf(f, rs, fs))

@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"testing"
@@ -15,10 +16,14 @@ import (
 	"github.com/lucindo/dynaflux/internal/txtar"
 )
 
+// initNext is what init from a checkout prints last in a module whose go.mod doesn't
+// require the library.
 const initNext = `
 Next:
-  dynaflux generate   write the Go client package, the runtime's main.go and the templates
-  dynaflux dev        run the store on DynamoDB Local
+  go get github.com/lucindo/dynaflux  add the Dynaflux library to go.mod
+  dynaflux generate                   write the Go client package, the runtime's main.go and the templates
+  go mod tidy                         add the modules that the generated code imports to go.mod
+  dynaflux dev                        run the store on DynamoDB Local
 `
 
 func runInit(t *testing.T, dir string, vars map[string]string, args ...string) result {
@@ -95,12 +100,53 @@ func TestInitDefaults(t *testing.T) {
 	}
 }
 
+// A released dynaflux asks for its own release of the library, which generate then finds in
+// go.mod.
+func TestInitPinsTheRelease(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module example.com/shop\n")
+	var stdout, stderr strings.Builder
+	build := &debug.BuildInfo{Main: debug.Module{Path: "github.com/lucindo/dynaflux", Version: "v1.2.0"}}
+	status := cli.RunEnv(t.Context(), []string{"init", "-store", "shop"}, nil, &stdout, &stderr, dir, cli.Env{Build: build})
+	want := "\nNext:\n" +
+		"  go get github.com/lucindo/dynaflux@v1.2.0  add the Dynaflux library to go.mod\n" +
+		"  dynaflux generate                          write the Go client package, the runtime's main.go and the templates\n" +
+		"  go mod tidy                                add the modules that the generated code imports to go.mod\n" +
+		"  dynaflux dev                               run the store on DynamoDB Local\n"
+	if status != 0 || stderr.String() != "" || !strings.HasSuffix(stdout.String(), want) {
+		t.Errorf("got %d, %q, %q\nwant status 0 and stdout ending in\n%s", status, stdout.String(), stderr.String(), want)
+	}
+}
+
+// A go.mod that requires the library, as after go get -tool, needs no go get.
+func TestInitInModuleWithLibrary(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module example.com/shop\n\nrequire (\n\tgithub.com/lucindo/dynaflux v1.0.0 // indirect\n)\n")
+	got := runInit(t, dir, nil, "-store", "shop")
+	want := "\nNext:\n" +
+		"  dynaflux generate  write the Go client package, the runtime's main.go and the templates\n" +
+		"  go mod tidy        add the modules that the generated code imports to go.mod\n" +
+		"  dynaflux dev       run the store on DynamoDB Local\n"
+	if got.status != 0 || got.stderr != "" || !strings.HasSuffix(got.stdout, want) {
+		t.Errorf("got %+v\nwant status 0 and stdout ending in\n%s", got, want)
+	}
+}
+
+// Without a go.mod, the first step makes one.
 func TestInitWithoutModule(t *testing.T) {
 	t.Parallel()
 	got := runInit(t, t.TempDir(), nil, "-store", "shop")
 	want := "dynaflux init: warning: no go.mod here; dynaflux.yaml belongs at the root of a Go module (go mod init)\n"
-	if got.status != 0 || got.stderr != want {
-		t.Errorf("got %+v, want status 0 and stderr %q", got, want)
+	next := "\nNext:\n" +
+		"  go mod init <module path>           make this directory a Go module\n" +
+		"  go get github.com/lucindo/dynaflux  add the Dynaflux library to go.mod\n" +
+		"  dynaflux generate                   write the Go client package, the runtime's main.go and the templates\n" +
+		"  go mod tidy                         add the modules that the generated code imports to go.mod\n" +
+		"  dynaflux dev                        run the store on DynamoDB Local\n"
+	if got.status != 0 || got.stderr != want || !strings.HasSuffix(got.stdout, next) {
+		t.Errorf("got %+v\nwant status 0, stderr %q and stdout ending in\n%s", got, want, next)
 	}
 }
 

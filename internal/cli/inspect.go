@@ -32,17 +32,19 @@ func inspectCommand() command {
 		args:    "[flags] <stream|view|view@vN>",
 		summary: "read a stream's events or a view's rows in the deployed store",
 		doc: `Inspect reads a stream or a view with the deployed catalog of one region. -key gives
-the value of a key column as column=value. ` + valueForms + `
-For a stream, give every PRIMARY KEY column: inspect prints its events in
-(event_time, event_id) order, within -from and -to when given. Events past the
-stream's LOG RETENTION are only in its archive; inspect then prints the Athena SQL
-that reads them.
+the value of a key column as column=value. For a stream, give every PRIMARY KEY
+column: inspect prints its events in (event_time, event_id) order, within -from and
+-to when given. On AWS, events past the stream's LOG RETENTION are only in its
+archive; inspect then prints the Athena SQL that reads them.
 
+` + valueForms + `
 For a view, give every ORDER BY column to read one row, or only the PRIMARY KEY
 columns to read the partition. A view name reads its current version in the deployed
-catalog, and view@vN another version that isn't retired. -raw prints the items as
-DynamoDB stores them: each SPLIT item, the row version _v, the high-water marks _hwm
-decoded, and the item's size against DynamoDB's 400 KB limit.
+catalog, and view@vN another version that isn't retired. A row shows the keys, then
+the aggregates in the order of the SELECT list when the SQL files define the
+version, and otherwise by name. -raw prints the items as DynamoDB stores them: each
+SPLIT item, the row version _v, the high-water marks _hwm decoded, and the item's
+size against DynamoDB's 400 KB limit.
 
 -json prints a stream's events as JSON Lines, and a view's rows as one JSON document.
 
@@ -143,7 +145,7 @@ func (c *cli) inspectStream(d *deployment, s *catalog.Stream, o inspectOptions) 
 	} else {
 		writeTable(&c.out, cols, events)
 	}
-	c.archiveNote(d, s, key, from, to)
+	c.archiveNote(d, s, key, from, to, o.aws.endpoint != "")
 	return exitOK
 }
 
@@ -168,9 +170,10 @@ func eventTimeFlag(name, s string) (*int64, error) {
 	return new(v.AsMicros()), nil
 }
 
-// archiveNote tells where the events are that a read of [from, to) may miss because they
-// passed the stream's LOG RETENTION: in the region's archive, or nowhere.
-func (c *cli) archiveNote(d *deployment, s *catalog.Stream, key []expr.Value, from, to *int64) {
+// archiveNote tells where the events are that a read of [from, to) leaves out because they
+// passed the stream's LOG RETENTION: in the region's archive, or nowhere, as on DynamoDB
+// Local.
+func (c *cli) archiveNote(d *deployment, s *catalog.Stream, key []expr.Value, from, to *int64, local bool) {
 	p, ok := s.LogRetention.Period()
 	if !ok {
 		return
@@ -181,7 +184,11 @@ func (c *cli) archiveNote(d *deployment, s *catalog.Stream, key []expr.Value, fr
 	}
 	window := fmt.Sprintf("note: events that arrived before %s are past LOG RETENTION %s",
 		time.UnixMicro(cutoff).UTC().Format(time.RFC3339), p)
-	if !archive.Archived(s, d.region) {
+	switch {
+	case local:
+		c.errorf("%s; inspect leaves them out, and DynamoDB Local has no archive", window)
+		return
+	case !archive.Archived(s, d.region):
 		c.errorf("%s, and %s isn't archived in %s", window, s.Name, d.region)
 		return
 	}
@@ -254,12 +261,56 @@ func (c *cli) inspectView(d *deployment, name string, o inspectOptions) int {
 	if status != exitOK {
 		return status
 	}
+	n, order := len(vv.Keys), c.selectOrder(id, vv)
+	cols := inSelectOrder(viewColumns(vv), n, order)
+	for i, row := range rows {
+		rows[i] = inSelectOrder(row, n, order)
+	}
 	if o.json {
-		writeViewJSON(&c.out, d.region, state, viewColumns(vv), rows)
+		writeViewJSON(&c.out, d.region, state, cols, rows)
 	} else {
-		writeTable(&c.out, viewColumns(vv), rows)
+		writeTable(&c.out, cols, rows)
 	}
 	return exitOK
+}
+
+// selectOrder returns the positions in vv.Aggregates, which the deployed catalog keeps by
+// name, in the order of the SELECT list that defines version id in the SQL files. When
+// they define no version of the view with vv's fingerprint, or don't compile, it keeps the
+// deployed order.
+func (c *cli) selectOrder(id string, vv *catalog.ViewVersion) []int {
+	order := make([]int, len(vv.Aggregates))
+	for i := range order {
+		order[i] = i
+	}
+	p, _, status := c.load()
+	if status != exitOK {
+		return order
+	}
+	view, _, _ := strings.Cut(id, "@v")
+	v, ok := p.cat.View(view)
+	if !ok {
+		return order
+	}
+	i := slices.IndexFunc(v.Versions, func(lv catalog.ViewVersion) bool { return lv.Fingerprint == vv.Fingerprint })
+	if i < 0 {
+		return order
+	}
+	// One fingerprint holds the same aggregates.
+	for j, a := range v.Versions[i].Aggregates {
+		order[j] = slices.IndexFunc(vv.Aggregates, func(b catalog.ViewAggregate) bool { return b.Name == a.Name })
+	}
+	return order
+}
+
+// inSelectOrder returns s, a view row or its columns, with the aggregates after its n keys
+// in order.
+func inSelectOrder[T any](s []T, n int, order []int) []T {
+	out := slices.Clone(s[:n])
+	for _, i := range order {
+		out = append(out, s[n+i])
+	}
+	return out
 }
 
 // viewVersion finds the version that name names, a view's current one or view@vN, and
