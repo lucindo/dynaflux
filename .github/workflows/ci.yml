@@ -36,7 +36,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum', 'tools/go.sum') }}
           restore-keys: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-
       - run: make verify
       - run: make check-clean
@@ -59,7 +59,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum', 'tools/go.sum') }}
           restore-keys: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-
       - run: make integration
       - run: make e2e-emulator
@@ -85,7 +85,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+          key: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum', 'tools/go.sum') }}
           restore-keys: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-
       # The version the templates were designed against (Makefile, infra-lint). The runner
       # image ships pipx.

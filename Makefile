@@ -12,11 +12,13 @@ GO_TEST_FLAGS ?= -count=1
 # path so PATH ordering (brew, asdf, system) can't shadow what we just installed.
 GOBIN_DIR := $(shell go env GOPATH)/bin
 
-# Go tools are not pinned: `make tools` installs the latest release of any
-# that is missing, and `make tools-update` upgrades them all.
+# golangci-lint is pinned in tools/go.mod and runs through `go tool`, because other
+# projects pin their own copy in GOBIN_DIR and .golangci.yml needs this version.
+# The other Go tools are not pinned: `make tools` installs the latest release of any
+# that is missing, and `make tools-update` upgrades them all and bumps the pin.
+GOLANGCI_LINT ?= go tool -modfile=tools/go.mod golangci-lint
 
 # Absolute paths to the tool binaries installed into GOBIN_DIR.
-GOLANGCI_LINT := $(GOBIN_DIR)/golangci-lint
 GITLEAKS      := $(GOBIN_DIR)/gitleaks
 GOVULNCHECK   := $(GOBIN_DIR)/govulncheck
 OSV_SCANNER   := $(GOBIN_DIR)/osv-scanner
@@ -78,13 +80,13 @@ help: ## Show this help — auto-generated from inline annotations on each targe
 # === Go tools
 
 tools: ## Install missing Go tools at their latest release.
-	$(call ensure_gobin_tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 	$(call ensure_gobin_tool,$(GITLEAKS),github.com/zricethezav/gitleaks/v8@latest)
 	$(call ensure_gobin_tool,$(GOVULNCHECK),golang.org/x/vuln/cmd/govulncheck@latest)
 	$(call ensure_gobin_tool,$(OSV_SCANNER),github.com/google/osv-scanner/v2/cmd/osv-scanner@latest)
 
-tools-update: ## Reinstall all Go tools at their latest release.
-	GOBIN='$(GOBIN_DIR)' go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+tools-update: ## Reinstall all Go tools at their latest release and bump the golangci-lint pin.
+	go -C tools get -tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+	go -C tools mod tidy
 	GOBIN='$(GOBIN_DIR)' go install github.com/zricethezav/gitleaks/v8@latest
 	GOBIN='$(GOBIN_DIR)' go install golang.org/x/vuln/cmd/govulncheck@latest
 	GOBIN='$(GOBIN_DIR)' go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest
@@ -128,7 +130,7 @@ cross-arch: ## Run the cross-architecture Float64 tests as amd64 (not part of ve
 lambda-build: ## Build the example's Lambda binary for linux/arm64.
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./examples/analytics/cmd/dynaflux-runtime
 
-fmt: tools ## Format Go code with the formatters in .golangci.yml.
+fmt: ## Format Go code with the formatters in .golangci.yml.
 	$(GOLANGCI_LINT) fmt
 
 fix: ## Run `go fix ./...`.
@@ -136,7 +138,7 @@ fix: ## Run `go fix ./...`.
 
 # The second run covers the files behind the integration build tag; the first still covers
 # the !integration ones. The third covers the end-to-end suite, which nothing else builds.
-lint: tools ## Run `golangci-lint run ./...`, then again with the integration and e2e build tags.
+lint: ## Run `golangci-lint run ./...`, then again with the integration and e2e build tags.
 	$(GOLANGCI_LINT) run ./...
 	$(GOLANGCI_LINT) run --build-tags integration ./...
 	$(GOLANGCI_LINT) run --build-tags e2e $(E2E_PKG)/...
@@ -147,8 +149,9 @@ vuln: tools ## Check dependencies for known vulnerabilities (needs network).
 osv: tools ## Scan every lockfile in the repo with OSV-Scanner (needs network; not part of verify).
 	$(OSV_SCANNER) scan source --recursive --all-vulns .
 
-gomod: ## Run `go mod tidy`.
+gomod: ## Run `go mod tidy` on the library and the tools module.
 	go mod tidy
+	go -C tools mod tidy
 
 # The release archives carry THIRD_PARTY_NOTICES (docs/runbooks/release.md). verify rewrites
 # it, so CI's check-clean fails when the committed file is stale.
