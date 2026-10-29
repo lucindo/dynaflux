@@ -176,5 +176,5 @@ func (est *estimate) splitDollars(i, n int) float64 {
 	rowKB := est.splitRowKB(i, n)
 	writes := v.Rows.Write * math.Ceil(rowKB) / float64(v.WriteUnits)
 	reads := v.Rows.Read * math.Ceil(rowKB/readUnitKB) / float64(v.ReadUnits)
-	return m.Capacity.monthly(Units{Write: writes + v.Markers.Write, Read: reads + v.Markers.Read})
+	return m.Capacity.Monthly(Units{Write: writes + v.Markers.Write, Read: reads + v.Markers.Read})
 }

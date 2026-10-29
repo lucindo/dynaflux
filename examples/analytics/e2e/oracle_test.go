@@ -7,14 +7,12 @@ package e2e_test
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -23,11 +21,6 @@ import (
 	"github.com/lucindo/dynaflux/fluxgen"
 	"github.com/lucindo/dynaflux/fluxtest"
 )
-
-// nonce keeps the keys of this process apart from an earlier run's on the same AWS store.
-//
-//nolint:gochecknoglobals // one per process
-var nonce = strings.ToLower(rand.Text()[:6])
 
 // run is one scenario's appends. Every key it writes starts with tag, and each region has an
 // oracle: an in-memory store fed the events that region must apply.

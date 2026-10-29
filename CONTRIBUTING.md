@@ -21,9 +21,9 @@ make setup-git-hooks
 
 - `make help` lists the development targets. `make verify` runs the formatters,
   `go mod tidy`, a check that no module needs a Go newer than 1.26, the linters, the
-  vulnerability check, the tests and a `linux/arm64` build of the example's Lambda binary.
-  If the linter reports an unknown linter, your `golangci-lint` is older than
-  `.golangci.yml`: run `make tools-update`.
+  vulnerability check, the tests, each benchmark once and a `linux/arm64` build of the
+  example's Lambda binary. If the linter reports an unknown linter, your `golangci-lint` is
+  older than `.golangci.yml`: run `make tools-update`.
 - `Float64` results must be the same on every CPU, so `make cross-arch` runs the
   cross-architecture tests as amd64: natively on an amd64 machine, and through Rosetta on
   Apple silicon. It isn't part of `make verify`.
@@ -50,6 +50,9 @@ make setup-git-hooks
   after a run of all the tests, so does an action the role allows that no call used.
 - `make e2e-emulator` runs the end-to-end suite on DynamoDB Local, as
   [docs/runbooks/e2e.md](docs/runbooks/e2e.md) describes.
+- `make bench` runs the Go benchmarks, and `make bench-compare` compares them with the
+  recorded baseline, as [docs/runbooks/benchmarks.md](docs/runbooks/benchmarks.md)
+  describes.
 - `make shellcheck` checks the shell scripts under `scripts/`, and the `sh` blocks of the
   README and the guides. CI's `infra-lint` job runs it.
 

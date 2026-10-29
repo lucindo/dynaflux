@@ -373,6 +373,39 @@ func TestEstimateDeployment(t *testing.T) {
 	})
 }
 
+// Partitions replaces the derived count, and the invocations, batches and durations follow:
+// scenario A's 20 partitions take 50 events per second each, so each invokes once a second;
+// at 5 partitions each fills a batch of 100 events twice a second.
+func TestEstimatePartitions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		partitions, wantPartitions  int
+		invocations, batch, seconds float64
+	}{
+		{0, 20, 20, 50, 0.13},
+		{5, 5, 10, 100, 0.23},
+	}
+	for _, tt := range tests {
+		store, stream := model(t, scenarioA())
+		stream.Partitions = tt.partitions
+		got := estimate(t, store, stream)
+		if got.Partitions != tt.wantPartitions {
+			t.Errorf("Partitions %d: got %d partitions, want %d", tt.partitions, got.Partitions, tt.wantPartitions)
+		}
+		near(t, "invocations", got.Invocations, tt.invocations, 1e-9)
+		near(t, "batch", got.Batch, tt.batch, 1e-9)
+		near(t, "invocation seconds", got.InvocationSeconds, tt.seconds, 1e-9)
+	}
+}
+
+// One row write in ten loses a race: user_latest writes each of the 50 events of a batch to
+// its own row, 20 times a second.
+func TestEstimateConflicts(t *testing.T) {
+	t.Parallel()
+	store, stream := model(t, scenarioA())
+	near(t, "user_latest conflicts", estimate(t, store, stream).Views[1].Conflicts, 100, 1e-9)
+}
+
 func TestEstimateRejects(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -394,6 +427,7 @@ func TestEstimateRejects(t *testing.T) {
 		{"event over the item limit", func(_ *explain.Store, s *explain.Stream) { s.EventKB = 401 }, "event size"},
 		{"no retention", func(_ *explain.Store, s *explain.Stream) { s.Retention = 0 }, "retention"},
 		{"no shards", func(_ *explain.Store, s *explain.Stream) { s.Shards = 0 }, "shard"},
+		{"negative partitions", func(_ *explain.Store, s *explain.Stream) { s.Partitions = -1 }, "partition"},
 		{"more archive copies than regions", func(_ *explain.Store, s *explain.Stream) { s.ArchiveCopies = 4 }, "archive"},
 		{"meta table without targets", func(s *explain.Store, _ *explain.Stream) { s.Meta = explain.Capacity{Provisioned: true} }, "meta table"},
 		{"stream table with a NaN target", func(_ *explain.Store, s *explain.Stream) {

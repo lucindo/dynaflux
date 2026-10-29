@@ -63,6 +63,7 @@ jobs:
           restore-keys: go-${{ runner.os }}-${{ github.job }}-${{ steps.go.outputs.go-version }}-
       - run: make integration
       - run: make e2e-emulator
+      - run: make bench-emulator
       - if: always()
         run: make emulators-down
 

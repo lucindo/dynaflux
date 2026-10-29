@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"math/bits"
 	"math/rand/v2"
@@ -172,6 +173,54 @@ func TestUniqSmallCountsAreExact(t *testing.T) {
 		}
 		if got := final(t, s).AsUint(); got != uint64(i+1) {
 			t.Fatalf("after %d values: estimate %d", i+1, got)
+		}
+	}
+}
+
+// TestUniqEstimateNeverFalls raises registers of sketches at every fill and checks that the
+// estimate never falls. The throughput benchmark relies on it: a view that applied only some
+// of the appends whose outcome is unknown holds registers between those of the sketch of the
+// confirmed appends and those of the sketch of all of them, so its estimate lies between
+// theirs.
+func TestUniqEstimateNeverFalls(t *testing.T) {
+	t.Parallel()
+	f := compile(t, spec(catalog.AggUniq, nil, typ(catalog.KindUInt64)))
+	estimate := func(regs *[registers]uint8) uint64 {
+		return final(t, decode(t, f, bin(sketchBytes(regs)...))).AsUint()
+	}
+	r := rand.New(rand.NewPCG(7, 11))
+	// A slice, not a map: the draws from r follow the order, so a failure reproduces.
+	type sketch struct {
+		name string
+		regs *[registers]uint8
+	}
+	var sketches []sketch
+	for _, n := range []int{1, 100, 3_000, 30_000, 1_000_000} {
+		var regs [registers]uint8
+		for range n {
+			addHash(&regs, r.Uint64())
+		}
+		sketches = append(sketches, sketch{fmt.Sprintf("%d hashes", n), &regs})
+	}
+	var uniform [registers]uint8
+	for i := range uniform {
+		uniform[i] = uint8(1 + r.IntN(31))
+	}
+	sketches = append(sketches, sketch{"uniform ranks", &uniform})
+	for _, sk := range sketches {
+		name, regs := sk.name, sk.regs
+		before := estimate(regs)
+		for range 200 {
+			i := r.IntN(registers)
+			if regs[i] == 31 {
+				continue
+			}
+			raised := *regs
+			raised[i] += uint8(1 + r.IntN(int(31-regs[i])))
+			if got := estimate(&raised); got < before {
+				t.Fatalf("%s: raising register %d from %d to %d lowers the estimate from %d to %d",
+					name, i, regs[i], raised[i], before, got)
+			}
 		}
 	}
 }

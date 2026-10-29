@@ -5,8 +5,9 @@
 # Deploys the end-to-end store of run E2E_RUN to account E2E_ACCOUNT with your AWS
 # credentials (docs/runbooks/e2e.md): the example with examples/analytics/e2e/testdata/e2e.sql
 # added, generated in a Go module of its own; global.yaml in the home region, regional.yaml in
-# every region, and the replication-pause experiment in the second region. With E2E_WORK set,
-# the project stays in that directory. Maintainer only.
+# every region, and the replication-pause experiment in the second region. With E2E_REGIONS
+# set, the store is in those regions instead of the example's. With E2E_WORK set, the project
+# stays in that directory. Maintainer only.
 set -euo pipefail
 
 for cmd in go sam aws; do
@@ -20,7 +21,8 @@ done
 source "$(dirname "$0")/common.sh"
 
 example="$repo/examples/analytics"
-if ! grep -qxF "regions: [${regions[0]}, ${regions[1]}]" "$example/dynaflux.yaml"; then
+printf -v regions_line 'regions: [%s]' "$(printf '%s, ' "${regions[@]}" | sed 's/, $//')"
+if [[ -z "${E2E_REGIONS:-}" ]] && ! grep -qxF "$regions_line" "$example/dynaflux.yaml"; then
 	echo "The regions in common.sh differ from those of $example/dynaflux.yaml." >&2
 	exit 1
 fi
@@ -42,6 +44,10 @@ fi
 # The project builds against this checkout of Dynaflux, as the example does.
 cp -R "$example/dynaflux.yaml" "$example/dynaflux.lock" "$example/dynaflux" "$work/"
 cp "$example/e2e/testdata/e2e.sql" "$work/dynaflux/"
+# The suite compiles the store with the same line when E2E_REGIONS is set.
+if [[ -n "${E2E_REGIONS:-}" ]]; then
+	sed "s/^regions: .*/$regions_line/" "$example/dynaflux.yaml" >"$work/dynaflux.yaml"
+fi
 cat >"$work/go.mod" <<MOD
 module e2e.dynaflux.test/analytics
 
@@ -71,7 +77,7 @@ aws cloudformation deploy --template-file "$example/e2e/fis.yaml" --stack-name "
 	--region "$fis_region" --capabilities CAPABILITY_IAM \
 	--parameter-overrides "Prefix=$prefix" "Run=$run" --no-fail-on-empty-changeset
 
-echo "Deployed run $run. Test it with: E2E_RUN=$run E2E_ACCOUNT=$E2E_ACCOUNT go test -tags e2e -timeout 120m -v ./examples/analytics/e2e -target=aws"
+echo "Deployed run $run. Test it with: E2E_RUN=$run E2E_ACCOUNT=$E2E_ACCOUNT ${E2E_REGIONS:+E2E_REGIONS=\"$E2E_REGIONS\" }go test -tags e2e -timeout 120m -v ./examples/analytics/e2e -target=aws"
 if [[ -n "${E2E_WORK:-}" ]]; then
 	echo "The generated project is in $work."
 fi

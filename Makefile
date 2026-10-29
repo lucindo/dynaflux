@@ -20,6 +20,7 @@ GOLANGCI_LINT := $(GOBIN_DIR)/golangci-lint
 GITLEAKS      := $(GOBIN_DIR)/gitleaks
 GOVULNCHECK   := $(GOBIN_DIR)/govulncheck
 OSV_SCANNER   := $(GOBIN_DIR)/osv-scanner
+BENCHSTAT     := $(GOBIN_DIR)/benchstat
 
 # Install $(2) into GOBIN_DIR if the binary at $(1) is missing. Checked by
 # absolute path, not PATH, because callers run that exact binary.
@@ -45,9 +46,9 @@ DOCKERFILES = $(shell git ls-files --cached --others --exclude-standard -- '*Doc
 SHELL_SCRIPTS = $(shell git ls-files --cached --others --exclude-standard -- 'scripts/*.sh')
 
 .PHONY: help check-git-hooks warn-git-hooks setup-git-hooks tools tools-update \
-        test bench cross-arch lambda-build fmt fix lint vuln osv gomod check-go-bound mod-download verify \
+        test bench bench-compare bench-smoke cross-arch lambda-build fmt fix lint vuln osv gomod check-go-bound mod-download verify \
         check-clean sim sim-controls sim-seed emulators-up emulators-down integration \
-        e2e-emulator e2e-aws hadolint checkov infra-lint shellcheck trivy semgrep
+        e2e-emulator e2e-aws bench-emulator bench-aws hadolint checkov infra-lint shellcheck trivy semgrep
 
 .DEFAULT_GOAL := help
 
@@ -87,14 +88,35 @@ tools-update: ## Reinstall all Go tools at their latest release.
 	GOBIN='$(GOBIN_DIR)' go install github.com/zricethezav/gitleaks/v8@latest
 	GOBIN='$(GOBIN_DIR)' go install golang.org/x/vuln/cmd/govulncheck@latest
 	GOBIN='$(GOBIN_DIR)' go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest
+	GOBIN='$(GOBIN_DIR)' go install golang.org/x/perf/cmd/benchstat@latest
 
 # === Code
 
 test: ## Run `go test -race -shuffle=on ./...`.
 	go test -race -shuffle=on ./... $(GO_TEST_FLAGS)
 
-bench: ## Run all benchmarks with memory stats (not part of verify).
-	go test -run='^$$' -bench=. -benchmem ./...
+# docs/runbooks/benchmarks.md. The baseline is recorded on the maintainer's idle machine.
+BENCH_COUNT    ?= 6
+BENCH_OUT      ?= bench.txt
+BENCH_BASELINE := docs/runbooks/benchmarks-baseline.txt
+
+# One package at a time: packages benchmarked in parallel slow each other down. benchstat reads
+# the go line as configuration, since allocs/op changes with the toolchain. The recipe sets
+# pipefail itself because make 3.81, the one macOS ships, ignores .SHELLFLAGS.
+bench: ## Run every benchmark BENCH_COUNT times, one package at a time, into BENCH_OUT (not part of verify).
+	@set -euo pipefail; \
+	{ echo "go: $$(go env GOVERSION)"; go test -p 1 -run='^$$' -bench=. -benchmem -count=$(BENCH_COUNT) ./...; } | tee $(BENCH_OUT)
+
+# benchstat exits 0 when it can't open a file.
+bench-compare: ## Compare BENCH_OUT with the recorded baseline; times compare only on the machine that recorded it.
+	$(call ensure_gobin_tool,$(BENCHSTAT),golang.org/x/perf/cmd/benchstat@latest)
+	@[ -f '$(BENCH_BASELINE)' ] || { echo "No baseline at $(BENCH_BASELINE): docs/runbooks/benchmarks.md says how to record one." >&2; exit 1; }
+	@[ -f '$(BENCH_OUT)' ] || { echo "No $(BENCH_OUT): run make bench first." >&2; exit 1; }
+	$(BENCHSTAT) $(BENCH_BASELINE) $(BENCH_OUT)
+
+# The benchmarks check their results, so one iteration of each catches a broken one.
+bench-smoke: ## Run every benchmark once.
+	go test -run='^$$' -bench=. -benchtime=1x ./... $(GO_TEST_FLAGS)
 
 # Float64 results must not depend on the CPU. Apple silicon runs the amd64 build through
 # Rosetta; an amd64 machine runs it natively.
@@ -155,7 +177,7 @@ check-go-bound: ## Fail if go.mod's go or toolchain line, or any module's go lin
 mod-download: ## Run `go mod download`.
 	go mod download
 
-verify: check-git-hooks tools fmt gomod check-go-bound lint vuln test lambda-build ## Run fmt, gomod, the Go version bound, lint, vuln, test and the Lambda build.
+verify: check-git-hooks tools fmt gomod check-go-bound lint vuln test bench-smoke lambda-build ## Run fmt, gomod, the Go version bound, lint, vuln, test, the benchmarks once and the Lambda build.
 
 check-clean: ## Fail if the working tree is dirty (CI guard: verify must not rewrite files).
 	@status="$$(git status --porcelain)"; \
@@ -219,17 +241,50 @@ integration: ## Run the tests of every package with a *_integration_test.go file
 E2E_PKG := ./examples/analytics/e2e
 
 e2e-emulator: emulators-up ## Run the end-to-end suite on DynamoDB Local (needs docker).
-	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' go test -race -tags e2e $(E2E_PKG) -target=emulator $(GO_TEST_FLAGS)
+	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' go test -race -tags e2e $(E2E_PKG) -run '^TestE2E$$' -target=emulator $(GO_TEST_FLAGS)
 
 # Maintainer only: it deploys to AWS with your credentials. common.sh checks the variables and
 # the account before the trap, which tears the run down even after a later failure;
 # scripts/e2e/teardown.sh does it by hand after an interrupted run.
 e2e-aws: ## Deploy the e2e store, run the suite on AWS, and tear it down: make e2e-aws E2E_RUN=<id> E2E_ACCOUNT=<sandbox account ID>.
-	set -euo pipefail; export E2E_RUN='$(E2E_RUN)' E2E_ACCOUNT='$(E2E_ACCOUNT)'; \
+	set -euo pipefail; export E2E_RUN='$(E2E_RUN)' E2E_ACCOUNT='$(E2E_ACCOUNT)' E2E_REGIONS='$(E2E_REGIONS)'; \
 	bash -c 'source scripts/e2e/common.sh'; \
-	trap 'scripts/e2e/teardown.sh || { echo "Teardown failed: run E2E_RUN=$$E2E_RUN E2E_ACCOUNT=$$E2E_ACCOUNT scripts/e2e/teardown.sh again." >&2; exit 1; }' EXIT; \
+	trap 'scripts/e2e/teardown.sh || { echo "Teardown failed: run E2E_RUN=$$E2E_RUN E2E_ACCOUNT=$$E2E_ACCOUNT E2E_REGIONS=\"$$E2E_REGIONS\" scripts/e2e/teardown.sh again." >&2; exit 1; }' EXIT; \
 	scripts/e2e/deploy.sh; \
-	go test -tags e2e -timeout 120m -v $(E2E_PKG) -target=aws $(GO_TEST_FLAGS)
+	go test -tags e2e -timeout 120m -v $(E2E_PKG) -run '^TestE2E$$' -target=aws $(GO_TEST_FLAGS)
+
+# docs/runbooks/benchmarks.md. A low rate on DynamoDB Local checks the load, the probes and the
+# oracle; the report reads CloudWatch, so only bench-aws prints one. The result goes in a new
+# directory, so that two runs, or a link someone put in a shared /tmp, can't take its place.
+bench-emulator: emulators-up ## Run the throughput benchmark for 30 s at 50 events/s on DynamoDB Local (needs docker).
+	@set -eu; out="$$(mktemp -d)/bench-emulator.json"; echo "The result goes to $$out."; \
+	DYNAFLUX_DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' go test -race -tags e2e $(E2E_PKG) -run '^TestThroughput$$' -target=emulator \
+		-throughput.rate=50 -throughput.warmup=5s -throughput.duration=30s -throughput.out="$$out" \
+		$(GO_TEST_FLAGS)
+
+# Maintainer only: it deploys to AWS with your credentials. It checks THROUGHPUT_OUT and
+# compiles the suite before anything is deployed. THROUGHPUT_OUT must be a new file, so that
+# the report never reads an earlier run's result. The report runs even after a failed load,
+# and the trap tears the run down after both. A manual teardown needs the same E2E_REGIONS.
+bench-aws: ## Deploy the e2e store, load it, report and tear it down: make bench-aws E2E_RUN=<id> E2E_ACCOUNT=<id> THROUGHPUT_OUT=<file outside the repo> [E2E_REGIONS=…] [BENCH_PREWARM=…] [BENCH_FLAGS=…].
+	@set -euo pipefail; out='$(THROUGHPUT_OUT)'; \
+	if [ -z "$$out" ]; then echo "Set THROUGHPUT_OUT to the run's result file, outside the repo, such as THROUGHPUT_OUT=$$HOME/bench/r1.json." >&2; exit 1; fi; \
+	dir="$$(cd "$$(dirname "$$out")" 2>/dev/null && pwd -P)" || { echo "THROUGHPUT_OUT=$$out: its directory doesn't exist." >&2; exit 1; }; \
+	case "$$dir/" in "$$(pwd -P)/"*) echo "THROUGHPUT_OUT=$$out is inside the repo: put the result outside it." >&2; exit 1;; esac; \
+	out="$$dir/$$(basename "$$out")"; \
+	[ ! -e "$$out" ] || { echo "THROUGHPUT_OUT=$$out exists: name a new file." >&2; exit 1; }; \
+	bin="$$(mktemp -d)/e2e.test"; trap 'rm -r "$$(dirname "$$bin")"' EXIT; \
+	go test -c -tags e2e -o "$$bin" $(E2E_PKG); \
+	export E2E_RUN='$(E2E_RUN)' E2E_ACCOUNT='$(E2E_ACCOUNT)' E2E_REGIONS='$(E2E_REGIONS)'; \
+	bash -c 'source scripts/e2e/common.sh'; \
+	trap 'rm -r "$$(dirname "$$bin")"; scripts/e2e/teardown.sh || { echo "Teardown failed: run E2E_RUN=$$E2E_RUN E2E_ACCOUNT=$$E2E_ACCOUNT E2E_REGIONS=\"$$E2E_REGIONS\" scripts/e2e/teardown.sh again." >&2; exit 1; }' EXIT; \
+	scripts/e2e/deploy.sh; \
+	if [ -n '$(BENCH_PREWARM)' ]; then scripts/e2e/prewarm.sh $(BENCH_PREWARM); fi; \
+	status=0; \
+	(cd $(E2E_PKG) && "$$bin" -test.v -test.timeout 180m -test.run '^TestThroughput$$' -target=aws -throughput.out="$$out" $(BENCH_FLAGS)) || status=$$?; \
+	(cd $(E2E_PKG) && "$$bin" -test.v -test.timeout 30m -test.run '^TestThroughputReport$$' -target=aws -throughput.out="$$out") || \
+		{ s=$$?; [ "$$status" -ne 0 ] || status=$$s; }; \
+	exit "$$status"
 
 # === External scanners
 

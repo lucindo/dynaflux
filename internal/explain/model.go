@@ -94,6 +94,10 @@ type Stream struct {
 	Forever   bool
 	// Shards is the SHARDS count, 1 without the clause.
 	Shards int
+	// Partitions sets the number of stream table partitions, which 0 derives from the
+	// table's size and write rate. The throughput benchmark sets the shards it counted, so
+	// that a difference in partitions isn't read as an error of the rest of the model.
+	Partitions int
 	// ArchiveCopies is how many times the archive holds each event, all regions together:
 	// the number of archiving regions, 1 if each region archives only the events it
 	// accepted, or 0 if the stream isn't archived.
@@ -145,6 +149,8 @@ type StreamCost struct {
 	// Invocations is the number of projector invocations per second, and Batch the average
 	// number of events each one gets.
 	Invocations, Batch float64
+	// InvocationSeconds is how long an invocation runs on average.
+	InvocationSeconds float64
 	// EventWrites, TTLWrites and ProgressWrites are write units per second: of event puts,
 	// local and replicated; of deletes of expired events, replicated from the region that
 	// expired them; and of the projector's progress items in the meta table.
@@ -172,6 +178,9 @@ type ViewCost struct {
 	// Rows are the units of the rows' read-modify-writes, and Markers those of uniqExact's
 	// marker items.
 	Rows, Markers Units
+	// Conflicts is the number of row writes per second that lose a race and retry, which
+	// Rows includes.
+	Conflicts float64
 	// Dollars is the monthly cost of those units.
 	Dollars float64
 }
@@ -211,7 +220,10 @@ func Estimate(store Store, s Stream) (StreamCost, error) {
 
 	var c StreamCost
 	c.StoredGB = events * (s.EventKB + itemOverheadKB) * days * secondsPerDay / kbPerGB
-	c.Partitions = int(max(1, math.Ceil(c.StoredGB/partitionGB), math.Ceil(events*eventUnits/partitionWrites)))
+	c.Partitions = s.Partitions
+	if c.Partitions == 0 {
+		c.Partitions = int(max(1, math.Ceil(c.StoredGB/partitionGB), math.Ceil(events*eventUnits/partitionWrites)))
+	}
 	units := float64(c.Partitions)
 	window := max(store.BatchingWindow.Seconds(), minPollSeconds)
 	// Poisson arrivals: a delivery unit invokes the projector for each window with an event,
@@ -220,6 +232,7 @@ func Estimate(store Store, s Stream) (StreamCost, error) {
 	perUnit := max(-math.Expm1(-(events/units)*window)/window, events/units/float64(store.BatchSize))
 	c.Invocations = units * perUnit
 	c.Batch = events / c.Invocations
+	c.InvocationSeconds = invocationSeconds + perEventSeconds*c.Batch
 
 	f := flow{
 		events: events, batch: c.Batch, invocations: c.Invocations, perUnit: perUnit, units: units,
@@ -239,8 +252,8 @@ func Estimate(store Store, s Stream) (StreamCost, error) {
 		c.TTLWrites = events * eventUnits * (regions - 1) / regions
 	}
 	c.ProgressWrites = c.Invocations
-	c.StreamDollars = s.Capacity.monthly(Units{Write: c.EventWrites + c.TTLWrites})
-	c.MetaDollars = store.Meta.monthly(Units{Write: c.ProgressWrites})
+	c.StreamDollars = s.Capacity.Monthly(Units{Write: c.EventWrites + c.TTLWrites})
+	c.MetaDollars = store.Meta.Monthly(Units{Write: c.ProgressWrites})
 	c.Monthly = c.monthly(store, s)
 	c.Total = c.Monthly.Sum() * regions
 	return c, nil
@@ -265,12 +278,11 @@ func (c *StreamCost) monthly(store Store, s Stream) Monthly {
 	for _, v := range c.Views {
 		m.Requests += v.Dollars
 	}
-	duration := invocationSeconds + perEventSeconds*c.Batch
 	gbSecond := lambdaGBsARM64
 	if store.Arch == ArchX86 {
 		gbSecond = lambdaGBsX86
 	}
-	m.Lambda = c.Invocations * monthSeconds * (lambdaRequest + duration*float64(store.MemoryMB)/mbPerGB*gbSecond)
+	m.Lambda = c.Invocations * monthSeconds * (lambdaRequest + c.InvocationSeconds*float64(store.MemoryMB)/mbPerGB*gbSecond)
 	archiveGB := events * s.EventKB * archiveOverhead * monthSeconds / kbPerGB
 	copies := float64(s.ArchiveCopies)
 	m.Firehose = archiveGB * firehoseGB * copies / regions
@@ -322,6 +334,7 @@ func (f flow) view(v View) ViewCost {
 		Write: f.invocations * (c.RowsPerBatch * write) * conflictFactor,
 		Read:  f.invocations * (c.RowsPerBatch * read) * conflictFactor,
 	}
+	c.Conflicts = f.invocations * c.RowsPerBatch * (conflictFactor - 1)
 	sourceRows := v.Pass * f.events
 	markers := float64(v.UniqExacts) * sourceRows
 	c.Markers = Units{Write: markers * v.UniqNew, Read: markers}
@@ -329,13 +342,15 @@ func (f flow) view(v View) ViewCost {
 		txn := sourceRows * f.local
 		c.Rows.Write += txn * txnFactor * write * conflictFactor
 		c.Rows.Read += txn * read * conflictFactor
+		c.Conflicts += txn * (conflictFactor - 1)
 		c.Markers.Write *= 1 + f.local // the local share is transactional
 	}
-	c.Dollars = v.Capacity.monthly(Units{Write: c.Rows.Write + c.Markers.Write, Read: c.Rows.Read + c.Markers.Read})
+	c.Dollars = v.Capacity.Monthly(Units{Write: c.Rows.Write + c.Markers.Write, Read: c.Rows.Read + c.Markers.Read})
 	return c
 }
 
-func (c Capacity) monthly(u Units) float64 {
+// Monthly returns what u request units per second cost a month on a table billed as c.
+func (c Capacity) Monthly(u Units) float64 {
 	if c.Provisioned {
 		return (u.Write/c.WriteTarget*wcuHour + u.Read/c.ReadTarget*rcuHour) * monthHours
 	}
@@ -371,6 +386,8 @@ func check(store Store, s Stream) error {
 		return errors.New("the retention must be positive")
 	case s.Shards < 1:
 		return errors.New("the stream needs at least 1 shard")
+	case s.Partitions < 0:
+		return fmt.Errorf("the partition count can't be negative, as %d is", s.Partitions)
 	case s.ArchiveCopies < 0 || s.ArchiveCopies > store.Regions:
 		return fmt.Errorf("%d archive copies in %d regions", s.ArchiveCopies, store.Regions)
 	}
