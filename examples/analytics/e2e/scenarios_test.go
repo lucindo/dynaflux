@@ -27,10 +27,16 @@ import (
 	"github.com/lucindo/dynaflux/internal/meta"
 )
 
-// Scenario 1: appends in every region; each region's views equal the oracle.
+// Scenario 1: appends in every region; each region's views equal the oracle. On AWS, it
+// first checks that the first deploy's backfill -all made every version live by the fresh rule.
 //
 //nolint:thelper // a scenario: its failures point into it
 func testAppends(t *testing.T, h *harness) {
+	if h.aws != nil {
+		for _, reg := range h.regions {
+			checkFresh(t, h, reg)
+		}
+	}
 	r := newRun(t, h, "s1")
 	for i, reg := range h.regions {
 		user, member := r.key(reg.name+"-u"), r.key(reg.name+"-m")
@@ -48,6 +54,33 @@ func testAppends(t *testing.T, h *harness) {
 		r.apiCalls(reg, flux.APICall{AccountID: r.key("acme"), Endpoint: "/search", Units: uint32(5 + i), RequestID: newUUID(t), EventTime: r.at})
 	}
 	r.converged(h.regions...)
+}
+
+// checkFresh checks what scripts/e2e/deploy.sh's backfill -all did on the new store, before
+// any event: each job made its version live from the archive without reading it, by the
+// fresh rule (docs/spec/lifecycle.md §4.3).
+func checkFresh(t *testing.T, h *harness, reg *region) {
+	t.Helper()
+	states, err := reg.meta.ViewStates(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := reg.meta.Jobs(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := range h.p.def.Versions() {
+		s := states[id]
+		i := slices.IndexFunc(jobs, func(j meta.Job) bool { return j.Version == id })
+		switch {
+		case s.State != meta.Live || s.Split != meta.SplitFence:
+			t.Errorf("%s: %s is %q with split %q, want live with split fence", reg.name, id, s.State, s.Split)
+		case i < 0:
+			t.Errorf("%s: %s has no job: deploy with scripts/e2e/deploy.sh, which runs backfill -all", reg.name, id)
+		case jobs[i].State != meta.JobDone || !jobs[i].Fresh:
+			t.Errorf("%s: the job of %s is %s with fresh %t, want done by the fresh rule", reg.name, id, jobs[i].State, jobs[i].Fresh)
+		}
+	}
 }
 
 // Scenario 4: a REMOVE record of a stream item leaves the views and the archive as they are.

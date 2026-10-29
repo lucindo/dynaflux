@@ -159,16 +159,17 @@ for table in ${tables[@]+"${tables[@]}"}; do
 	done
 done
 
-# Scenario 23 adds this policy to the projector role and removes it; an interrupted run may
-# leave it, and CloudFormation deletes only the policies it made.
-projector="${base}-projector"
-if exists aws lambda get-function --function-name "$projector" --region "$home"; then
-	role="$(aws lambda get-function-configuration --function-name "$projector" --region "$home" --query Role --output text)"
-	role="${role##*/}"
-	if exists aws iam get-role-policy --role-name "$role" --policy-name dynaflux-e2e-deny; then
-		aws iam delete-role-policy --role-name "$role" --policy-name dynaflux-e2e-deny
+# Scenarios 23 and 24 add this policy to the projector and backfill roles and remove it; an
+# interrupted run may leave it, and CloudFormation deletes only the policies it made.
+for function in "${base}-projector" "${base}-backfill"; do
+	if exists aws lambda get-function --function-name "$function" --region "$home"; then
+		role="$(aws lambda get-function-configuration --function-name "$function" --region "$home" --query Role --output text)"
+		role="${role##*/}"
+		if exists aws iam get-role-policy --role-name "$role" --policy-name dynaflux-e2e-deny; then
+			aws iam delete-role-policy --role-name "$role" --policy-name dynaflux-e2e-deny
+		fi
 	fi
-fi
+done
 
 # An interrupted scenario 3 may leave its replication pause on. While it lasts, FIS denies
 # replication on the tables, so it must end before a stack or a replica is deleted.

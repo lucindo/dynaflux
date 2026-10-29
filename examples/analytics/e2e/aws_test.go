@@ -67,7 +67,7 @@ const (
 )
 
 // newAWS opens the stacks of scripts/e2e/deploy.sh, with the credentials of the default
-// chain, and marks the view versions live on a fresh store.
+// chain. deploy.sh's backfill -all made the view versions live.
 func newAWS(t *testing.T, p *project) *harness {
 	t.Helper()
 	run, account := os.Getenv("E2E_RUN"), os.Getenv("E2E_ACCOUNT")
@@ -113,15 +113,29 @@ func newAWS(t *testing.T, p *project) *harness {
 		}
 		a.clients[r] = c
 		a.checkDeployed(t, p, r)
-		if err = setLive(t.Context(), r, p.def); err != nil {
-			t.Fatal(err)
-		}
 		r.archive = func(ctx context.Context, stream, key, prefix string) (archived, error) {
 			return a.archived(ctx, p, r, stream, key, prefix)
 		}
 		h.regions = append(h.regions, r)
 	}
 	return h
+}
+
+// assume returns the credentials of role, limited by policy unless it is nil. source names
+// the variable that gave the role.
+func (a *awsTarget) assume(cfg aws.Config, role, source string, policy *string) aws.CredentialsProvider {
+	c := sts.NewFromConfig(cfg)
+	return aws.NewCredentialsCache(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+		out, err := c.AssumeRole(ctx, &sts.AssumeRoleInput{RoleArn: &role, RoleSessionName: new("dynaflux-e2e-" + a.run), Policy: policy})
+		if err != nil {
+			return aws.Credentials{}, err
+		}
+		cr := out.Credentials
+		return aws.Credentials{
+			AccessKeyID: aws.ToString(cr.AccessKeyId), SecretAccessKey: aws.ToString(cr.SecretAccessKey), SessionToken: aws.ToString(cr.SessionToken),
+			CanExpire: true, Expires: aws.ToTime(cr.Expiration), Source: source,
+		}, nil
+	}))
 }
 
 // checkDeployed fails the test unless the region was deployed from the sources the suite

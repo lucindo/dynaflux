@@ -245,13 +245,17 @@ e2e-emulator: emulators-up ## Run the end-to-end suite on DynamoDB Local (needs 
 
 # Maintainer only: it deploys to AWS with your credentials. common.sh checks the variables and
 # the account before the trap, which tears the run down even after a later failure;
-# scripts/e2e/teardown.sh does it by hand after an interrupted run.
-e2e-aws: ## Deploy the e2e store, run the suite on AWS, and tear it down: make e2e-aws E2E_RUN=<id> E2E_ACCOUNT=<sandbox account ID>.
+# scripts/e2e/teardown.sh does it by hand after an interrupted run. deploy.sh keeps the project
+# in E2E_WORK, which scenarios 24 and 36 change; E2E_BACKFILL=1 runs them, for about 3 hours more.
+e2e-aws: ## Deploy the e2e store, run the suite on AWS, and tear it down: make e2e-aws E2E_RUN=<id> E2E_ACCOUNT=<sandbox account ID> [E2E_BACKFILL=1].
 	set -euo pipefail; export E2E_RUN='$(E2E_RUN)' E2E_ACCOUNT='$(E2E_ACCOUNT)' E2E_REGIONS='$(E2E_REGIONS)'; \
 	bash -c 'source scripts/e2e/common.sh'; \
-	trap 'scripts/e2e/teardown.sh || { echo "Teardown failed: run E2E_RUN=$$E2E_RUN E2E_ACCOUNT=$$E2E_ACCOUNT E2E_REGIONS=\"$$E2E_REGIONS\" scripts/e2e/teardown.sh again." >&2; exit 1; }' EXIT; \
+	if [ -n '$(E2E_BACKFILL)' ] && [[ "$${E2E_OPERATOR_ROLE:-}" != "arn:aws:iam::$$E2E_ACCOUNT:role/"* ]]; then \
+		echo "E2E_BACKFILL needs E2E_OPERATOR_ROLE, the ARN of a role in E2E_ACCOUNT (docs/runbooks/e2e.md §1)." >&2; exit 1; fi; \
+	export E2E_WORK="$$(mktemp -d)"; \
+	trap 'rm -rf "$$E2E_WORK"; scripts/e2e/teardown.sh || { echo "Teardown failed: run E2E_RUN=$$E2E_RUN E2E_ACCOUNT=$$E2E_ACCOUNT E2E_REGIONS=\"$$E2E_REGIONS\" scripts/e2e/teardown.sh again." >&2; exit 1; }' EXIT; \
 	scripts/e2e/deploy.sh; \
-	go test -tags e2e -timeout 120m -v $(E2E_PKG) -run '^TestE2E$$' -target=aws $(GO_TEST_FLAGS)
+	go test -tags e2e -timeout $(if $(E2E_BACKFILL),360m,120m) -v $(E2E_PKG) -run '^TestE2E$$' -target=aws $(if $(E2E_BACKFILL),-backfill) $(GO_TEST_FLAGS)
 
 # docs/runbooks/benchmarks.md. A low rate on DynamoDB Local checks the load, the probes and the
 # oracle; the report reads CloudWatch, so only bench-aws prints one. The result goes in a new

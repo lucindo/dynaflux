@@ -33,8 +33,11 @@ import (
 	"github.com/lucindo/dynaflux/internal/meta"
 )
 
-//nolint:gochecknoglobals // a test flag
-var target = flag.String("target", "", "where the suite runs: emulator or aws")
+//nolint:gochecknoglobals // test flags
+var (
+	target   = flag.String("target", "", "where the suite runs: emulator or aws")
+	backfill = flag.Bool("backfill", false, "on AWS, also run scenarios 24 and 36, which add views and backfill them (about 3 hours)")
+)
 
 const (
 	targetEmulator = "emulator"
@@ -82,10 +85,25 @@ var scenarios = []struct {
 	{"23_partial_failures", []string{targetAWS}, testPartialFailures},
 }
 
+// backfillScenarios add testdata/backfill.sql to the deployed store and backfill its views.
+// They take hours, so TestE2E runs them only with -backfill, after the others.
+//
+//nolint:gochecknoglobals // the suite's table
+var backfillScenarios = []struct {
+	name string
+	run  func(*testing.T, *harness)
+}{
+	{"24_backfill_under_traffic", testBackfillUnderTraffic},
+	{"36_archive_backfill", testArchiveBackfill},
+}
+
 // TestE2E runs the scenarios of the target on one store, one after the other.
 //
 //nolint:paralleltest // the scenarios share one store, and some disturb it on purpose
 func TestE2E(t *testing.T) {
+	if *backfill && *target != targetAWS {
+		t.Fatalf("-backfill runs on AWS only, with -target=%s", targetAWS)
+	}
 	p := loadProject(t)
 	var h *harness
 	switch *target {
@@ -96,8 +114,16 @@ func TestE2E(t *testing.T) {
 	default:
 		t.Fatalf("-target is %q; want %s or %s (docs/runbooks/e2e.md)", *target, targetEmulator, targetAWS)
 	}
+	if *backfill {
+		keptProjectVars(t, h.aws.account)
+	}
 	for _, s := range scenarios {
 		if slices.Contains(s.targets, *target) {
+			t.Run(s.name, func(t *testing.T) { s.run(t, h) })
+		}
+	}
+	if *backfill {
+		for _, s := range backfillScenarios {
 			t.Run(s.name, func(t *testing.T) { s.run(t, h) })
 		}
 	}
@@ -168,15 +194,4 @@ func (h *harness) settle(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-// setLive marks every view version live on a fresh store, before its first append: until
-// M5's backfill, nothing else does (m3 decision 10). A store with view states is an earlier
-// run's, and keeps them.
-func setLive(ctx context.Context, r *region, cat *catalog.Catalog) error {
-	states, err := r.meta.ViewStates(ctx)
-	if err != nil || len(states) > 0 {
-		return err
-	}
-	return r.meta.SetLive(ctx, cat)
 }

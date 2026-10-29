@@ -21,6 +21,7 @@ one view added, and checks it as an application sees it. It has two modes:
 | `examples/analytics/e2e/testdata/queries.sql` | Queries that read the view columns the example's queries leave out. The suite runs them; nothing deploys them. |
 | `examples/analytics/e2e/fis.yaml` | The AWS FIS experiment that pauses replication (scenario 3). Never generated for users. |
 | `scripts/e2e/deploy.sh`, `teardown.sh` | Deploy and delete one AWS run. |
+| `examples/analytics/e2e/throughput_test.go` | The throughput benchmark of [benchmarks.md](benchmarks.md#2-throughput-benchmark-prerequisites), on the same store. It skips unless `-throughput.out` is set. |
 
 The suite lives in the example's tree because it uses the example's generated client, and Go
 lets only packages under `examples/analytics` import it.
@@ -53,8 +54,11 @@ For AWS mode:
     `DeleteTableOptimizer`, `GetDatabase` and `DeleteDatabase`; and S3 object versions.
 
   An administrator role in the sandbox covers all of them.
-- For scenario 24 and the lifecycle experiments, a role you can assume that has only the
-  grants of [infra.md §9.8](../spec/infra.md#98-operators), to run the `dynaflux` commands.
+- For scenarios 24 and 36, `E2E_OPERATOR_ROLE`: the ARN of a role in the sandbox account
+  that your credentials can assume, with only the grants of
+  [infra.md §9.8](../spec/infra.md#98-operators). The suite runs every `dynaflux` command of
+  the two scenarios with it. The lifecycle experiments of [§9](#9-manual-experiments) use it
+  too.
 - For scenarios 34 and 35, `E2E_APP_ROLE`: the ARN of a role in the sandbox account that
   your credentials can assume, with at least DynamoDB read and write access to the store's
   tables, such as `AmazonDynamoDBFullAccess`. The suite assumes it with the application
@@ -81,15 +85,16 @@ make e2e-emulator
 ```
 
 It starts DynamoDB Local unless it runs, and leaves it running for other work. Then it runs
-`go test -race -tags e2e ./examples/analytics/e2e -target=emulator`:
+`go test -race -tags e2e ./examples/analytics/e2e -run '^TestE2E$' -target=emulator`:
 
 - Each region of the store is a database of its own in one DynamoDB Local, which keeps a
   database per client region. Nothing replicates between them.
 - The tables come from the manifest that the templates are rendered from, so the templates
   and the runtime must agree on keys, `_ttl` and the stream view.
 - On the new store, every view version is set live with `meta.SetLive` before the first
-  append, in place of a backfill.
-- The projector is the Lambda binary itself: the test binary runs `runtime.Run`, as the
+  append, in place of the backfill that AWS mode runs: DynamoDB Local has no backfill state
+  machine.
+- The projector is the Lambda binary itself: the test binary runs `fluxruntime.Run`, as the
   generated `main.go` does, in a child process per region, with the environment the
   template gives the function. A fake Lambda Runtime API hands it the events that
   `internal/esmlocal` reads from the stream. A fake Firehose keeps the archive records.
@@ -109,24 +114,39 @@ make e2e-aws E2E_RUN=<id> E2E_ACCOUNT=<sandbox account ID> E2E_APP_ROLE=<role AR
 
 `<id>` is 1 to 8 lowercase letters or digits, new for each run: every resource name starts
 with `e2e-<id>-`. The target first checks both variables and that the credentials are for
-`E2E_ACCOUNT`. Then it runs three steps, and runs the last one even after a failure:
+`E2E_ACCOUNT`. Then it sets `E2E_WORK` to a new temporary directory, and runs three steps.
+It runs the last one even after a failure:
 
 1. `scripts/e2e/deploy.sh`:
-   1. copies the example's `dynaflux.yaml`, lock and SQL to a temporary directory, or to
-      `E2E_WORK` ([§9](#9-manual-experiments)), adds `e2e.sql`, and makes it a Go module
-      that uses this checkout of Dynaflux;
+   1. copies the example's `dynaflux.yaml`, lock and SQL to `E2E_WORK`, adds `e2e.sql`, and
+      makes it a Go module that uses this checkout of Dynaflux. Without `E2E_WORK`, it uses
+      a temporary directory that it deletes when it ends;
    2. runs `dynaflux generate` there, then `sam build` with `CGO_ENABLED=0` and
       `GOFLAGS=-tags=lambda.norpc`;
    3. deploys `global.yaml` in `us-east-1` with `Prefix=e2e-<id>-`, without the stack
       policy, so that teardown can delete the stack;
    4. deploys `regional.yaml` in `us-east-1` and `us-west-2`;
-   5. deploys `fis.yaml` in `us-west-2`.
-2. `go test -tags e2e -timeout 120m -v ./examples/analytics/e2e -target=aws`, with
-   `E2E_RUN`, `E2E_ACCOUNT` and `E2E_APP_ROLE` set. It first checks the account, and that
-   each region was deployed from the same sources: the projector's
-   `DYNAFLUX_ARCHIVE_SCHEMA` and the view tables. Then it sets the view versions live on
-   the new store, as emulator mode does.
-3. `scripts/e2e/teardown.sh` ([§5](#5-teardown)).
+   5. runs `dynaflux backfill -all -yes -watch -prefix e2e-<id>-`, as a user does after a
+      first deploy. The store has no events yet, so each job makes its version live without
+      reading anything, and each region records where its archive of each stream starts
+      ([lifecycle.md §4.3](../spec/lifecycle.md#43-fresh-streams),
+      [§5.5](../spec/lifecycle.md#55-when-the-archive-is-complete)). The step fails unless
+      every version goes live;
+   6. deploys `fis.yaml` in `us-west-2`.
+2. `go test -tags e2e -timeout 120m -v ./examples/analytics/e2e -run '^TestE2E$' -target=aws`,
+   with `E2E_RUN`, `E2E_ACCOUNT`, `E2E_APP_ROLE` and `E2E_WORK` set. It first checks the
+   account, and that each region was deployed from the same sources: the projector's
+   `DYNAFLUX_ARCHIVE_SCHEMA` and the view tables.
+3. `scripts/e2e/teardown.sh` ([§5](#5-teardown)). Then the target deletes `E2E_WORK`.
+
+Scenarios 24 and 36 take about 3 hours more, so they run only with `E2E_BACKFILL=1`, which
+adds `-backfill` to the `go test` command and raises its timeout to 360 minutes. They also
+need `E2E_OPERATOR_ROLE` ([§1](#1-prerequisites)):
+
+```sh
+make e2e-aws E2E_RUN=<id> E2E_ACCOUNT=<sandbox account ID> E2E_APP_ROLE=<role ARN> \
+  E2E_OPERATOR_ROLE=<role ARN> E2E_BACKFILL=1
+```
 
 To run the steps one at a time, for example to rerun one scenario:
 
@@ -137,13 +157,18 @@ go test -tags e2e -timeout 120m -v ./examples/analytics/e2e -target=aws -run 'Te
 scripts/e2e/teardown.sh
 ```
 
+To run scenario 24 or 36 this way, also export `E2E_WORK`, set to a new or empty directory,
+before `deploy.sh`, and add `-backfill` to `go test`: the two scenarios change the project
+that `deploy.sh` keeps there.
+
 A deployed store keeps what earlier runs did to it, so run the scenarios once per
 `E2E_RUN`. Scenario 5 in particular fails on a second run: `e2e_ratio` stays broken by the
 first run's event.
 
 A full run takes about 90 minutes: about 15 to deploy, about 65 for the scenarios (scenario
 3 alone takes 20, and scenarios 4 and 8 wait for Firehose's 5-minute buffer), and 10 to 20
-to tear down.
+to tear down. Scenario 24 adds about an hour, most of it the time split's wait and the
+retries until an execution fails. Scenario 36 adds about 2 hours, one of them appends.
 
 ## 4. Watch
 
@@ -165,8 +190,8 @@ waits for what is already being deleted, so it can run again after a failure. It
 every region that holds a replica of a stream table, so a third region that experiment 17
 added goes too. In order, it:
 
-1. removes the inline policy `dynaflux-e2e-deny` from the projector role, if an interrupted
-   scenario 23 left it; stops a replication pause that an interrupted scenario 3 left
+1. removes the inline policy `dynaflux-e2e-deny` from the projector and backfill roles, if
+   an interrupted scenario 23 or 24 left it; stops a replication pause that an interrupted scenario 3 left
    pending or running, and waits until it ends, because FIS denies replication on the
    tables while it lasts;
 2. deletes the regional stacks, then the global stack, then the FIS stack;
@@ -197,6 +222,7 @@ deployment bucket of SAM's `aws-sam-cli-managed-default` stack.
 | Scenario 5: `e2e_ratio` isn't broken, or another version is | The breaker didn't open, or opened on the wrong view. The meta table's view-state items say which event broke what. |
 | Scenario 5: the `views-broken` alarm never went into `ALARM` | The `BreakerOpened` metric didn't arrive: check the projector's `batch metrics` log line and its embedded metric format. |
 | Scenario 5, emulator mode: the projector's `WARN` and `ERROR` lines aren't one `batch metrics` line with `BreakerOpened` 1 | The breaker's metric line is missing or wrong, or something else failed: the lines follow the message. |
+| Scenario 1 on AWS: a version isn't `live` with the fence split, or its job isn't fresh | `deploy.sh`'s `backfill -all` didn't run, or an event reached a stream table before the job checked it: the store was deployed another way, or the scenarios ran on it before. |
 | Scenario 2: "none of 10 … pairs was stored in both regions" | Replication was faster than the two appends. Rerun the scenario. |
 | Scenario 2: "the stream read ended before the scenario's records" | `GetRecords` returned more empty pages in a row than the read allows (`emptyPages`). Rerun the scenario. |
 | Scenario 2: no `DivergentDuplicates` line | The projector didn't count the replicated `MODIFY` as a divergent duplicate. |
@@ -216,6 +242,11 @@ deployment bucket of SAM's `aws-sam-cli-managed-default` stack.
 | Scenario 34: `QuotaUsed` misses charges made in its region | A `SYNC` append didn't apply the view in its transaction, or the query didn't read strongly consistently. |
 | Scenario 34: no `AccessDeniedException` for the `PutItem` or the `Query` | The `EnclosingOperation` or `LeadingKeys` condition doesn't limit what [infra.md §9.9](../spec/infra.md#99-applications) says it does. |
 | Scenario 35: `ErrWaitTimeout` | The projector wrote no receipt within 10 seconds: check its log, and that the event has `_rcpt`. |
+| With `E2E_BACKFILL=1`, `make e2e-aws` stops before the deploy, or the suite before its first scenario: "E2E_WORK is …" or "E2E_OPERATOR_ROLE is …" | The variable is unset, names a directory where `deploy.sh` didn't keep the project, or names a role in another account ([§1](#1-prerequisites), [§3](#3-aws-mode)). |
+| Scenario 24: "… views are in … already" | The scenario ran on this store before. Deploy a new run. |
+| Scenario 24: the 1-minute deny failed the execution | The backfill state machine retried a step for less than a minute ([infra.md §6.5](../spec/infra.md#65-backfill)). |
+| Scenario 24: no DF7216 within 30 minutes of the second deny | The execution's retries outlast it, or the deny didn't take: read the execution's history in the Step Functions console. |
+| Scenario 36: "every job read the archive before a -cancel stopped one of its queries" | Each Athena query of the jobs ended before `-cancel` reached it. Run the scenario again on a new run. |
 | Scenario 36: an `AccessDenied` of the backfill role in CloudTrail, or a job broken with Athena error 234 or 1700 | A statement of the backfill role is missing or too narrow, or Lake Formation governs the archive's catalog ([infra.md §9.6](../spec/infra.md#96-backfill-role)). Record the action and the ARN. |
 | Scenario 36: a job failed because the archive isn't complete | `status` names the rule that failed (DF7219). A gap or a hole the scenario didn't make means a deploy, a projector or Firehose lost records. |
 | Scenario 36: a version reads the table where the archive was complete | `backfill` recorded no origin on the first deploy (DF7218), or a rule failed: `status` shows which. |
@@ -246,13 +277,16 @@ region's query results must equal its oracle's, for the example's queries and th
 reaches every region; in emulator mode, only its own. Numbers are stable identifiers; gaps are scenarios
 that were dropped from the design or became manual experiments. AWS mode runs them in the
 order of the table: scenario 7 reads the logs of the ones before it, and scenario 23 denies
-the projector on purpose.
+the projector on purpose. Scenarios 24 and 36 run last, and only with `-backfill`
+([§3](#3-aws-mode)): they add `testdata/backfill.sql`, an additive and an idempotent view of
+`page_views`, to the project in `E2E_WORK`, and deploy it again. They run every `dynaflux`
+command with `E2E_OPERATOR_ROLE`.
 
 | # | Scenario | Asserts | Emulator | AWS |
 |---|----------|---------|----------|-----|
 | 6 | Mapping settings | Exactly one mapping per stream table in each region, to the projector, and each mapping's settings equal the fixed values of [infra.md §8](../spec/infra.md#8-fixed-values). | — | yes |
 | 18 | Lake Formation precondition | Lake Formation's defaults give `IAM_ALLOWED_PRINCIPALS` `ALL` on new databases and tables, IAM allows the Firehose role `glue:GetTable` on the catalog, the database and each archive table, and no table is registered with Lake Formation. | — | yes |
-| 1 | Appends in every region | Each region's views equal the oracle. | yes | yes |
+| 1 | Appends in every region | On AWS, first: every version is `live` in each region with the fence split, and its job item says `fresh`, because `deploy.sh`'s `backfill -all` made it live without reading anything. Then each region's views equal the oracle. | yes | yes |
 | 4 | `DeleteItem` on a stream item | The `REMOVE` record is skipped: the views equal the oracle, which never deleted anything, the stream lost the event, and the archive keeps it with no copy from the `REMOVE`. | yes | yes |
 | 5 | A poison event (zero divisor) | That event breaks `e2e_ratio`, every other version stays live and exact, and the shard goes on. On AWS, the `views-broken` alarm goes into `ALARM`. In emulator mode, the projector's one `WARN` or `ERROR` line is the `batch metrics` line with `BreakerOpened` 1. | yes | yes |
 | 2 | One dedup key in both regions at once, 10 times each way | With the same payload, the views count it once. With different payloads, each region counts one of them once, and a `DivergentDuplicates` metric line appears. It logs how many `MODIFY` records hold equal payloads (all but `_r`, `_it` and `_ttl`) for the same-payload keys that both regions stored. | — | yes |
@@ -262,31 +296,35 @@ the projector on purpose.
 | 7 | Least privilege | No `AccessDenied` in any function or Firehose log, other than scenario 23's deny, Athena DDL and optimizer creation included. Both optimizers exist on every archive table, so `iam:PassRole` worked. | — | yes |
 | 3 | Replication pause: FIS `aws:dynamodb:global-table-pause-replication` for 10 minutes | 5.5 minutes after the action starts (replication can go on for 5 minutes), appends in both regions: before the pause ends, each region's views show only its own, and its stream table lacks the other's. After the pause, both converge. | — | yes |
 | 23 | Partial failures and function errors under the 900-second window | With steady appends, a deny of `PutItem` on one view table for 2 minutes (row failures, so partial replies), then of the meta table for 2 minutes (function errors, so retries with bisection). The views end equal to the oracle, and the projector's log has `rows failed` (`WARN`, with `failedSeq`) and `batch failed` (`ERROR`) lines. | — | yes |
+| 24 | Backfill under traffic, from the stream tables | First, 3,000 page views in each region, so that each job applies for minutes. While a batch of 5 is appended in each region every 5 seconds: deploy `regional.yaml` with `backfill.sql`, and run `dynaflux backfill -all -yes -rate 20 -source table`. In the home region: `backfill -cancel` during the idempotent version's apply, then `backfill` to resume it; a deny of `dynamodb:PutItem` on the additive version's table to the backfill role for 1 minute, then again until the execution fails, then the command of the hint of `status`'s DF7216, and `backfill -rate 200`. After `-cancel`, the job is `cancelled` and the version `activating`. The 1-minute deny fails no execution: the job applies again, and `status` shows no DF7216. The second fails the execution: `status` shows DF7216, and `backfill-failed` goes into `ALARM`. `status` shows the rate of 200. Both versions go `live` in each region, the additive one with the time split and the idempotent one with none, and their views equal the oracle. | — | with `-backfill` |
+| 36 | Archive backfill | `deploy.sh`'s `backfill -all` recorded each stream's origin in each region. In the home region, append a page view to each of the scenario's pages and delete them from the stream table, as TTL would. Then append in each region as scenario 24 does, for an hour: `status` shows each stream's archive complete since its origin in each region. Rebuild both views of `backfill.sql` (`dynaflux generate -rebuild`; the scenario adds them first when 24 didn't run), deploy `regional.yaml`, and run `dynaflux backfill -all -yes` while the appends go on. During one of a job's Athena queries, the listing of the archive's partitions or a slice's export, run `backfill -cancel`, then `backfill`: Athena shows the query cancelled, the version stays `activating`, and the job goes on with a new try. Both versions go `live` in each region with the fence split, so from the archive. `status` shows the bytes each job scanned, which the scenario logs; each job item's `errors.foreign` is 0, and the backfill function logged no access denial. Then take the second region out of `archive.regions`, generate and deploy; put it back, generate and deploy: `status` shows that region's archive of each stream not complete since the first of those deploys. Rebuild the idempotent view again and deploy: `backfill -source archive <view> -region <second region>` is refused with DF7503, and after `backfill -all -yes`, the new version goes `live` with the fence split in the home region and no split in the second, which reads its table. Once the appends stop, the views of each version equal the oracle, the deleted events included, except in the last version in the second region: the table has lost them. | — | with `-backfill` |
 
-M5 changes the suite as below ([ADR 0012](../decisions/0012-view-version-activation.md)),
-and none of it is coded yet. `deploy.sh` gets a step after deploying `regional.yaml` that
-runs `dynaflux backfill -all -yes -prefix e2e-<id>-`: the store has no events yet, so each
-job makes its version live by the fresh rule, without a read
-([lifecycle.md §4.3](../spec/lifecycle.md#43-fresh-streams)). The suite then stops setting
-the versions live in AWS mode, scenario 1 asserts what the backfill did, and scenario 24
-joins the table.
+Before a run with `-backfill`, turn on CloudTrail data events for the run's buckets. The
+backfill function, not the operator, calls Athena, and Athena then reads the Glue catalog
+and the archive, and writes the export, with the backfill role's credentials. Scenario 36
+checks only the function's log, so record every `AccessDenied` event of the backfill role in
+CloudTrail ([infra.md §9.6](../spec/infra.md#96-backfill-role)) other than scenario 24's
+denies.
 
-| # | Scenario | Asserts |
-|---|----------|---------|
-| 1 | Appends in both regions, after the first deploy's `backfill -all` | Every version is `live` in both regions, by the fresh rule where the region archives the stream with `events: all` (the job item says `fresh`); the views equal the oracle in each region. |
-| 24 | Backfill under traffic. While appends go on in both regions: deploy `regional.yaml` again with `testdata/backfill.sql`, which adds an additive and an idempotent view of the e2e stream; `dynaflux backfill -all -yes -rate 20 -source table`, so that applying takes minutes (without `-source table`, both would read the complete archive, as in scenario 36); during `apply`, deny the backfill role `dynamodb:PutItem` on one new view table for 1 minute, then again until the execution fails (up to about 16 minutes of retries), then remove the deny and run `backfill` again; `backfill -cancel` during another job's `apply`, then `backfill` to resume it; `backfill -rate 200` on a running job. | Both versions go `live` in both regions from the stream table, the additive one by the time split, about 30 minutes after its activation. The 1-minute deny fails no execution. The long one fails the execution: `backfill-failed` fires, and `status` shows the job interrupted (DF7216) with the command that resumes it. After `-cancel`, the job is `cancelled` and the version `activating`. `status` shows the new rate. The views of both versions equal the oracle in each region. |
+Data events are billed per event, so scope them to the run, and turn them off after the
+teardown. A selector on the buckets' name prefix works before `deploy.sh` creates them.
+`put-event-selectors` replaces every selector of the trail, so save the trail's selectors
+first, and keep its management events:
 
-M6 adds a scenario that reads the archive ([ADR 0016](../decisions/0016-archive-export-with-athena.md),
-[ADR 0017](../decisions/0017-archive-completeness.md)), not coded yet either. Run every
-`dynaflux` command in it with the operator role of [§1](#1-prerequisites). The backfill
-function, not the operator, calls Athena: Athena then reads the Glue catalog and the archive,
-and writes the export, with the backfill role's credentials, which no grants test sees. So
-turn on CloudTrail data events for the bucket before it, and record every `AccessDenied`
-event of the backfill role ([infra.md §9.6](../spec/infra.md#96-backfill-role)).
+<!-- doctest: skip -->
+```sh
+trail=<your trail>
+aws cloudtrail get-event-selectors --trail-name "$trail" >"selectors-$E2E_RUN.json"
+aws cloudtrail put-event-selectors --trail-name "$trail" --advanced-event-selectors '[
+  {"Name": "Management events", "FieldSelectors": [{"Field": "eventCategory", "Equals": ["Management"]}]},
+  {"Name": "e2e run buckets", "FieldSelectors": [
+    {"Field": "eventCategory", "Equals": ["Data"]},
+    {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
+    {"Field": "resources.ARN", "StartsWith": ["arn:aws:s3:::e2e-'"$E2E_RUN"'-analytics-"]}]}]'
+```
 
-| # | Scenario | Asserts |
-|---|----------|---------|
-| 36 | Archive backfill. On a new run, `dynaflux backfill -all -yes` right after the first deploy records each stream's origin in both regions. Append for an hour in both regions, and delete a sample of stream items by hand, as TTL would. Rebuild an additive and an idempotent view of the e2e stream (`dynaflux generate -rebuild`), deploy `regional.yaml`, and run `dynaflux backfill -all -yes` while appends go on. During a slice's export, run `backfill -cancel`, then `backfill` again. Then take `us-west-2` out of `archive.regions`, generate and deploy, put it back, generate and deploy; rebuild a view again, deploy, and run `backfill -all -yes`, then `backfill -source archive <view>` in `us-west-2`. | `status` shows each stream's archive "complete since" its origin in both regions before the hole. Both new versions go `live` in both regions by the archive source, split by fences; their views equal the oracle, the deleted events included. `-cancel` stops the export's query (`StopQueryExecution`), and the job resumes with a new try. `status` shows the bytes each job scanned, about the size of the days it exported, and its job item's `errors.foreign` is 0. CloudTrail has no `AccessDenied` for the backfill role. After the hole, `status` shows `us-west-2`'s archive "not complete" with the deploy's time, the new version fills from the table there and from the archive in `us-east-1`, and `-source archive` in `us-west-2` is refused (DF7503). |
+After the teardown, put back the selectors saved in `selectors-$E2E_RUN.json` with
+`put-event-selectors`, and record in the results that you did.
 
 ## 9. Manual experiments
 
@@ -326,7 +364,7 @@ deploy parameter. `teardown.sh` leaves the directory: delete it yourself.
 | 14 | Dedup view pruning | Run `EXPLAIN ANALYZE` on a `<stream>_dedup` query with and without an `event_time` filter. | Whether the filter cuts the data scanned. |
 | 15 | Tumbling window across a shard rollover | Append one event every few seconds for 5 hours. | Every invocation's `shardId` is a real shard (`DescribeStream`); the views equal the oracle. |
 | 16 | Stuck shard past 24 hours | In one region, add a statement that denies the projector role `dynamodb:PutItem` on its view tables. Keep appending for 25 hours, then remove the statement. | `gap-risk` fires after 6 hours; whether trimmed records reach `aws/lambda/<mapping UUID>/` with the record age unlimited; the projector resumes; what `dynaflux status` (M5) must report. |
-| 17 | Add and remove a region | In the kept project, add a third region with Firehose Iceberg delivery and Glue optimizers, such as `eu-west-1`, and follow [infra.md §12](../spec/infra.md#12-changes-after-the-first-deploy). Time the replica creation. Then remove it, first without `--unprotect-region`: `generate` refuses (DF6018), so move the old `global.yaml` out of `infra.out` before running it. | The new region's views need a backfill; whether the replica's initial copy appears in its stream; whether deletion protection blocks the removal (if it doesn't, `--unprotect-region` goes). |
+| 17 | Add and remove a region | In the kept project, add a third region with Firehose Iceberg delivery and Glue optimizers, such as `eu-west-1`, and follow [infra.md §12](../spec/infra.md#12-changes-after-the-first-deploy). Time the replica creation. Then remove it, first without `-unprotect-region`: `generate` refuses (DF6018), so move the old `global.yaml` out of `infra.out` before running it. | The new region's views need a backfill; whether the replica's initial copy appears in its stream; whether deletion protection blocks the removal (if it doesn't, `-unprotect-region` goes). |
 | 19 | Flip `split` under load | While appending, change `runtime.split` from `store` to `stream` in the kept project, generate, and deploy `regional.yaml`. | The views equal the oracle; `progress` never moves backward; whether the old and new functions process the same shard at overlapping times. |
 | 20 | In-place Firehose update | Change a Firehose stream's buffering in the kept project's `infra/dynaflux/regional.yaml`, build, and deploy it. | The update succeeds on a stream created with `AppendOnly`, without a replacement. |
 | 21 | Regional before global | With a new `E2E_RUN`, deploy `regional.yaml` from an earlier run's kept project before `global.yaml`. Then deploy `global.yaml` and `regional.yaml` again. | The stream lookup fails; the rollback leaves no bucket or Glue database; the retry succeeds. |
@@ -335,8 +373,8 @@ deploy parameter. `teardown.sh` leaves the directory: delete it yourself.
 ### Lifecycle and operations
 
 These check the view lifecycle and the operator commands
-([lifecycle.md](../spec/lifecycle.md)). Run every `dynaflux` command in them, and in
-scenario 24, with the operator role of [§1](#1-prerequisites): an `AccessDenied` is a
+([lifecycle.md](../spec/lifecycle.md)). Run every `dynaflux` command in them with the
+operator role of [§1](#1-prerequisites), as scenarios 24 and 36 do: an `AccessDenied` is a
 finding for [infra.md §9.8](../spec/infra.md#98-operators).
 
 | # | Experiment | Steps | Answers |
@@ -429,6 +467,7 @@ tested:
 
 - Date, Dynaflux commit, account type, regions:
 - Steps run, and any change to them:
+- CloudTrail data events, for a run with `-backfill`: turned off after the teardown?
 - Observed (numbers, log lines, screenshots):
 - Answer:
 - Recorded in (ADR or spec section):

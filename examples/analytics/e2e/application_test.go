@@ -25,7 +25,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 
 	"github.com/lucindo/dynaflux"
@@ -71,19 +70,7 @@ func (a *awsTarget) appCredentials(t *testing.T, cfg aws.Config) aws.Credentials
 	if !strings.HasPrefix(role, "arn:aws:iam::"+a.account+":role/") {
 		t.Fatalf("%s is %q; set it to the ARN of a role in E2E_ACCOUNT that you can assume (docs/runbooks/e2e.md §1)", appRoleVar, role)
 	}
-	policy := readmePolicy(t, a.account, "e2e-"+a.run+"-")
-	c := sts.NewFromConfig(cfg)
-	return aws.NewCredentialsCache(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
-		out, err := c.AssumeRole(ctx, &sts.AssumeRoleInput{RoleArn: &role, RoleSessionName: new("dynaflux-e2e-" + a.run), Policy: &policy})
-		if err != nil {
-			return aws.Credentials{}, err
-		}
-		cr := out.Credentials
-		return aws.Credentials{
-			AccessKeyID: aws.ToString(cr.AccessKeyId), SecretAccessKey: aws.ToString(cr.SecretAccessKey), SessionToken: aws.ToString(cr.SessionToken),
-			CanExpire: true, Expires: aws.ToTime(cr.Expiration), Source: appRoleVar,
-		}, nil
-	}))
+	return a.assume(cfg, role, appRoleVar, new(readmePolicy(t, a.account, "e2e-"+a.run+"-")))
 }
 
 // readmePolicy returns the application policy in the example's README, its one JSON block,

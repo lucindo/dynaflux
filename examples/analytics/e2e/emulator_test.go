@@ -75,6 +75,17 @@ func newEmulator(t *testing.T, p *project) *harness {
 	return h
 }
 
+// setLive marks every view version live on a new store, before its first append, in place of
+// the backfill that DynamoDB Local has no state machine for. A store with view states is an
+// earlier run's, and keeps them.
+func setLive(ctx context.Context, r *region, cat *catalog.Catalog) error {
+	states, err := r.meta.ViewStates(ctx)
+	if err != nil || len(states) > 0 {
+		return err
+	}
+	return r.meta.SetLive(ctx, cat)
+}
+
 // settler returns a region's settle: it drains each stream through the projector. Drain
 // retries a failed batch, but nothing injects faults here, so settle fails once an
 // invocation fails or reports failed records.

@@ -530,8 +530,8 @@ func awaitExperiment(t *testing.T, h *harness, c *fis.Client, id *string, patien
 	return exp
 }
 
-// denyPolicy is the inline policy that scenario 23 adds to the projector role, and that
-// scripts/e2e/teardown.sh removes if a run left it.
+// denyPolicy is the inline policy that scenarios 23 and 24 add to the projector and backfill
+// roles, and that scripts/e2e/teardown.sh removes if a run left it.
 const denyPolicy = "dynaflux-e2e-deny"
 
 // Scenario 23: under the 900-second tumbling window, with steady appends, row failures (a
@@ -542,18 +542,10 @@ const denyPolicy = "dynaflux-e2e-deny"
 func testPartialFailures(t *testing.T, h *harness) {
 	home := h.regions[0]
 	c := h.aws.clients[home]
-	fn, err := c.lambda.GetFunctionConfiguration(t.Context(), &lambda.GetFunctionConfigurationInput{
-		FunctionName: new(home.naming.ProjectorFunction()),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	role := aws.ToString(fn.Role)[strings.LastIndex(aws.ToString(fn.Role), "/")+1:]
+	role := functionRole(t, h, home, home.naming.ProjectorFunction())
 	t.Cleanup(func() {
-		_, derr := c.iam.DeleteRolePolicy(context.WithoutCancel(t.Context()), &iam.DeleteRolePolicyInput{RoleName: &role, PolicyName: new(denyPolicy)})
-		var gone *iamtypes.NoSuchEntityException
-		if derr != nil && !errors.As(derr, &gone) {
-			t.Errorf("remove %s from %s: %v", denyPolicy, role, derr)
+		if err := removeDeny(context.WithoutCancel(t.Context()), c.iam, role); err != nil {
+			t.Error(err)
 		}
 	})
 	table := "arn:aws:dynamodb:" + home.name + ":" + h.aws.account + ":table/"
@@ -564,7 +556,7 @@ func testPartialFailures(t *testing.T, h *harness) {
 			r.pageViews(home, flux.PageView{
 				UserID: r.key("u"), Page: r.key("/p"), DurationMS: 15, EventTime: r.at.Add(time.Duration(n) * time.Millisecond),
 			})
-			if err = sleep(t.Context(), 5*time.Second); err != nil {
+			if err := sleep(t.Context(), 5*time.Second); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -573,7 +565,7 @@ func testPartialFailures(t *testing.T, h *harness) {
 	appendFor(2 * time.Minute)
 	deny(t, c.iam, role, "dynamodb:*", table+home.naming.MetaTable())
 	appendFor(2 * time.Minute)
-	if _, err = c.iam.DeleteRolePolicy(t.Context(), &iam.DeleteRolePolicyInput{RoleName: &role, PolicyName: new(denyPolicy)}); err != nil {
+	if err := removeDeny(t.Context(), c.iam, role); err != nil {
 		t.Fatal(err)
 	}
 	appendFor(30 * time.Second)
@@ -595,6 +587,27 @@ func testPartialFailures(t *testing.T, h *harness) {
 			t.Errorf("%s: no %q line since the first deny", group, msg)
 		}
 	}
+}
+
+// functionRole returns the name of a function's execution role in reg.
+func functionRole(t *testing.T, h *harness, reg *region, function string) string {
+	t.Helper()
+	fn, err := h.aws.clients[reg].lambda.GetFunctionConfiguration(t.Context(), &lambda.GetFunctionConfigurationInput{FunctionName: &function})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arn := aws.ToString(fn.Role)
+	return arn[strings.LastIndex(arn, "/")+1:]
+}
+
+// removeDeny removes denyPolicy from role, if it is there.
+func removeDeny(ctx context.Context, c *iam.Client, role string) error {
+	_, err := c.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{RoleName: &role, PolicyName: new(denyPolicy)})
+	var gone *iamtypes.NoSuchEntityException
+	if err != nil && !errors.As(err, &gone) {
+		return fmt.Errorf("remove %s from %s: %w", denyPolicy, role, err)
+	}
+	return nil
 }
 
 // deny puts denyPolicy on role, denying action on resource, and waits for IAM to apply it.

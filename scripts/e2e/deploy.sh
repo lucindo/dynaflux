@@ -5,9 +5,9 @@
 # Deploys the end-to-end store of run E2E_RUN to account E2E_ACCOUNT with your AWS
 # credentials (docs/runbooks/e2e.md): the example with examples/analytics/e2e/testdata/e2e.sql
 # added, generated in a Go module of its own; global.yaml in the home region, regional.yaml in
-# every region, and the replication-pause experiment in the second region. With E2E_REGIONS
-# set, the store is in those regions instead of the example's. With E2E_WORK set, the project
-# stays in that directory. Maintainer only.
+# every region, a backfill of every view version, and the replication-pause experiment in the
+# second region. With E2E_REGIONS set, the store is in those regions instead of the example's.
+# With E2E_WORK set, the project stays in that directory. Maintainer only.
 set -euo pipefail
 
 for cmd in go sam aws; do
@@ -73,6 +73,10 @@ for region in "${regions[@]}"; do
 		--capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND --resolve-s3 \
 		--parameter-overrides "Prefix=$prefix" --no-fail-on-empty-changeset
 done
+# Before the first event, as on a user's first deploy: each version goes live without a read,
+# and each region records where its archive of each stream starts (docs/spec/lifecycle.md §4.3,
+# §5.5). -watch fails the deploy unless every version goes live.
+bin/dynaflux backfill -all -yes -watch -prefix "$prefix"
 aws cloudformation deploy --template-file "$example/e2e/fis.yaml" --stack-name "$fis_stack" \
 	--region "$fis_region" --capabilities CAPABILITY_IAM \
 	--parameter-overrides "Prefix=$prefix" "Run=$run" --no-fail-on-empty-changeset
