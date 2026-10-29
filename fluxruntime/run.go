@@ -1,9 +1,9 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Package runtime is the entry point of the Lambda binary that dynaflux generate writes to
+// Package fluxruntime is the entry point of the Lambda binary that dynaflux generate writes to
 // runtime.out. One binary serves every function of a store; DYNAFLUX_MODE picks the handler.
-package runtime
+package fluxruntime
 
 import (
 	"context"

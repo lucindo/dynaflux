@@ -10,8 +10,8 @@ import (
 	"github.com/lucindo/dynaflux/internal/codegen"
 )
 
-// The runtime binary's main.go calls runtime.Run with the client package's Catalog, which it
-// imports under the package's name when the import path ends in another one.
+// The runtime binary's main.go calls fluxruntime.Run with the client package's Catalog,
+// which it imports under the package's name when the import path ends in another one.
 func TestMainGolden(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -26,13 +26,13 @@ package main
 import (
 	"log"
 
-	"github.com/lucindo/dynaflux/runtime"
+	"github.com/lucindo/dynaflux/fluxruntime"
 
 	"example.com/app/internal/flux"
 )
 
 func main() {
-	if err := runtime.Run(flux.Catalog); err != nil {
+	if err := fluxruntime.Run(flux.Catalog); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -46,13 +46,13 @@ package main
 import (
 	"log"
 
-	"github.com/lucindo/dynaflux/runtime"
+	"github.com/lucindo/dynaflux/fluxruntime"
 
 	client "example.com/app/pkg/internal/gen"
 )
 
 func main() {
-	if err := runtime.Run(client.Catalog); err != nil {
+	if err := fluxruntime.Run(client.Catalog); err != nil {
 		log.Fatal(err)
 	}
 }

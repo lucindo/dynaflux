@@ -179,6 +179,74 @@ func TestWaitForReturnsAtOnce(t *testing.T) {
 	})
 }
 
+// One store serves the catalogs of two generated packages, each of its own store, as a
+// deployed Store serves every package deployed with its prefix: an append and a query
+// through each see only their own events.
+func TestNewStoreServesEveryCatalog(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		app := fluxgen.LoadCatalog(catalogJSON(t, quota))
+		billing := billingCatalog(t)
+		r := &recorder{TB: t}
+		s := fluxtest.NewStore(r, app, billing)
+		call := apiCall{account: "acme", request: "r1", units: 5, eventTime: time.Now()}
+		_, aerr := fluxgen.AppendEvent(t.Context(), s, app, "api_calls", call.fields())
+		berr := appendInvoice(t, s, billing, "globex", 1250)
+		calls, cerr := count(t, s, app, "Calls", "acme")
+		billed, qerr := count(t, s, billing, "Billed", "globex")
+		if aerr != nil || berr != nil || calls != 1 || cerr != nil || billed != 1250 || qerr != nil || len(r.errors) > 0 {
+			t.Errorf("appends: %v, %v; Calls %d (%v), Billed %d (%v), test errors %q; want 1 and 1250, no errors",
+				aerr, berr, calls, cerr, billed, qerr, r.errors)
+		}
+	})
+}
+
+// A call over a catalog that NewStore wasn't given fails before it writes, and so does
+// NewStore given two catalogs of one store.
+func TestNewStoreRefusesOtherCatalogs(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		app := fluxgen.LoadCatalog(catalogJSON(t, quota))
+		billing := billingCatalog(t)
+		s := fluxtest.NewStore(t, app)
+		const want = "fluxtest: the Store has no catalog of store billing; pass that Catalog to fluxtest.NewStore"
+		aerr := appendInvoice(t, s, billing, "globex", 1250)
+		_, qerr := count(t, s, billing, "Billed", "globex")
+		if aerr == nil || aerr.Error() != want || qerr == nil || qerr.Error() != want {
+			t.Errorf("append: %v\nquery: %v\nwant both %q", aerr, qerr, want)
+		}
+
+		r := &recorder{TB: t}
+		fluxtest.NewStore(r, billing, app, billingCatalog(t))
+		if want := "fluxtest: two catalogs of store billing"; r.fatal != want {
+			t.Errorf("NewStore failed the test with %q, want %q", r.fatal, want)
+		}
+	})
+}
+
+// billingCatalog is the catalog of a store other than app.
+func billingCatalog(t *testing.T) *dynaflux.Catalog {
+	t.Helper()
+	return fluxgen.LoadCatalog(string(catalogtest.Marshal(t, "billing", `
+CREATE STREAM invoices (account_id String, cents UInt64) PRIMARY KEY (account_id);
+CREATE MATERIALIZED VIEW billed ORDER BY (account_id)
+AS SELECT account_id, sum(cents) AS total FROM invoices GROUP BY account_id;
+-- name: Billed :one
+SELECT total FROM billed WHERE account_id = {account_id:String};
+`)))
+}
+
+// appendInvoice appends an invoice of billingCatalog.
+func appendInvoice(t *testing.T, s *dynaflux.Store, billing *dynaflux.Catalog, account string, cents uint64) error {
+	t.Helper()
+	var (
+		id, region string
+		at, ingest time.Time
+	)
+	_, err := fluxgen.AppendEvent(t.Context(), s, billing, "invoices", []any{&account, &cents, &id, &at, &ingest, &region})
+	return err
+}
+
 // catalogJSON is what dynaflux generate embeds for sql.
 func catalogJSON(t *testing.T, sql string) string {
 	t.Helper()

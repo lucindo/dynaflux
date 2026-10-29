@@ -42,6 +42,22 @@ func TestDedupEventID(t *testing.T) {
 	}
 }
 
+// An event_id is the base32 of 16 bytes: EventIDBytes reads them, here those of the DEDUP
+// event_id above, and EventIDText writes them back. Text that isn't an event_id fails.
+func TestEventIDBytes(t *testing.T) {
+	t.Parallel()
+	const id = "555RPD1301M7V2A0W16A8T1GNV"
+	b, ok := keys.EventIDBytes(id)
+	if got := hex.EncodeToString(b[:]); !ok || got != "a52e2cd08c01a1f62503813291a0c2bb" || keys.EventIDText(b) != id {
+		t.Errorf("EventIDBytes(%q) = %s, %v; EventIDText of it %q", id, got, ok, keys.EventIDText(b))
+	}
+	for _, bad := range []string{"555rpd1301m7v2a0w16a8t1gnv", "555RPD1301M7V2A0W16A8T1GN", "855RPD1301M7V2A0W16A8T1GNV"} {
+		if _, ok = keys.EventIDBytes(bad); ok {
+			t.Errorf("EventIDBytes(%q) succeeded, want false", bad)
+		}
+	}
+}
+
 func TestBucket(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

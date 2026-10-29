@@ -21,7 +21,6 @@ type Stream struct {
 	Append      string // AppendPageView
 	AppendBatch string // AppendPageViewBatch
 	Read        string // ReadPageViews
-	Import      string // ImportPageViews
 }
 
 // ForStream returns the names generated for the stream called name, whose -- go:type is
@@ -38,7 +37,6 @@ func ForStream(name, goType string) Stream {
 		Append:      "Append" + event,
 		AppendBatch: "Append" + event + "Batch",
 		Read:        "Read" + plural,
-		Import:      "Import" + plural,
 	}
 }
 

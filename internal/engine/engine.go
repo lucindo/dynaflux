@@ -48,21 +48,6 @@ func (e *ValueError) Error() string { return "dynaflux: " + e.Name + ": " + e.Er
 
 func (e *ValueError) Unwrap() error { return e.Err }
 
-// ArchiveSizeError is an event of an archived stream whose archive record could be over
-// Firehose's record limit, so no projector could archive it. It matches [ErrInvalidValue].
-type ArchiveSizeError struct {
-	Stream string
-	// Size is the record's size in bytes with the longest bookkeeping values.
-	Size int
-}
-
-func (e *ArchiveSizeError) Error() string {
-	return fmt.Sprintf("dynaflux: append to %s: %v: the event's archive record can reach %d bytes, over Firehose's record limit of %d",
-		e.Stream, ErrInvalidValue, e.Size, archive.MaxRecordSize)
-}
-
-func (e *ArchiveSizeError) Unwrap() error { return ErrInvalidValue }
-
 // NotReadyError is a view version that isn't live in the engine's region. It matches
 // [ErrViewNotReady].
 type NotReadyError struct {

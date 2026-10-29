@@ -3,7 +3,7 @@
 
 //go:build integration
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"io"

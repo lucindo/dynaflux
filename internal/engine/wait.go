@@ -4,11 +4,13 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -41,36 +43,6 @@ const (
 	flagsKnown  = flagReceipt | flagForeign
 )
 
-// Token returns the text of a token that names stored, the events that an append to stream
-// stored or found stored, or "" when there are none: the engine's region and the stream,
-// then each event's sort key, its ingest_time as stored, and its flags. It leaves out the
-// partition key, which holds the event's PRIMARY KEY values: a token can reach clients and
-// logs.
-func (e *Engine) Token(stream string, stored []store.Item) string {
-	if len(stored) == 0 {
-		return ""
-	}
-	b := appendText([]byte{tokenFormat}, e.region)
-	b = appendText(b, stream)
-	for _, it := range stored {
-		b = appendText(b, it[catalog.AttrSK].Str)
-		b = appendText(b, it[catalog.AttrIngestTime].Str)
-		var flags byte
-		if rcpt := it[catalog.AttrReceipt]; rcpt.Type == store.BOOL && rcpt.Bool {
-			flags |= flagReceipt
-		}
-		if it[catalog.AttrOriginRegion].Str != e.region {
-			flags |= flagForeign
-		}
-		b = append(b, flags)
-	}
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func appendText(b []byte, s string) []byte {
-	return append(binary.AppendUvarint(b, uint64(len(s))), s...)
-}
-
 // token is a token decoded.
 type token struct {
 	region, stream string
@@ -78,8 +50,79 @@ type token struct {
 }
 
 type tokenEvent struct {
-	receipt meta.ReceiptKey
-	flags   byte
+	id           [16]byte // the event_id's bytes
+	ingestMicros int64    // the stored ingest_time
+	flags        byte
+}
+
+// receipt returns the key of ev's receipt.
+func (ev tokenEvent) receipt() meta.ReceiptKey {
+	return meta.ReceiptKey{EventID: keys.EventIDText(ev.id), It: ev.ingestMicros}
+}
+
+// tokenEvent returns how a token names stored, an event of a stream table.
+func (e *Engine) tokenEvent(stored store.Item) (tokenEvent, error) {
+	_, id, err := keys.ParseStreamSK(stored[catalog.AttrSK].Str)
+	if err != nil {
+		return tokenEvent{}, err
+	}
+	a, ok := stored[catalog.AttrIngestTime]
+	ingest, err := keys.DecodeValue(catalog.EventTimeType(), a, ok)
+	if err != nil {
+		return tokenEvent{}, fmt.Errorf("event %s: ingest_time: %w", id, err)
+	}
+	var flags byte
+	if rcpt := stored[catalog.AttrReceipt]; rcpt.Type == store.BOOL && rcpt.Bool {
+		flags |= flagReceipt
+	}
+	if stored[catalog.AttrOriginRegion].Str != e.region {
+		flags |= flagForeign
+	}
+	b, _ := keys.EventIDBytes(id) // ParseStreamSK checked it
+	return tokenEvent{id: b, ingestMicros: ingest.AsMicros(), flags: flags}, nil
+}
+
+// Token returns the text of a token that names the events of res, an Append's results for
+// stream, that are stored: by the append, or before it for a duplicate. It returns "" when
+// there are none. It leaves out the partition key, which holds the event's PRIMARY KEY
+// values: a token can reach clients and logs.
+//
+// The text is base64url of the format byte, the engine's region and the stream, then for
+// each event its event_id's 16 bytes, its ingest_time in microseconds as stored, and its
+// flags. The first event's ingest_time is a uvarint, and each next one a varint of the
+// difference from the one before: an append's events share it, or nearly, but an event
+// found stored can be older.
+func (e *Engine) Token(stream string, res []Appended) string {
+	t := &token{region: e.region, stream: stream}
+	for _, r := range res {
+		if r.Stored != nil {
+			t.events = append(t.events, r.token)
+		}
+	}
+	if len(t.events) == 0 {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(t.binary())
+}
+
+// binary returns t's binary form.
+func (t *token) binary() []byte {
+	b := appendText([]byte{tokenFormat}, t.region)
+	b = appendText(b, t.stream)
+	for i, ev := range t.events {
+		b = append(b, ev.id[:]...)
+		if i == 0 {
+			b = binary.AppendUvarint(b, uint64(ev.ingestMicros)) //nolint:gosec // an ingest_time is from 1970 on
+		} else {
+			b = binary.AppendVarint(b, ev.ingestMicros-t.events[i-1].ingestMicros)
+		}
+		b = append(b, ev.flags)
+	}
+	return b
+}
+
+func appendText(b []byte, s string) []byte {
+	return append(binary.AppendUvarint(b, uint64(len(s))), s...)
 }
 
 var errMalformed = errors.New("malformed token: not the text of a token that an append returned")
@@ -91,7 +134,8 @@ func CheckToken(text string) error {
 	return err
 }
 
-// decodeToken decodes the text of a token, nil for "".
+// decodeToken decodes the text of a token, nil for "". It accepts only what Token writes:
+// text that the decoded token encodes back to.
 func decodeToken(text string) (*token, error) {
 	if text == "" {
 		return nil, nil //nolint:nilnil // the zero token names no event
@@ -103,47 +147,71 @@ func decodeToken(text string) (*token, error) {
 	d := &tokenReader{b: b[1:]}
 	t := &token{region: d.text(), stream: d.text()}
 	for len(d.b) > 0 && !d.bad {
-		_, id, kerr := keys.ParseStreamSK(d.text())
-		it, ierr := strconv.ParseInt(d.text(), 10, 64)
-		flags := d.flags()
-		if kerr != nil || ierr != nil || flags&^flagsKnown != 0 {
+		var ev tokenEvent
+		copy(ev.id[:], d.next(len(ev.id)))
+		if len(t.events) == 0 {
+			ev.ingestMicros = d.uvarint()
+		} else {
+			ev.ingestMicros = t.events[len(t.events)-1].ingestMicros + d.varint()
+		}
+		ev.flags = d.next(1)[0]
+		if d.bad || ev.ingestMicros < 0 || ev.ingestMicros >= catalog.TimeLimitMicros || ev.flags&^flagsKnown != 0 {
 			return nil, errMalformed
 		}
-		t.events = append(t.events, tokenEvent{receipt: meta.ReceiptKey{EventID: id, It: it}, flags: flags})
+		t.events = append(t.events, ev)
 	}
-	if d.bad || t.region == "" || t.stream == "" || len(t.events) == 0 {
+	if d.bad || t.region == "" || t.stream == "" || len(t.events) == 0 || !bytes.Equal(t.binary(), b) {
 		return nil, errMalformed
 	}
 	return t, nil
 }
 
 // tokenReader reads the fields of a token's binary form. bad is set at the first one that
-// runs past the end.
+// runs past the end, and each read after it returns zeros.
 type tokenReader struct {
 	b   []byte
 	bad bool
 }
 
+// next returns the next n bytes.
+func (r *tokenReader) next(n int) []byte {
+	if r.bad || n > len(r.b) {
+		r.bad, r.b = true, nil
+		return make([]byte, n)
+	}
+	out := r.b[:n]
+	r.b = r.b[n:]
+	return out
+}
+
 func (r *tokenReader) text() string {
-	n, w := binary.Uvarint(r.b)
-	if w <= 0 || n > uint64(len(r.b)-w) { //nolint:gosec // w is at most len(r.b)
+	n := r.uvarint()
+	if n > int64(len(r.b)) {
 		r.bad, r.b = true, nil
 		return ""
 	}
-	end := w + int(n) //nolint:gosec // n is at most the bytes left
-	s := string(r.b[w:end])
-	r.b = r.b[end:]
-	return s
+	return string(r.next(int(n)))
 }
 
-func (r *tokenReader) flags() byte {
-	if len(r.b) == 0 {
-		r.bad = true
+// uvarint reads a uvarint of at most 63 bits.
+func (r *tokenReader) uvarint() int64 {
+	n, w := binary.Uvarint(r.b)
+	if w <= 0 || n > math.MaxInt64 {
+		r.bad, r.b = true, nil
 		return 0
 	}
-	c := r.b[0]
-	r.b = r.b[1:]
-	return c
+	r.b = r.b[w:]
+	return int64(n)
+}
+
+func (r *tokenReader) varint() int64 {
+	n, w := binary.Varint(r.b)
+	if w <= 0 {
+		r.bad, r.b = true, nil
+		return 0
+	}
+	r.b = r.b[w:]
+	return n
 }
 
 // waitToken decodes tok, nil for "", and refuses what Wait refuses before any read.
@@ -162,9 +230,9 @@ func (e *Engine) waitToken(cat *Catalog, tok string) (*token, error) {
 	for _, ev := range t.events {
 		switch {
 		case ev.flags&flagReceipt == 0:
-			return nil, fmt.Errorf("event %s was appended without a receipt: append with dynaflux.Waitable() to wait for it", ev.receipt.EventID)
+			return nil, fmt.Errorf("event %s was appended without a receipt: append with dynaflux.Waitable() to wait for it", keys.EventIDText(ev.id))
 		case ev.flags&flagForeign != 0:
-			return nil, fmt.Errorf("event %s was stored by another region, whose projector writes its receipt", ev.receipt.EventID)
+			return nil, fmt.Errorf("event %s was stored by another region, whose projector writes its receipt", keys.EventIDText(ev.id))
 		}
 	}
 	return t, nil
@@ -189,7 +257,7 @@ func (e *Engine) Wait(ctx context.Context, cat *Catalog, tok string, timeout tim
 	deadline := time.Now().Add(timeout)
 	missing := make([]meta.ReceiptKey, len(t.events))
 	for i, ev := range t.events {
-		missing[i] = ev.receipt
+		missing[i] = ev.receipt()
 	}
 	for n := 0; ; n++ {
 		stored, rerr := m.Receipts(ctx, t.stream, missing)

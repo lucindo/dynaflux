@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime
+package fluxruntime
 
 import (
 	"context"
@@ -91,10 +91,10 @@ func newBackfill(c *engine.Catalog, e env, p backfillParts, log *slog.Logger) (*
 func (f *backfillFn) Invoke(ctx context.Context, payload []byte) ([]byte, error) {
 	var ev backfillEvent
 	if err := json.Unmarshal(payload, &ev); err != nil {
-		return nil, f.fail(ctx, ev, fmt.Errorf("runtime: decode the event: %w", err))
+		return nil, f.fail(ctx, ev, fmt.Errorf("fluxruntime: decode the event: %w", err))
 	}
 	if ev.Job == "" || ev.Attempt < 1 || ev.Execution == "" {
-		return nil, f.fail(ctx, ev, fmt.Errorf("runtime: the event %s lacks a job, an attempt or an execution", payload))
+		return nil, f.fail(ctx, ev, fmt.Errorf("fluxruntime: the event %s lacks a job, an attempt or an execution", payload))
 	}
 	account, err := invokedAccount(ctx)
 	if err != nil {
@@ -127,11 +127,11 @@ func (f *backfillFn) fail(ctx context.Context, ev backfillEvent, err error) erro
 func invokedAccount(ctx context.Context) (string, error) {
 	lc, ok := lambdacontext.FromContext(ctx)
 	if !ok {
-		return "", errors.New("runtime: the invocation has no Lambda context")
+		return "", errors.New("fluxruntime: the invocation has no Lambda context")
 	}
 	parts := strings.Split(lc.InvokedFunctionArn, ":")
 	if len(parts) < 6 || parts[4] == "" {
-		return "", fmt.Errorf("runtime: the invoked function's ARN %q names no account", lc.InvokedFunctionArn)
+		return "", fmt.Errorf("fluxruntime: the invoked function's ARN %q names no account", lc.InvokedFunctionArn)
 	}
 	return parts[4], nil
 }

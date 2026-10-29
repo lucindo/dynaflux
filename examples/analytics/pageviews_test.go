@@ -75,8 +75,8 @@ func TestAppendPageViewOutsideWindow(t *testing.T) {
 		if _, err := c.AppendPageView(t.Context(), old); !errors.Is(err, dynaflux.ErrOutsideWindow) {
 			t.Errorf("AppendPageView of an event 31 days old: got %v, want ErrOutsideWindow", err)
 		}
-		if err := c.ImportPageViews(t.Context(), []flux.PageView{old}); err != nil {
-			t.Errorf("ImportPageViews of an event 31 days old: %v", err)
+		if _, err := c.AppendPageViewBatch(t.Context(), []flux.PageView{old}, dynaflux.AsImport()); err != nil {
+			t.Errorf("AppendPageViewBatch with AsImport of an event 31 days old: %v", err)
 		}
 	})
 }

@@ -69,7 +69,6 @@ func streamGoNames(d *decl, s *sql.CreateStream) []goName {
 		d.goName(n.Append, "the append function"+of),
 		d.goName(n.AppendBatch, "the batch append function"+of),
 		d.goName(n.Read, "the read function"+of),
-		d.goName(n.Import, "the import function"+of),
 		d.goName(n.Key, "the key type"+of),
 	}
 }

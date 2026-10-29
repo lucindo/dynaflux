@@ -404,7 +404,10 @@ func TestDevRestart(t *testing.T) {
 	}
 	s.waitLive(r)
 
-	oracle := access.Get().StoreEngine(fluxtest.NewStore(t, fluxgen.LoadCatalog(string(s.data))))
+	oracle, err := access.Get().Bind(fluxtest.NewStore(t, fluxgen.LoadCatalog(string(s.data))), s.cat)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, v := range slices.Concat(firstViews(), more) {
 		devAppend(t, oracle, s.cat, "page_views", v.values(t))
 	}

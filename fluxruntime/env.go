@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime
+package fluxruntime
 
 import (
 	"fmt"
@@ -43,17 +43,17 @@ type env struct {
 // readEnv reads the function's variables with getenv and checks them against cat.
 func readEnv(cat *catalog.Catalog, getenv func(string) string) (env, error) {
 	if getenv(envRuntimeAPI) == "" {
-		return env{}, fmt.Errorf("runtime: %s isn't set: the runtime binary runs only on AWS Lambda", envRuntimeAPI)
+		return env{}, fmt.Errorf("fluxruntime: %s isn't set: the runtime binary runs only on AWS Lambda", envRuntimeAPI)
 	}
 	mode := getenv(catalog.EnvMode)
 	switch mode {
 	case catalog.EnvModeProjector, catalog.EnvModeSetup, catalog.EnvModeQuery, catalog.EnvModeBackfill:
 	default:
-		return env{}, fmt.Errorf("runtime: %s is %q; want %s, %s, %s or %s", catalog.EnvMode, mode,
+		return env{}, fmt.Errorf("fluxruntime: %s is %q; want %s, %s, %s or %s", catalog.EnvMode, mode,
 			catalog.EnvModeProjector, catalog.EnvModeSetup, catalog.EnvModeQuery, catalog.EnvModeBackfill)
 	}
 	if s := getenv(catalog.EnvStore); s != cat.Store {
-		return env{}, fmt.Errorf("runtime: %s is %q, but the catalog's store is %s: deploy the templates and the function "+
+		return env{}, fmt.Errorf("fluxruntime: %s is %q, but the catalog's store is %s: deploy the templates and the function "+
 			"from the same dynaflux generate", catalog.EnvStore, s, cat.Store)
 	}
 	if mode == catalog.EnvModeQuery {
@@ -69,22 +69,22 @@ func readEnv(cat *catalog.Catalog, getenv func(string) string) (env, error) {
 		logLevel:      logLevel(getenv(envLogLevel)),
 	}
 	if !catalog.ValidPrefix(e.prefix) {
-		return env{}, fmt.Errorf("runtime: %s is %q; use lowercase letters, digits and -, starting with a letter "+
+		return env{}, fmt.Errorf("fluxruntime: %s is %q; use lowercase letters, digits and -, starting with a letter "+
 			"and ending with -, such as prod-, or \"\" for none", catalog.EnvPrefix, e.prefix)
 	}
 	if e.region == "" {
-		return env{}, fmt.Errorf("runtime: %s isn't set", envRegion)
+		return env{}, fmt.Errorf("fluxruntime: %s isn't set", envRegion)
 	}
 	// aws-lambda-go runs this many invocations at once in one process (Lambda Managed
 	// Instances), which AWS doesn't document to freeze as on-demand Lambda does (ADR 0010).
 	if n, err := strconv.Atoi(getenv(envMaxConcurrency)); err == nil && n > 1 && mode == catalog.EnvModeProjector {
-		return env{}, fmt.Errorf("runtime: %s is %d: the projector needs on-demand Lambda, one invocation per process",
+		return env{}, fmt.Errorf("fluxruntime: %s is %d: the projector needs on-demand Lambda, one invocation per process",
 			envMaxConcurrency, n)
 	}
 	if mode == catalog.EnvModeBackfill {
 		mb, err := strconv.Atoi(getenv(envMemory))
 		if err != nil || mb <= 0 {
-			return env{}, fmt.Errorf("runtime: %s is %q, not the function's memory in MB", envMemory, getenv(envMemory))
+			return env{}, fmt.Errorf("fluxruntime: %s is %q, not the function's memory in MB", envMemory, getenv(envMemory))
 		}
 		e.memory = int64(float64(mb) * mebibyte * backfillMemoryShare)
 	}
@@ -100,7 +100,7 @@ func checkCatalogHash(cat *catalog.Catalog, hash string) error {
 		return err
 	}
 	if own := catalog.Hash(data); hash != own {
-		return fmt.Errorf("runtime: %s is %q, but the binary's catalog is %s: deploy query.yaml and the function from "+
+		return fmt.Errorf("fluxruntime: %s is %q, but the binary's catalog is %s: deploy query.yaml and the function from "+
 			"the same dynaflux generate", catalog.EnvCatalogHash, hash, own)
 	}
 	return nil

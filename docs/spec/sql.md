@@ -191,14 +191,19 @@ Rules:
 
 Generated Go names must be unique in the store (DF1207). The check covers every generated
 name: `New`, `Client`, `Catalog`, each event type and its fields, `Append<Event>`,
-`Append<Event>Batch`, `Read<Stream>`, `Import<Stream>`, `<Stream>Key`, and each query with
-its `<Name>Params` and `<Name>Row` and their fields. An event type is the stream name in
+`Append<Event>Batch`, `Read<Stream>`, `<Stream>Key`, and each query with its
+`<Name>Params` and `<Name>Row` and their fields. An event type is the stream name in
 singular CamelCase, and a field is the column name in CamelCase with Go initialisms
 (`user_id` becomes `UserID`), as in sqlc. Code generation (M2) fixes the exact rules, and
 `validate` uses the same ones. So streams `page_view` and `page_views` collide, and
 `-- go:type` resolves it. Every event type also has the fields `EventID`, `EventTime`,
 `IngestTime` and `OriginRegion` for the implicit columns ([§8.3](#83-implicit-columns)), so
 a column such as `event_time_` or `event__id` collides with one of them.
+
+Releases after v1.0 generate new names only for SQL constructs that v1.0 doesn't have, so a
+project that validates never starts to fail DF1207. For the same reason, `Client` never
+gains a method with a fixed name such as `Close`: a query can have any name that matches
+`[A-Z][A-Za-z0-9]*`.
 
 ### 3.3 Keywords
 
@@ -1213,8 +1218,8 @@ differently from reality.
   bound, and at most 5 minutes in the future.
 - Both bounds are inclusive and compared in microseconds. `now()` here is the writer's clock
   at append time, in UTC (Dev 1).
-- An append outside the window fails with a run-time error. `dynaflux import` and the
-  generated `Import<Stream>` functions skip the window, but not the range in
+- An append outside the window fails with a run-time error. `dynaflux import` and appends
+  with `dynaflux.AsImport()` skip the window, but not the range in
   [§4.3](#43-value-restrictions).
 - The window keeps bad clocks from poisoning `argMax` and creating far-future buckets.
   There's no past bound by default because retention counts from `ingest_time`, so late
@@ -1400,8 +1405,8 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
     fails with a transient error that names the version and the row.
   - An evaluation error in a `SYNC` view, or a transaction over DynamoDB's 4 MB limit,
     fails the append with a run-time error, and nothing is written.
-  - `dynaflux import` and the generated `Import<Stream>` functions never apply `SYNC`
-    views: the projector applies the events they write.
+  - `dynaflux import` and appends with `dynaflux.AsImport()` never apply `SYNC` views: the
+    projector applies the events they write.
   - Queries over a `SYNC` view use strongly consistent reads, which cost twice as much. A
     query sees the append at once only in the region that accepted it; other regions see
     it when their projector applies it.

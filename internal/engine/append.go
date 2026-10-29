@@ -41,6 +41,7 @@ type Appended struct {
 	// Stored is the event stored at Key, which [Engine.Token] names: this call's, or with
 	// ErrDuplicate the one stored before. Nil with any other error.
 	Stored store.Item
+	token  tokenEvent // how a token names Stored
 }
 
 // Append appends events to stream, each with its own conditional write, and returns their
@@ -105,7 +106,23 @@ func (e *Engine) Append(ctx context.Context, cat *Catalog, stream string, events
 		}
 	}
 	s.results(out, first, items, stored)
+	e.tokenEvents(stream, out)
 	return out, nil
+}
+
+// tokenEvents sets how a token names each event of out that is stored. Only an event that
+// Append found stored can fail, which then fails that event: Append wrote the others.
+func (e *Engine) tokenEvents(stream string, out []Appended) {
+	for i := range out {
+		if out[i].Stored == nil {
+			continue
+		}
+		var err error
+		if out[i].token, err = e.tokenEvent(out[i].Stored); err != nil {
+			out[i].Err = fmt.Errorf("dynaflux: append to %s: the event stored at its key: %w", stream, err)
+			out[i].Stored = nil
+		}
+	}
 }
 
 // results completes out, the results of an Append whose events are items: the event that
@@ -202,7 +219,8 @@ func (e *Engine) event(s *stream, vals []expr.Value, now int64, w window) (store
 			return nil, store.Key{}, fmt.Errorf("dynaflux: append to %s: the event doesn't decode: %w", s.Def.Name, err)
 		}
 		if size := s.archive.MaxSize(decoded); size > archive.MaxRecordSize {
-			return nil, store.Key{}, &ArchiveSizeError{Stream: s.Def.Name, Size: size}
+			return nil, store.Key{}, fmt.Errorf("dynaflux: append to %s: %w: the event's archive record can reach %d bytes, over Firehose's record limit of %d",
+				s.Def.Name, ErrInvalidValue, size, archive.MaxRecordSize)
 		}
 	}
 	return it, k, nil

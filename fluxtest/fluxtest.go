@@ -51,56 +51,80 @@ const (
 	region = "local"
 )
 
-// NewStore returns an empty in-memory store for the catalog of a generated client, such as
-// flux.Catalog. It fails the test when the catalog can't be loaded, and when a view's
-// breaker opens.
-func NewStore(tb testing.TB, cat *dynaflux.Catalog) *dynaflux.Store {
+// NewStore returns an empty in-memory store for the catalogs of generated clients, such as
+// flux.Catalog. Like a [dynaflux.Store] that [dynaflux.Open] returns, it serves every catalog
+// given; a call through any other catalog fails before it writes. It fails the test when a
+// catalog can't be loaded, when two catalogs are of one store, and when a view's breaker
+// opens.
+func NewStore(tb testing.TB, cat *dynaflux.Catalog, more ...*dynaflux.Catalog) *dynaflux.Store {
 	tb.Helper()
-	c, err := access.Get().Catalog(cat)
-	if err != nil {
-		tb.Fatalf("fluxtest: %v", err)
-		return nil
-	}
 	b := mem.New()
-	naming := catalog.Naming{Store: c.Catalog().Store}
-	m := meta.New(b, naming.MetaTable())
-	if err = m.SetLive(tb.Context(), c.Catalog()); err != nil {
-		tb.Fatalf("fluxtest: %v", err)
-	}
-	p := &projecting{
-		Backend: b,
-		tb:      tb,
-		meta:    m,
-		core:    projector.New(c.Projector(), b, nil, projector.Config{Naming: naming, Region: region}),
-		// The longest invocation the prune window allows.
-		timeout: time.Duration(c.Catalog().PruneWindowSeconds-catalog.LifetimeMarginSeconds) * time.Second,
-		streams: map[string]string{},
-	}
-	for _, s := range c.Catalog().Streams {
-		p.streams[naming.StreamTable(s.Name)] = s.Name
+	p := &projecting{Backend: b, tb: tb, streams: map[string]projectedStream{}}
+	stores := map[string]bool{}
+	for _, dc := range append([]*dynaflux.Catalog{cat}, more...) {
+		c, err := access.Get().Catalog(dc)
+		if err != nil {
+			tb.Fatalf("fluxtest: %v", err)
+			return nil
+		}
+		name := c.Catalog().Store
+		if stores[name] {
+			tb.Fatalf("fluxtest: two catalogs of store %s", name)
+			return nil
+		}
+		stores[name] = true
+		naming := catalog.Naming{Store: name}
+		m := meta.New(b, naming.MetaTable())
+		if err = m.SetLive(tb.Context(), c.Catalog()); err != nil {
+			tb.Fatalf("fluxtest: %v", err)
+			return nil
+		}
+		st := &projectedStore{
+			meta: m,
+			core: projector.New(c.Projector(), b, nil, projector.Config{Naming: naming, Region: region}),
+			// The longest invocation the prune window allows.
+			timeout: time.Duration(c.Catalog().PruneWindowSeconds-catalog.LifetimeMarginSeconds) * time.Second,
+		}
+		for _, s := range c.Catalog().Streams {
+			p.streams[naming.StreamTable(s.Name)] = projectedStream{name: s.Name, store: st}
+		}
 	}
 	e := engine.New(p, engine.Options{
 		Region:  region,
 		Entropy: rand.NewChaCha8([32]byte{}),
 	})
 	s := new(dynaflux.Store)
-	access.Get().InitStore(s, e)
+	access.Get().InitStore(s, e, func(def *catalog.Catalog) error {
+		if !stores[def.Store] {
+			return fmt.Errorf("fluxtest: the Store has no catalog of store %s; pass that Catalog to fluxtest.NewStore", def.Store)
+		}
+		return nil
+	})
 	return s
 }
 
 // projecting projects each event it stores before the write returns, as the change stream's
-// next record. The projector writes to the backend underneath.
+// next record. The projectors write to the backend underneath.
 type projecting struct {
 	store.Backend
 
 	tb      testing.TB
-	meta    *meta.Meta
-	core    *projector.Core
-	timeout time.Duration     // of each projection
-	streams map[string]string // stream table → stream
+	streams map[string]projectedStream // by stream table
 
 	mu  sync.Mutex
 	seq int64 // the last record's sequence number, less 10^20
+}
+
+// projectedStream is a stream of one of the catalogs, and the projector of its store.
+type projectedStream struct {
+	name  string
+	store *projectedStore
+}
+
+type projectedStore struct {
+	meta    *meta.Meta
+	core    *projector.Core
+	timeout time.Duration // of each projection
 }
 
 func (p *projecting) Put(ctx context.Context, table string, it store.Item, c store.Cond) error {
@@ -128,35 +152,35 @@ func (p *projecting) Transact(ctx context.Context, puts []store.TxPut) error {
 }
 
 // project applies one stored event to the views, under the lock, so records reach the
-// projector in sequence order. A failure fails the test; the append succeeded.
-func (p *projecting) project(ctx context.Context, stream string, it store.Item) {
+// projectors in sequence order. A failure fails the test; the append succeeded.
+func (p *projecting) project(ctx context.Context, stream projectedStream, it store.Item) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.seq++
 	// 10^20 + seq: DynamoDB's sequence numbers have at least 21 digits.
 	seq := fmt.Sprintf("1%020d", p.seq)
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.timeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stream.store.timeout)
 	defer cancel()
-	res, err := p.core.Handle(ctx, projector.Batch{
-		Stream:  stream,
+	res, err := stream.store.core.Handle(ctx, projector.Batch{
+		Stream:  stream.name,
 		Unit:    unit,
 		Records: []projector.Record{{Op: projector.Insert, Seq: seq, New: it}},
 	})
 	if err != nil {
-		p.tb.Errorf("fluxtest: project an event of %s: %v", stream, err)
+		p.tb.Errorf("fluxtest: project an event of %s: %v", stream.name, err)
 		return
 	}
 	if res.FailedSeq != "" {
-		p.tb.Errorf("fluxtest: project an event of %s: %v", stream, res.RowErr)
+		p.tb.Errorf("fluxtest: project an event of %s: %v", stream.name, res.RowErr)
 	}
 	if len(res.Stats.Broken) > 0 {
-		p.broken(ctx, res.Stats.Broken)
+		p.broken(ctx, stream.store.meta, res.Stats.Broken)
 	}
 }
 
 // broken fails the test with the failure that broke each version.
-func (p *projecting) broken(ctx context.Context, versions []string) {
-	states, err := p.meta.ViewStates(ctx)
+func (p *projecting) broken(ctx context.Context, m *meta.Meta, versions []string) {
+	states, err := m.ViewStates(ctx)
 	if err != nil {
 		p.tb.Errorf("fluxtest: views %v broke: %v", versions, err)
 		return

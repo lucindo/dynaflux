@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"bytes"
@@ -20,10 +20,10 @@ import (
 	"github.com/aws/aws-lambda-go/cfn"
 	"github.com/aws/aws-lambda-go/lambdacontext"
 
+	"github.com/lucindo/dynaflux/fluxruntime"
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/setup"
 	"github.com/lucindo/dynaflux/internal/store/mem"
-	"github.com/lucindo/dynaflux/runtime"
 )
 
 const (
@@ -185,7 +185,7 @@ func TestSetupReplies(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			aws := &setupAWS{}
-			fn := runtime.NewSetup(&setup.Handler{DynamoDB: aws, Glue: aws, Athena: aws}, io.Discard)
+			fn := fluxruntime.NewSetup(&setup.Handler{DynamoDB: aws, Glue: aws, Athena: aws}, io.Discard)
 			r := newReplies(t)
 			reason, err := fn(t.Context(), cfnEvent(t, tt.requestType, tt.resourceType, tt.logical, tt.old, tt.props, r.url()))
 			if reason != "" || err != nil {
@@ -209,7 +209,7 @@ func TestSetupArchiveModeReadsTheOldProperties(t *testing.T) {
 	if err := m.ApplyArchiveModes(t.Context(), nil, map[string]meta.ArchiveMode{"clicks": meta.ArchiveOff}, true, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	fn := runtime.NewSetup(&setup.Handler{Meta: b}, io.Discard)
+	fn := fluxruntime.NewSetup(&setup.Handler{Meta: b}, io.Discard)
 	r := newReplies(t)
 	ev := cfnEvent(t, "Update", setup.TypeArchiveMode, "ArchiveMode", "prod-analytics-meta/archive-mode", props, r.url())
 	ev.OldResourceProperties["Streams"] = map[string]any{"clicks": "off"}
@@ -227,7 +227,7 @@ func TestSetupArchiveModeReadsTheOldProperties(t *testing.T) {
 func TestSetupFailedCreate(t *testing.T) {
 	t.Parallel()
 	aws := &setupAWS{err: errors.New("describe stream table: connection reset")}
-	fn := runtime.NewSetup(&setup.Handler{DynamoDB: aws}, io.Discard)
+	fn := fluxruntime.NewSetup(&setup.Handler{DynamoDB: aws}, io.Discard)
 	r := newReplies(t)
 	if reason, err := fn(t.Context(), cfnEvent(t, "Create", setup.TypeStreamARN, "LookupClicks", "", lookupProps, r.url())); reason != "" || err != nil {
 		t.Errorf("got %q, %v; want the reply sent", reason, err)
@@ -260,7 +260,7 @@ func TestSetupReplyFits(t *testing.T) {
 			t.Parallel()
 			aws := &setupAWS{err: errors.New(long)}
 			var logs bytes.Buffer
-			fn := runtime.NewSetup(&setup.Handler{DynamoDB: aws}, &logs)
+			fn := fluxruntime.NewSetup(&setup.Handler{DynamoDB: aws}, &logs)
 			r := newReplies(t)
 			ctx := lambdacontext.NewContext(t.Context(), &lambdacontext.LambdaContext{AwsRequestID: lambdaRequestID})
 			if _, err := fn(ctx, cfnEvent(t, tt.requestType, setup.TypeStreamARN, "LookupClicks", tt.old, lookupProps, r.url())); err != nil {
@@ -295,7 +295,7 @@ func TestSetupReplyFits(t *testing.T) {
 func TestSetupRepliesBeforeDeadline(t *testing.T) {
 	t.Parallel()
 	aws := &setupAWS{block: true}
-	fn := runtime.NewSetup(&setup.Handler{DynamoDB: aws}, io.Discard)
+	fn := fluxruntime.NewSetup(&setup.Handler{DynamoDB: aws}, io.Discard)
 	r := newReplies(t)
 	deadline := time.Now().Add(30*time.Second + 200*time.Millisecond)
 	ctx, cancel := context.WithDeadline(t.Context(), deadline)
@@ -319,7 +319,7 @@ func TestSetupRedactsReplyURL(t *testing.T) {
 	url := r.url()
 	r.srv.Close()
 	aws := &setupAWS{}
-	fn := runtime.NewSetup(&setup.Handler{DynamoDB: aws}, io.Discard)
+	fn := fluxruntime.NewSetup(&setup.Handler{DynamoDB: aws}, io.Discard)
 	reason, err := fn(t.Context(), cfnEvent(t, "Create", setup.TypeStreamARN, "LookupClicks", "", lookupProps, url))
 	path, _, _ := strings.Cut(url, "?")
 	if err == nil || reason != err.Error() || !strings.Contains(reason, `"`+path+`"`) {
@@ -337,7 +337,7 @@ func TestSetupRedactsReplyURL(t *testing.T) {
 func TestSetupPanic(t *testing.T) {
 	t.Parallel()
 	aws := &setupAWS{panics: true}
-	fn := runtime.NewSetup(&setup.Handler{DynamoDB: aws}, io.Discard)
+	fn := fluxruntime.NewSetup(&setup.Handler{DynamoDB: aws}, io.Discard)
 	r := newReplies(t)
 	func() {
 		defer func() {

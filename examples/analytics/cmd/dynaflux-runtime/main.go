@@ -7,13 +7,13 @@ package main
 import (
 	"log"
 
-	"github.com/lucindo/dynaflux/runtime"
+	"github.com/lucindo/dynaflux/fluxruntime"
 
 	"github.com/lucindo/dynaflux/examples/analytics/internal/flux"
 )
 
 func main() {
-	if err := runtime.Run(flux.Catalog); err != nil {
+	if err := fluxruntime.Run(flux.Catalog); err != nil {
 		log.Fatal(err)
 	}
 }

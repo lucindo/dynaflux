@@ -185,3 +185,17 @@ func decodeBase32(s string, n int) ([]byte, bool) {
 	}
 	return out, true
 }
+
+// EventIDBytes returns the 16 bytes that the event_id id encodes, and false when id isn't
+// 26 characters of base32.
+func EventIDBytes(id string) ([eventHashLen]byte, bool) {
+	var b [eventHashLen]byte
+	d, ok := decodeBase32(id, eventHashLen)
+	copy(b[:], d)
+	return b, ok
+}
+
+// EventIDText returns the event_id whose bytes are b, as [EventIDBytes] reads it.
+func EventIDText(b [eventHashLen]byte) string {
+	return string(appendBase32(make([]byte, 0, eventIDLen), b[:]))
+}

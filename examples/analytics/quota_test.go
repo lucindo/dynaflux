@@ -79,3 +79,25 @@ func TestQuotaUsedNotFound(t *testing.T) {
 		}
 	})
 }
+
+// An import skips the SYNC view quota_usage in its transaction, so only the projector
+// applies it: with Waitable, its token makes QuotaUsed wait until it has. fluxtest's
+// projector runs before the append returns, so the wait ends at once.
+func TestImportWaitsForTheProjector(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		c := flux.New(fluxtest.NewStore(t, flux.Catalog))
+		tok, err := c.AppendAPICallBatch(t.Context(), []flux.APICall{{
+			AccountID: "acme", Endpoint: "/search", Units: 5,
+			RequestID: requestID(t, "6f1c2b8e-4d3a-4b5c-9e7f-0a1b2c3d4e5f"), EventTime: start.Add(-time.Hour),
+		}}, dynaflux.AsImport(), dynaflux.Waitable())
+		if err != nil || tok.IsZero() {
+			t.Fatalf("import = %v, %v; want a token", tok, err)
+		}
+		got, err := c.QuotaUsed(t.Context(), flux.QuotaUsedParams{AccountID: "acme", At: start.Add(-time.Hour)},
+			dynaflux.WaitFor(tok, time.Second))
+		if want := (flux.QuotaUsedRow{UsedUnits: 5, Calls: 1}); err != nil || got != want || !time.Now().Equal(start) {
+			t.Errorf("QuotaUsed after the wait = %+v, %v at %v; want %+v at once", got, err, time.Now(), want)
+		}
+	})
+}

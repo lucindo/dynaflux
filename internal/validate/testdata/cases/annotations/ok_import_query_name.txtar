@@ -1,0 +1,21 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+No generated method imports into a stream, since an append takes dynaflux.AsImport(), so a
+query can be named ImportPageViews.
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String
+)
+PRIMARY KEY (user_id);
+
+CREATE MATERIALIZED VIEW page_counts
+ORDER BY (page)
+AS SELECT page, count() AS views
+FROM page_views
+GROUP BY page;
+
+-- name: ImportPageViews :one
+SELECT views FROM page_counts WHERE page = {page:String};
+-- want --

@@ -3,7 +3,7 @@
 
 //go:build integration
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"context"
@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
 	fh "github.com/aws/aws-sdk-go-v2/service/firehose"
 
+	"github.com/lucindo/dynaflux/fluxruntime"
 	"github.com/lucindo/dynaflux/internal/archive/firehose"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/catalog/catalogtest"
@@ -31,7 +32,6 @@ import (
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/store"
 	"github.com/lucindo/dynaflux/internal/store/dynamo"
-	"github.com/lucindo/dynaflux/runtime"
 )
 
 // These tests check SYNC appends and waits against the projector that Run serves, on
@@ -80,8 +80,8 @@ func newSyncRig(t *testing.T) *syncRig {
 	r.b = engine.New(r.backend, engine.Options{Region: otherRegion, Prefix: r.naming.Prefix})
 	fake := newFakeFirehose(t)
 	sender := firehose.SDK{Client: fh.NewFromConfig(cfg, func(o *fh.Options) { o.BaseEndpoint = &fake.url })}
-	env := runtime.Env{Region: emulatortest.Region, Prefix: r.naming.Prefix, ArchiveSchema: s.fingerprint}
-	r.invoke = runtime.NewProjector(s.cat, env, r.backend, sender, &logBuffer{})
+	env := fluxruntime.Env{Region: emulatortest.Region, Prefix: r.naming.Prefix, ArchiveSchema: s.fingerprint}
+	r.invoke = fluxruntime.NewProjector(s.cat, env, r.backend, sender, &logBuffer{})
 	out, err := db.DescribeTable(t.Context(), &dynamodb.DescribeTableInput{TableName: new(r.naming.StreamTable(apiCalls))})
 	if err != nil {
 		t.Fatal(err)
@@ -257,8 +257,9 @@ func TestWaitForReceiptOfTheProjector(t *testing.T) {
 	t.Parallel()
 	r := newSyncRig(t)
 	at := time.Now().UTC()
-	ev := stored(t, r.a, r.s.cat, engine.AppendMode{Receipt: true}, at, apiCall{"acct-a", "/search", "req-1", 4})[0].Stored
-	tok := r.a.Token(apiCalls, []store.Item{ev})
+	res := stored(t, r.a, r.s.cat, engine.AppendMode{Receipt: true}, at, apiCall{"acct-a", "/search", "req-1", 4})
+	ev := res[0].Stored
+	tok := r.a.Token(apiCalls, res)
 	if err := r.a.Wait(t.Context(), r.s.cat, tok, 100*time.Millisecond); !errors.Is(err, engine.ErrWaitTimeout) {
 		t.Fatalf("Wait before the projector ran: %v, want ErrWaitTimeout", err)
 	}

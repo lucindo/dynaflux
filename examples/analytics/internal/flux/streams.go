@@ -37,19 +37,31 @@ type APICallsKey struct {
 // AppendAPICall appends ev to stream api_calls.
 // When another append stored an event with the same PRIMARY KEY, event_time and
 // DEDUP BY values, it returns that event's Token with dynaflux.ErrDuplicate.
+// The stream's ACCEPT window refuses an event_time more than 5 MINUTE after
+// the writer's clock with dynaflux.ErrOutsideWindow.
+// The append updates the SYNC view quota_usage in its transaction: a query sees the
+// event at once, and an evaluation error fails the append with dynaflux.ErrEvaluation.
+// With dynaflux.AsImport(), the projector applies the event to SYNC views instead, as
+// to ASYNC ones, and an evaluation error breaks the view version.
 func (c *Client) AppendAPICall(ctx context.Context, ev APICall, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvent(ctx, c.store, Catalog, "api_calls", ev.fields(), opts...)
 }
 
 // AppendAPICallBatch appends evs to stream api_calls, each event as its own write.
-// The Token covers every event stored, by this call or before it. When an event
-// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
-// each event this call stored.
+// The Token covers every event stored, by this call or before it; dynaflux.WaitFor
+// refuses a Token of more than 1,000 events. When an event fails, the error is a
+// *dynaflux.BatchError whose Errs line up with evs, nil for each event this call
+// stored.
+// The stream's ACCEPT window refuses an event_time more than 5 MINUTE after
+// the writer's clock with dynaflux.ErrOutsideWindow.
+// Each event's transaction updates the SYNC view quota_usage: a query sees the event
+// at once, and an evaluation error fails the event with dynaflux.ErrEvaluation.
+// With dynaflux.AsImport(), the projector applies the events to SYNC views instead, as
+// to ASYNC ones, and an evaluation error breaks the view version.
 // A retried batch reports the events it stored before as dynaflux.ErrDuplicate, so
 // check each event rather than the whole error:
 //
-//	var be *dynaflux.BatchError
-//	if errors.As(err, &be) {
+//	if be, ok := errors.AsType[*dynaflux.BatchError](err); ok {
 //		for i, e := range be.Errs {
 //			if e != nil && !errors.Is(e, dynaflux.ErrDuplicate) {
 //				// evs[i] was not stored
@@ -61,17 +73,12 @@ func (c *Client) AppendAPICallBatch(ctx context.Context, evs []APICall, opts ...
 }
 
 // ReadAPICalls returns the events of stream api_calls with the PRIMARY KEY value
-// key, in (event_time, event_id) order.
+// key, in (event_time, event_id) order. It yields at most one error, and then stops.
+// Its reads are eventually consistent: an event appended a moment before may be
+// missing.
 // It reads the stream's log window (2 DAY): older events are only in the archive.
 func (c *Client) ReadAPICalls(ctx context.Context, key APICallsKey, opts ...dynaflux.ReadOption) iter.Seq2[APICall, error] {
 	return fluxgen.ReadEvents(ctx, c.store, Catalog, "api_calls", key.fields(), (*APICall).fields, opts...)
-}
-
-// ImportAPICalls appends evs to stream api_calls as AppendAPICallBatch does, but
-// without the ACCEPT window, to load past events.
-// A retry reports the events stored before as dynaflux.ErrDuplicate.
-func (c *Client) ImportAPICalls(ctx context.Context, evs []APICall, opts ...dynaflux.AppendOption) error {
-	return fluxgen.ImportEvents(ctx, c.store, Catalog, "api_calls", evs, (*APICall).fields, opts...)
 }
 
 // fields returns pointers to the event's fields in catalog order: the declared columns,
@@ -116,31 +123,32 @@ type MemberEventsKey struct {
 }
 
 // AppendMemberEvent appends ev to stream member_events.
+// The stream has no DEDUP BY, so a retried append stores the event again.
+// The stream's ACCEPT window refuses an event_time more than 5 MINUTE after
+// the writer's clock with dynaflux.ErrOutsideWindow.
 func (c *Client) AppendMemberEvent(ctx context.Context, ev MemberEvent, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvent(ctx, c.store, Catalog, "member_events", ev.fields(), opts...)
 }
 
 // AppendMemberEventBatch appends evs to stream member_events, each event as its own write.
-// The Token covers every event stored, by this call or before it. When an event
-// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
-// each event this call stored.
+// The Token covers every event stored, by this call or before it; dynaflux.WaitFor
+// refuses a Token of more than 1,000 events. When an event fails, the error is a
+// *dynaflux.BatchError whose Errs line up with evs, nil for each event this call
+// stored.
+// The stream's ACCEPT window refuses an event_time more than 5 MINUTE after
+// the writer's clock with dynaflux.ErrOutsideWindow.
+// The stream has no DEDUP BY, so a retried batch stores its events again.
 func (c *Client) AppendMemberEventBatch(ctx context.Context, evs []MemberEvent, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvents(ctx, c.store, Catalog, "member_events", evs, (*MemberEvent).fields, opts...)
 }
 
 // ReadMemberEvents returns the events of stream member_events with the PRIMARY KEY value
-// key, in (event_time, event_id) order.
+// key, in (event_time, event_id) order. It yields at most one error, and then stops.
+// Its reads are eventually consistent: an event appended a moment before may be
+// missing.
 // It reads the stream's log window (2 DAY): older events are only in the archive.
 func (c *Client) ReadMemberEvents(ctx context.Context, key MemberEventsKey, opts ...dynaflux.ReadOption) iter.Seq2[MemberEvent, error] {
 	return fluxgen.ReadEvents(ctx, c.store, Catalog, "member_events", key.fields(), (*MemberEvent).fields, opts...)
-}
-
-// ImportMemberEvents appends evs to stream member_events as AppendMemberEventBatch does, but
-// without the ACCEPT window, to load past events.
-// It isn't idempotent: a retry after a partial failure stores again the events that
-// the first call stored, with new event IDs.
-func (c *Client) ImportMemberEvents(ctx context.Context, evs []MemberEvent, opts ...dynaflux.AppendOption) error {
-	return fluxgen.ImportEvents(ctx, c.store, Catalog, "member_events", evs, (*MemberEvent).fields, opts...)
 }
 
 // fields returns pointers to the event's fields in catalog order: the declared columns,
@@ -186,31 +194,34 @@ type PageViewsKey struct {
 }
 
 // AppendPageView appends ev to stream page_views.
+// The stream has no DEDUP BY, so a retried append stores the event again.
+// The stream's ACCEPT window refuses an event_time more than 30 DAY before
+// or 5 MINUTE after the writer's clock with dynaflux.ErrOutsideWindow; append
+// past events with dynaflux.AsImport().
 func (c *Client) AppendPageView(ctx context.Context, ev PageView, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvent(ctx, c.store, Catalog, "page_views", ev.fields(), opts...)
 }
 
 // AppendPageViewBatch appends evs to stream page_views, each event as its own write.
-// The Token covers every event stored, by this call or before it. When an event
-// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
-// each event this call stored.
+// The Token covers every event stored, by this call or before it; dynaflux.WaitFor
+// refuses a Token of more than 1,000 events. When an event fails, the error is a
+// *dynaflux.BatchError whose Errs line up with evs, nil for each event this call
+// stored.
+// The stream's ACCEPT window refuses an event_time more than 30 DAY before
+// or 5 MINUTE after the writer's clock with dynaflux.ErrOutsideWindow; append
+// past events with dynaflux.AsImport().
+// The stream has no DEDUP BY, so a retried batch stores its events again.
 func (c *Client) AppendPageViewBatch(ctx context.Context, evs []PageView, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvents(ctx, c.store, Catalog, "page_views", evs, (*PageView).fields, opts...)
 }
 
 // ReadPageViews returns the events of stream page_views with the PRIMARY KEY value
-// key, in (event_time, event_id) order.
+// key, in (event_time, event_id) order. It yields at most one error, and then stops.
+// Its reads are eventually consistent: an event appended a moment before may be
+// missing.
 // It reads the stream's log window (2 DAY): older events are only in the archive.
 func (c *Client) ReadPageViews(ctx context.Context, key PageViewsKey, opts ...dynaflux.ReadOption) iter.Seq2[PageView, error] {
 	return fluxgen.ReadEvents(ctx, c.store, Catalog, "page_views", key.fields(), (*PageView).fields, opts...)
-}
-
-// ImportPageViews appends evs to stream page_views as AppendPageViewBatch does, but
-// without the ACCEPT window, to load past events.
-// It isn't idempotent: a retry after a partial failure stores again the events that
-// the first call stored, with new event IDs.
-func (c *Client) ImportPageViews(ctx context.Context, evs []PageView, opts ...dynaflux.AppendOption) error {
-	return fluxgen.ImportEvents(ctx, c.store, Catalog, "page_views", evs, (*PageView).fields, opts...)
 }
 
 // fields returns pointers to the event's fields in catalog order: the declared columns,

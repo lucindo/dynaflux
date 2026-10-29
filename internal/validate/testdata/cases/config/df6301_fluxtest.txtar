@@ -1,0 +1,21 @@
+Copyright 2026 The Dynaflux Authors
+SPDX-License-Identifier: Apache-2.0
+
+go.package can't be fluxtest, the Dynaflux package that tests of code that uses the
+generated package import beside it.
+-- dynaflux.yaml --
+store: analytics
+regions: [us-east-1, us-west-2]
+go:
+  package: fluxtest
+-- dynaflux/page_views.sql --
+CREATE STREAM page_views (
+    user_id String,
+    page    String
+)
+PRIMARY KEY (user_id);
+-- want --
+dynaflux.yaml:4:12: error DF6301
+-- want-text --
+dynaflux.yaml:4:12: error DF6301: go.package is "fluxtest": generated code, or code that uses it, imports a package of that name
+  hint: use a short lowercase name such as flux

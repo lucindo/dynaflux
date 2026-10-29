@@ -3,7 +3,7 @@
 
 //go:build unix
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"context"

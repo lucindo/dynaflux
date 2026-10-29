@@ -116,6 +116,12 @@ type streamModel struct {
 	Columns   []field
 	KeyFields []field
 	Dedup     bool
+	// Sync names the views with a SYNC version that reads the stream, such as
+	// "view quota_usage" or "views a and b"; "" for none.
+	Sync string
+	// AcceptPast and AcceptFuture are the ACCEPT window's bounds before and after the
+	// writer's clock, such as "30 DAY"; AcceptPast is "" for none.
+	AcceptPast, AcceptFuture string
 	// Retention is the LOG RETENTION period, or "" for FOREVER.
 	Retention string
 	// Fields are the event's field names in catalog order: declared, then implicit.
@@ -145,7 +151,7 @@ func newModel(cat *catalog.Catalog, o Options) (*model, error) {
 	}
 	m := &model{Package: o.Package, Version: o.Version, Store: cat.Store, CatalogLit: goString(string(data))}
 	for i := range cat.Streams {
-		sm, serr := newStream(&cat.Streams[i])
+		sm, serr := newStream(cat, &cat.Streams[i])
 		if serr != nil {
 			return nil, serr
 		}
@@ -163,8 +169,36 @@ func newModel(cat *catalog.Catalog, o Options) (*model, error) {
 	return m, nil
 }
 
-func newStream(s *catalog.Stream) (streamModel, error) {
-	sm := streamModel{Stream: goname.ForStream(s.Name, s.GoType), SQLName: s.Name, Dedup: len(s.DedupBy) > 0}
+// syncViews names the views with a SYNC version over stream, as streamModel.Sync does.
+func syncViews(cat *catalog.Catalog, stream string) string {
+	var names []string
+	for _, v := range cat.Views {
+		if slices.ContainsFunc(v.Versions, func(vv catalog.ViewVersion) bool {
+			return vv.Mode == catalog.ModeSync && vv.Stream == stream
+		}) {
+			names = append(names, v.Name)
+		}
+	}
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return "view " + names[0]
+	}
+	return "views " + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+}
+
+func newStream(cat *catalog.Catalog, s *catalog.Stream) (streamModel, error) {
+	sm := streamModel{
+		Stream:       goname.ForStream(s.Name, s.GoType),
+		SQLName:      s.Name,
+		Dedup:        len(s.DedupBy) > 0,
+		Sync:         syncViews(cat, s.Name),
+		AcceptFuture: s.Accept.Future.String(),
+	}
+	if s.Accept.Past != nil {
+		sm.AcceptPast = s.Accept.Past.String()
+	}
 	if p, ok := s.LogRetention.Period(); ok {
 		text, err := p.MarshalText()
 		if err != nil {

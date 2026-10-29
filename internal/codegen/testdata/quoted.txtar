@@ -36,7 +36,8 @@ import "github.com/lucindo/dynaflux"
 // Regenerate it with the version in go.mod: go tool dynaflux generate.
 const _ = dynaflux.GeneratedCodeVersion1
 
-// Client appends to the streams and runs the named queries of store analytics.
+// Client appends to the streams and runs the named queries of store analytics. It is
+// safe for concurrent use.
 type Client struct {
 	store *dynaflux.Store
 }
@@ -85,31 +86,32 @@ type NotesKey struct {
 }
 
 // AppendNote appends ev to stream notes.
+// The stream has no DEDUP BY, so a retried append stores the event again.
+// The stream's ACCEPT window refuses an event_time more than 5 MINUTE after
+// the writer's clock with dynaflux.ErrOutsideWindow.
 func (c *Client) AppendNote(ctx context.Context, ev Note, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvent(ctx, c.store, Catalog, "notes", ev.fields(), opts...)
 }
 
 // AppendNoteBatch appends evs to stream notes, each event as its own write.
-// The Token covers every event stored, by this call or before it. When an event
-// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
-// each event this call stored.
+// The Token covers every event stored, by this call or before it; dynaflux.WaitFor
+// refuses a Token of more than 1,000 events. When an event fails, the error is a
+// *dynaflux.BatchError whose Errs line up with evs, nil for each event this call
+// stored.
+// The stream's ACCEPT window refuses an event_time more than 5 MINUTE after
+// the writer's clock with dynaflux.ErrOutsideWindow.
+// The stream has no DEDUP BY, so a retried batch stores its events again.
 func (c *Client) AppendNoteBatch(ctx context.Context, evs []Note, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvents(ctx, c.store, Catalog, "notes", evs, (*Note).fields, opts...)
 }
 
 // ReadNotes returns the events of stream notes with the PRIMARY KEY value
-// key, in (event_time, event_id) order.
+// key, in (event_time, event_id) order. It yields at most one error, and then stops.
+// Its reads are eventually consistent: an event appended a moment before may be
+// missing.
 // It reads the stream's log window (2 DAY): older events are only in the archive.
 func (c *Client) ReadNotes(ctx context.Context, key NotesKey, opts ...dynaflux.ReadOption) iter.Seq2[Note, error] {
 	return fluxgen.ReadEvents(ctx, c.store, Catalog, "notes", key.fields(), (*Note).fields, opts...)
-}
-
-// ImportNotes appends evs to stream notes as AppendNoteBatch does, but
-// without the ACCEPT window, to load past events.
-// It isn't idempotent: a retry after a partial failure stores again the events that
-// the first call stored, with new event IDs.
-func (c *Client) ImportNotes(ctx context.Context, evs []Note, opts ...dynaflux.AppendOption) error {
-	return fluxgen.ImportEvents(ctx, c.store, Catalog, "notes", evs, (*Note).fields, opts...)
 }
 
 // fields returns pointers to the event's fields in catalog order: the declared columns,

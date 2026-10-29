@@ -177,7 +177,7 @@ func checkDeclaredNames(t *testing.T, cat *catalog.Catalog, fset *token.FileSet,
 	}
 	for _, s := range cat.Streams {
 		n := goname.ForStream(s.Name, s.GoType)
-		for _, name := range []string{n.Event, n.Key, n.Append, n.AppendBatch, n.Read, n.Import} {
+		for _, name := range []string{n.Event, n.Key, n.Append, n.AppendBatch, n.Read} {
 			known[name] = true
 		}
 	}

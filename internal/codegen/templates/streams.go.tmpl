@@ -48,51 +48,59 @@ type {{.Key}} struct {
 {{- if .Dedup}}
 // When another append stored an event with the same PRIMARY KEY, event_time and
 // DEDUP BY values, it returns that event's Token with dynaflux.ErrDuplicate.
+{{- else}}
+// The stream has no DEDUP BY, so a retried append stores the event again.
+{{- end}}
+{{- template "accept" .}}
+{{- if .Sync}}
+// The append updates the SYNC {{.Sync}} in its transaction: a query sees the
+// event at once, and an evaluation error fails the append with dynaflux.ErrEvaluation.
+// With dynaflux.AsImport(), the projector applies the event to SYNC views instead, as
+// to ASYNC ones, and an evaluation error breaks the view version.
 {{- end}}
 func (c *Client) {{.Append}}(ctx context.Context, ev {{.Event}}, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvent(ctx, c.store, Catalog, "{{.SQLName}}", ev.fields(), opts...)
 }
 
 // {{.AppendBatch}} appends evs to stream {{.SQLName}}, each event as its own write.
-// The Token covers every event stored, by this call or before it. When an event
-// fails, the error is a *dynaflux.BatchError whose Errs line up with evs, nil for
-// each event this call stored.
+// The Token covers every event stored, by this call or before it; dynaflux.WaitFor
+// refuses a Token of more than 1,000 events. When an event fails, the error is a
+// *dynaflux.BatchError whose Errs line up with evs, nil for each event this call
+// stored.
+{{- template "accept" .}}
+{{- if .Sync}}
+// Each event's transaction updates the SYNC {{.Sync}}: a query sees the event
+// at once, and an evaluation error fails the event with dynaflux.ErrEvaluation.
+// With dynaflux.AsImport(), the projector applies the events to SYNC views instead, as
+// to ASYNC ones, and an evaluation error breaks the view version.
+{{- end}}
 {{- if .Dedup}}
 // A retried batch reports the events it stored before as dynaflux.ErrDuplicate, so
 // check each event rather than the whole error:
 //
-//	var be *dynaflux.BatchError
-//	if errors.As(err, &be) {
+//	if be, ok := errors.AsType[*dynaflux.BatchError](err); ok {
 //		for i, e := range be.Errs {
 //			if e != nil && !errors.Is(e, dynaflux.ErrDuplicate) {
 //				// evs[i] was not stored
 //			}
 //		}
 //	}
+{{- else}}
+// The stream has no DEDUP BY, so a retried batch stores its events again.
 {{- end}}
 func (c *Client) {{.AppendBatch}}(ctx context.Context, evs []{{.Event}}, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
 	return fluxgen.AppendEvents(ctx, c.store, Catalog, "{{.SQLName}}", evs, (*{{.Event}}).fields, opts...)
 }
 
 // {{.Read}} returns the events of stream {{.SQLName}} with the PRIMARY KEY value
-// key, in (event_time, event_id) order.
+// key, in (event_time, event_id) order. It yields at most one error, and then stops.
+// Its reads are eventually consistent: an event appended a moment before may be
+// missing.
 {{- if .Retention}}
 // It reads the stream's log window ({{.Retention}}): older events are only in the archive.
 {{- end}}
 func (c *Client) {{.Read}}(ctx context.Context, key {{.Key}}, opts ...dynaflux.ReadOption) iter.Seq2[{{.Event}}, error] {
 	return fluxgen.ReadEvents(ctx, c.store, Catalog, "{{.SQLName}}", key.fields(), (*{{.Event}}).fields, opts...)
-}
-
-// {{.Import}} appends evs to stream {{.SQLName}} as {{.AppendBatch}} does, but
-// without the ACCEPT window, to load past events.
-{{- if .Dedup}}
-// A retry reports the events stored before as dynaflux.ErrDuplicate.
-{{- else}}
-// It isn't idempotent: a retry after a partial failure stores again the events that
-// the first call stored, with new event IDs.
-{{- end}}
-func (c *Client) {{.Import}}(ctx context.Context, evs []{{.Event}}, opts ...dynaflux.AppendOption) error {
-	return fluxgen.ImportEvents(ctx, c.store, Catalog, "{{.SQLName}}", evs, (*{{.Event}}).fields, opts...)
 }
 
 // fields returns pointers to the event's fields in catalog order: the declared columns,
@@ -109,3 +117,13 @@ func (k *{{.Key}}) fields() []any {
 	return []any{ {{- range $i, $f := .KeyFields}}{{if $i}}, {{end}}&k.{{$f.Name}}{{end -}} }
 }
 {{end -}}
+{{- define "accept"}}
+{{- if .AcceptPast}}
+// The stream's ACCEPT window refuses an event_time more than {{.AcceptPast}} before
+// or {{.AcceptFuture}} after the writer's clock with dynaflux.ErrOutsideWindow; append
+// past events with dynaflux.AsImport().
+{{- else}}
+// The stream's ACCEPT window refuses an event_time more than {{.AcceptFuture}} after
+// the writer's clock with dynaflux.ErrOutsideWindow.
+{{- end}}
+{{- end}}

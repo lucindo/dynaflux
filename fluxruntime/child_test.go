@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"bytes"
@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 
 	"github.com/lucindo/dynaflux/fluxgen"
+	"github.com/lucindo/dynaflux/fluxruntime"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/catalog/catalogtest"
 	"github.com/lucindo/dynaflux/internal/emulatortest"
@@ -35,7 +36,6 @@ import (
 	"github.com/lucindo/dynaflux/internal/expr"
 	"github.com/lucindo/dynaflux/internal/setup"
 	"github.com/lucindo/dynaflux/internal/store/mem"
-	"github.com/lucindo/dynaflux/runtime"
 )
 
 // The test binary is also the runtime binary: with childVar set, TestMain serves as the
@@ -50,7 +50,7 @@ const (
 func TestMain(m *testing.M) {
 	switch os.Getenv(childVar) {
 	case childRun:
-		if err := runtime.Run(fluxgen.LoadCatalog(os.Getenv(catalogVar))); err != nil {
+		if err := fluxruntime.Run(fluxgen.LoadCatalog(os.Getenv(catalogVar))); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -313,7 +313,7 @@ func TestRunServesInvocations(t *testing.T) {
 	want := []post{
 		{path: "/2018-06-01/runtime/invocation/req-0/response", body: `{"state":{},"batchItemFailures":[{"itemIdentifier":"` + seq(1) + `"}]}`},
 		{path: "/2018-06-01/runtime/invocation/req-1/response", body: finalReply},
-		{path: "/2018-06-01/runtime/invocation/req-2/error", body: `{"errorMessage":"runtime: the event has records but no shardId: ` +
+		{path: "/2018-06-01/runtime/invocation/req-2/error", body: `{"errorMessage":"fluxruntime: the event has records but no shardId: ` +
 			`the event source mapping needs TumblingWindowInSeconds (ADR 0003)","errorType":"errorString"}`},
 	}
 	for i, p := range posts {
@@ -397,11 +397,11 @@ func TestRunRefusesToStart(t *testing.T) {
 		err  string
 	}{
 		{"not on Lambda", map[string]string{"AWS_LAMBDA_RUNTIME_API": ""},
-			"runtime: AWS_LAMBDA_RUNTIME_API isn't set: the runtime binary runs only on AWS Lambda\n"},
+			"fluxruntime: AWS_LAMBDA_RUNTIME_API isn't set: the runtime binary runs only on AWS Lambda\n"},
 		{"Lambda Managed Instances", map[string]string{"AWS_LAMBDA_MAX_CONCURRENCY": "2"},
-			"runtime: AWS_LAMBDA_MAX_CONCURRENCY is 2: the projector needs on-demand Lambda, one invocation per process\n"},
+			"fluxruntime: AWS_LAMBDA_MAX_CONCURRENCY is 2: the projector needs on-demand Lambda, one invocation per process\n"},
 		{"query function of another catalog", map[string]string{"DYNAFLUX_MODE": "query", "DYNAFLUX_CATALOG_HASH": "0a1b"},
-			`runtime: DYNAFLUX_CATALOG_HASH is "0a1b", but the binary's catalog is ` + catalog.Hash(childCatalog(t)) +
+			`fluxruntime: DYNAFLUX_CATALOG_HASH is "0a1b", but the binary's catalog is ` + catalog.Hash(childCatalog(t)) +
 				": deploy query.yaml and the function from the same dynaflux generate\n"},
 	}
 	for _, tt := range tests {

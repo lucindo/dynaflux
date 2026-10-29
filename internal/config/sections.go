@@ -223,8 +223,8 @@ func goPackageProblem(s string) string {
 		return "it is a Go keyword"
 	case s == "main":
 		return "a main package can't be imported"
-	case s == "dynaflux" || s == "runtime" || s == "log":
-		return "generated code imports a package of that name"
+	case s == "dynaflux" || s == "fluxgen" || s == "fluxruntime" || s == "fluxtest" || s == "log":
+		return "generated code, or code that uses it, imports a package of that name"
 	}
 	return ""
 }

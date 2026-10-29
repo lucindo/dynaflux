@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"bytes"
@@ -13,11 +13,11 @@ import (
 
 	"github.com/aws/aws-lambda-go/lambdacontext"
 
+	"github.com/lucindo/dynaflux/fluxruntime"
 	"github.com/lucindo/dynaflux/internal/backfill"
 	"github.com/lucindo/dynaflux/internal/backfill/awsbackfill"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/meta"
-	"github.com/lucindo/dynaflux/runtime"
 )
 
 const functionARN = "arn:aws:lambda:" + region + ":123456789012:function:app-backfill"
@@ -60,13 +60,13 @@ func newBackfillRig(t *testing.T) *backfillRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.invoke, err = runtime.NewBackfill(r.cat, runtime.Env{Region: region, Memory: 64 << 20}, runtime.BackfillParts{
+	r.invoke, err = fluxruntime.NewBackfill(r.cat, fluxruntime.Env{Region: region, Memory: 64 << 20}, fluxruntime.BackfillParts{
 		Store: r.mem, Units: noUnits{}, Tables: longAgo{}, Lag: noProjectorLag{},
 		Runs: func(bucket string) backfill.Runs {
 			r.buckets = append(r.buckets, bucket)
 			return r.runs
 		},
-		Archive: func(bucket string) runtime.ArchiveReader {
+		Archive: func(bucket string) fluxruntime.ArchiveReader {
 			r.archives = append(r.archives, bucket)
 			return awsbackfill.NewArchive(awsbackfill.Clients{}, catalog.Naming{Store: "app"}, r.cat.Catalog(), bucket)
 		},
@@ -135,11 +135,11 @@ func TestBackfillRefuses(t *testing.T) {
 	tests := []struct {
 		name, event, arn, err string
 	}{
-		{"not JSON", `{"job":`, functionARN, "runtime: decode the event: unexpected end of JSON input"},
+		{"not JSON", `{"job":`, functionARN, "fluxruntime: decode the event: unexpected end of JSON input"},
 		{"no attempt", `{"job":"page_totals@v1","execution":"arn:x"}`, functionARN,
-			`runtime: the event {"job":"page_totals@v1","execution":"arn:x"} lacks a job, an attempt or an execution`},
+			`fluxruntime: the event {"job":"page_totals@v1","execution":"arn:x"} lacks a job, an attempt or an execution`},
 		{"no account", `{"job":"page_totals@v1","attempt":1,"execution":"arn:x"}`, "app-backfill",
-			`runtime: the invoked function's ARN "app-backfill" names no account`},
+			`fluxruntime: the invoked function's ARN "app-backfill" names no account`},
 		{"no job", `{"job":"page_totals@v1","attempt":1,"execution":"arn:x"}`, functionARN,
 			"backfill: page_totals@v1: meta: the version has no job"},
 	}

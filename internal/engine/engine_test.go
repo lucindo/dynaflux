@@ -393,10 +393,8 @@ func TestAppendRejectsEventOverArchiveRecordLimit(t *testing.T) {
 					}
 					return
 				}
-				var ae *engine.ArchiveSizeError
-				if !errors.As(got.Err, &ae) || *ae != (engine.ArchiveSizeError{Stream: "s", Size: tt.size}) ||
-					!errors.Is(got.Err, engine.ErrInvalidValue) || got.Err.Error() != tt.wantErr || stored != 0 {
-					t.Errorf("got %v and %d events stored, want an *ArchiveSizeError for s of %d bytes and none stored", got.Err, stored, tt.size)
+				if !errors.Is(got.Err, engine.ErrInvalidValue) || got.Err.Error() != tt.wantErr || stored != 0 {
+					t.Errorf("got %v and %d events stored, want %q and none stored", got.Err, stored, tt.wantErr)
 				}
 			})
 		})

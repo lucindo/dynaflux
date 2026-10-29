@@ -905,7 +905,7 @@ each region it uses, with the ARN forms of [§9.8](#98-operators)
 
 | Actions | Resources | Condition | For |
 |---------|-----------|-----------|-----|
-| `dynamodb:PutItem` | `table/{base}-stream-{stream}` | | Appends and `Import<Stream>` |
+| `dynamodb:PutItem` | `table/{base}-stream-{stream}` | | Appends, also with `dynaflux.AsImport()` |
 | `dynamodb:Query` | `table/{base}-stream-{stream}` | | `Read<Stream>` and queries over a stream |
 | `dynamodb:GetItem`, `BatchGetItem`, `Query` | `table/{base}-view-{view}-v{N}` | | Queries over a view |
 | `dynamodb:Query` | `table/{base}-meta` | `ForAllValues:StringEquals` on `dynamodb:LeadingKeys`: `view` | Queries over a view, and appends to a stream with a `SYNC` view: both read the versions' states |

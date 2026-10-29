@@ -64,16 +64,16 @@ func TestForStream(t *testing.T) {
 	}{
 		{"page_views", "", goname.Stream{
 			Event: "PageView", Key: "PageViewsKey", Append: "AppendPageView", AppendBatch: "AppendPageViewBatch",
-			Read: "ReadPageViews", Import: "ImportPageViews",
+			Read: "ReadPageViews",
 		}},
 		{"api_calls", "", goname.Stream{
 			Event: "APICall", Key: "APICallsKey", Append: "AppendAPICall", AppendBatch: "AppendAPICallBatch",
-			Read: "ReadAPICalls", Import: "ImportAPICalls",
+			Read: "ReadAPICalls",
 		}},
 		// -- go:type names the event type only; the stream's own name stays in the rest.
 		{"visits", "Hit", goname.Stream{
 			Event: "Hit", Key: "VisitsKey", Append: "AppendHit", AppendBatch: "AppendHitBatch",
-			Read: "ReadVisits", Import: "ImportVisits",
+			Read: "ReadVisits",
 		}},
 	}
 	for _, tt := range tests {

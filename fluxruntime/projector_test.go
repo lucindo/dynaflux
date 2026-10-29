@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"bytes"
@@ -25,6 +25,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/lambdacontext"
 
+	"github.com/lucindo/dynaflux/fluxruntime"
 	"github.com/lucindo/dynaflux/internal/archive"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/catalog/catalogtest"
@@ -34,7 +35,6 @@ import (
 	"github.com/lucindo/dynaflux/internal/meta"
 	"github.com/lucindo/dynaflux/internal/store"
 	"github.com/lucindo/dynaflux/internal/store/mem"
-	"github.com/lucindo/dynaflux/runtime"
 )
 
 // clicksSQL is the test store. Both views count or sum, so they need the fenced handoff,
@@ -108,7 +108,7 @@ func newPendingRig(t *testing.T, cat *engine.Catalog, archiveSchema string) *rig
 	m := mem.New()
 	r := &rig{cat: cat, mem: m, e: engine.New(m, engine.Options{Region: "us-west-2"}), b: &backend{Backend: m}, sender: &sender{},
 		logs: &bytes.Buffer{}}
-	r.invoke = runtime.NewProjector(cat, runtime.Env{Region: region, ArchiveSchema: archiveSchema}, r.b, r.sender, r.logs)
+	r.invoke = fluxruntime.NewProjector(cat, fluxruntime.Env{Region: region, ArchiveSchema: archiveSchema}, r.b, r.sender, r.logs)
 	return r
 }
 
@@ -324,7 +324,7 @@ func refused(t *testing.T, event func(it store.Item) []byte, want string) {
 func TestHandleMissingShard(t *testing.T) {
 	t.Parallel()
 	refused(t, func(it store.Item) []byte { return esmlocal.Event("", streamARN, insert(seq(1), it)) },
-		"runtime: the event has records but no shardId: the event source mapping needs TumblingWindowInSeconds (ADR 0003)")
+		"fluxruntime: the event has records but no shardId: the event source mapping needs TumblingWindowInSeconds (ADR 0003)")
 }
 
 // The projector consumes the stream tables of its store and prefix, and nothing else.
@@ -335,7 +335,7 @@ func TestHandleUnknownTable(t *testing.T) {
 			t.Parallel()
 			arn := strings.Replace(streamARN, streamTable, table, 1)
 			refused(t, func(it store.Item) []byte { return esmlocal.Event(shard, arn, insert(seq(1), it)) },
-				"runtime: "+arn+" isn't the stream of a stream table of store app")
+				"fluxruntime: "+arn+" isn't the stream of a stream table of store app")
 		})
 	}
 }
@@ -345,7 +345,7 @@ func TestHandleUnreadableEvent(t *testing.T) {
 	t.Run("unknown eventName", func(t *testing.T) {
 		t.Parallel()
 		refused(t, func(it store.Item) []byte { return event(record("UPSERT", seq(1), it, nil)) },
-			`runtime: record 100000000000000000001 has eventName "UPSERT"`)
+			`fluxruntime: record 100000000000000000001 has eventName "UPSERT"`)
 	})
 	// A stream of another view type delivers INSERTs without a new image, which every
 	// version would fail to evaluate.
@@ -360,11 +360,11 @@ func TestHandleUnreadableEvent(t *testing.T) {
 				t.Fatal(err)
 			}
 			return event(rec)
-		}, `runtime: record 100000000000000000001 has StreamViewType "KEYS_ONLY": the stream table's stream needs NEW_AND_OLD_IMAGES`)
+		}, `fluxruntime: record 100000000000000000001 has StreamViewType "KEYS_ONLY": the stream table's stream needs NEW_AND_OLD_IMAGES`)
 	})
 	t.Run("not JSON", func(t *testing.T) {
 		t.Parallel()
-		refused(t, func(store.Item) []byte { return []byte(`{"Records":`) }, "runtime: decode the event: unexpected end of JSON input")
+		refused(t, func(store.Item) []byte { return []byte(`{"Records":`) }, "fluxruntime: decode the event: unexpected end of JSON input")
 	})
 }
 
@@ -683,7 +683,7 @@ func TestHandleNoCallAfterCutoff(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newRig(t, compile(t, false), "")
 		b := &slow{Backend: r.mem, delay: 400 * time.Millisecond}
-		invoke := runtime.NewProjector(r.cat, runtime.Env{Region: region}, b, &sender{}, &bytes.Buffer{})
+		invoke := fluxruntime.NewProjector(r.cat, fluxruntime.Env{Region: region}, b, &sender{}, &bytes.Buffer{})
 		var recs []json.RawMessage
 		for i := range 64 {
 			recs = append(recs, insert(seq(i+1), r.click(t, "u", fmt.Sprintf("/%d", i), 100)))

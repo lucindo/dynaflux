@@ -3,7 +3,7 @@
 
 //go:build unix
 
-package runtime
+package fluxruntime
 
 import (
 	"os"

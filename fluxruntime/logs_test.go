@@ -1,13 +1,13 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"strings"
 	"testing"
 
-	"github.com/lucindo/dynaflux/runtime"
+	"github.com/lucindo/dynaflux/fluxruntime"
 )
 
 // A partial failure's log line cuts the rows' errors on a rune boundary, so the line stays
@@ -27,7 +27,7 @@ func TestCut(t *testing.T) {
 		{"é", 1, " …"},
 	}
 	for _, tt := range tests {
-		if got := runtime.Cut(tt.s, tt.n); got != tt.want {
+		if got := fluxruntime.Cut(tt.s, tt.n); got != tt.want {
 			t.Errorf("cut(%q, %d) = %q, want %q", tt.s, tt.n, got, tt.want)
 		}
 	}

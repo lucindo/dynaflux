@@ -3,7 +3,7 @@
 
 //go:build integration
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"bytes"
@@ -33,6 +33,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodbstreams"
 	fh "github.com/aws/aws-sdk-go-v2/service/firehose"
 
+	"github.com/lucindo/dynaflux/fluxruntime"
 	"github.com/lucindo/dynaflux/internal/archive"
 	"github.com/lucindo/dynaflux/internal/archive/firehose"
 	"github.com/lucindo/dynaflux/internal/catalog"
@@ -47,7 +48,6 @@ import (
 	"github.com/lucindo/dynaflux/internal/store"
 	"github.com/lucindo/dynaflux/internal/store/dynamo"
 	"github.com/lucindo/dynaflux/internal/validate"
-	"github.com/lucindo/dynaflux/runtime"
 )
 
 // The suite's streams. Both views of quota_events count and sum, so they need the fenced
@@ -229,8 +229,8 @@ func (r *localRig) function(f faults) *function {
 	cfg := emulatortest.Config(r.t, rec)
 	b := faulty{Backend: dynamo.New(dynamodb.NewFromConfig(cfg)), f: f}
 	firehoseClient := fh.NewFromConfig(cfg, func(o *fh.Options) { o.BaseEndpoint = &r.fh.url })
-	env := runtime.Env{Region: emulatortest.Region, Prefix: prefix, ArchiveSchema: rules.fingerprint}
-	return &function{invoke: runtime.NewProjector(rules.cat, env, b, firehose.SDK{Client: firehoseClient}, r.logs), rec: rec}
+	env := fluxruntime.Env{Region: emulatortest.Region, Prefix: prefix, ArchiveSchema: rules.fingerprint}
+	return &function{invoke: fluxruntime.NewProjector(rules.cat, env, b, firehose.SDK{Client: firehoseClient}, r.logs), rec: rec}
 }
 
 // faulty is a backend with faults' put and query.

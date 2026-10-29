@@ -22,7 +22,6 @@ import (
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/engine"
 	"github.com/lucindo/dynaflux/internal/expr"
-	"github.com/lucindo/dynaflux/internal/store"
 )
 
 // LoadCatalog decodes and compiles the catalog that dynaflux generate embedded. It never
@@ -44,32 +43,29 @@ func AppendEvent(ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, st
 	if err != nil {
 		return dynaflux.Token{}, err
 	}
-	res, err := cl.append(ctx, [][]any{ev}, access.Get().AppendMode(opts))
+	m, err := cl.appendMode(opts)
 	if err != nil {
 		return dynaflux.Token{}, err
 	}
-	r := res[0]
-	if r.Err != nil && !errors.Is(r.Err, dynaflux.ErrDuplicate) {
-		return dynaflux.Token{}, r.Err
+	res, err := cl.append(ctx, [][]any{ev}, m)
+	if err != nil {
+		return dynaflux.Token{}, err
 	}
-	return cl.token([]store.Item{r.Stored}), r.Err
+	if err = res[0].Err; err != nil && !errors.Is(err, dynaflux.ErrDuplicate) {
+		return dynaflux.Token{}, err
+	}
+	return cl.token(res), err
 }
 
 // AppendEvents appends evs, each with its own write. The Token names every event stored, by
 // this call or, for a duplicate, before it. When an event fails, the error is a
 // *dynaflux.BatchError.
 func AppendEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, evs []E, fields func(*E) []any, opts ...dynaflux.AppendOption) (dynaflux.Token, error) {
-	return appendBatch(ctx, s, c, stream, evs, fields, access.Get().AppendMode(opts))
-}
-
-// ImportEvents appends evs as [AppendEvents] does, but without the ACCEPT window.
-func ImportEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, evs []E, fields func(*E) []any, _ ...dynaflux.AppendOption) error {
-	_, err := appendBatch(ctx, s, c, stream, evs, fields, engine.AppendMode{Import: true})
-	return err
-}
-
-func appendBatch[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, evs []E, fields func(*E) []any, m engine.AppendMode) (dynaflux.Token, error) {
 	cl, err := open(s, c, stream, fields(new(E)))
+	if err != nil {
+		return dynaflux.Token{}, err
+	}
+	m, err := cl.appendMode(opts)
 	if err != nil {
 		return dynaflux.Token{}, err
 	}
@@ -81,18 +77,14 @@ func appendBatch[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Cata
 	if err != nil {
 		return dynaflux.Token{}, err
 	}
-	var stored []store.Item
 	errs := make([]error, len(res))
 	var batchErr error
 	for i, r := range res {
 		if errs[i] = r.Err; r.Err != nil {
 			batchErr = &dynaflux.BatchError{Errs: errs}
 		}
-		if r.Err == nil || errors.Is(r.Err, dynaflux.ErrDuplicate) {
-			stored = append(stored, r.Stored)
-		}
 	}
-	return cl.token(stored), batchErr
+	return cl.token(res), batchErr
 }
 
 // ReadEvents yields the events of stream with the PRIMARY KEY values whose fields are key,
@@ -101,17 +93,12 @@ func appendBatch[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Cata
 func ReadEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, key []any, fields func(*E) []any, opts ...dynaflux.ReadOption) iter.Seq2[E, error] {
 	return func(yield func(E, error) bool) {
 		var zero E
-		cl, err := open(s, c, stream, fields(new(E)))
-		var vals []expr.Value
-		if err == nil {
-			vals, err = cl.keyValues(key)
-		}
+		cl, rows, err := read(ctx, s, c, stream, fields(new(E)), key, opts)
 		if err != nil {
 			yield(zero, err)
 			return
 		}
-		from, to := readRange(opts)
-		for row, rerr := range cl.e.Read(ctx, cl.cat, stream, vals, from, to) {
+		for row, rerr := range rows {
 			var ev E
 			if rerr == nil {
 				rerr = scan(cl.cols, row, fields(&ev))
@@ -127,11 +114,33 @@ func ReadEvents[E any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catal
 	}
 }
 
+// read starts a read of stream, whose event fields are ptrs, as ReadEvents's other arguments
+// ask, and returns the rows it yields.
+func read(ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, stream string, ptrs, key []any, opts []dynaflux.ReadOption) (*call, iter.Seq2[[]expr.Value, error], error) {
+	cl, err := open(s, c, stream, ptrs)
+	if err != nil {
+		return nil, nil, err
+	}
+	vals, err := cl.keyValues(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	from, to, err := readRange(opts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dynaflux: read %s: %w", stream, err)
+	}
+	return cl, cl.e.Read(ctx, cl.cat, stream, vals, from, to), nil
+}
+
 // QueryRows runs query with the parameters whose fields are params, and returns its rows.
 func QueryRows[R any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalog, query string, params []any, fields func(*R) []any, opts ...dynaflux.QueryOption) ([]R, error) {
 	qc, err := openQuery(s, c, query, params, fields(new(R)))
 	if err != nil {
 		return nil, err
+	}
+	o, err := access.Get().QueryOptions(opts)
+	if err != nil {
+		return nil, fmt.Errorf("dynaflux: query %s: %w", query, err)
 	}
 	vals := make([]expr.Value, len(params))
 	for i, col := range qc.in {
@@ -139,7 +148,7 @@ func QueryRows[R any](ctx context.Context, s *dynaflux.Store, c *dynaflux.Catalo
 			return nil, err
 		}
 	}
-	rows, err := qc.e.Query(ctx, qc.cat, query, vals, access.Get().QueryOptions(opts))
+	rows, err := qc.e.Query(ctx, qc.cat, query, vals, o)
 	if err != nil {
 		return nil, public(err)
 	}
@@ -208,9 +217,9 @@ func handles(s *dynaflux.Store, c *dynaflux.Catalog) (*engine.Engine, *engine.Ca
 	if err != nil {
 		return nil, nil, err
 	}
-	e := access.Get().StoreEngine(s)
-	if e == nil {
-		return nil, nil, errors.New("dynaflux: the Store is nil or zero; make one with fluxtest.NewStore")
+	e, err := access.Get().Bind(s, cat)
+	if err != nil {
+		return nil, nil, err
 	}
 	return e, cat, nil
 }
@@ -250,6 +259,15 @@ func open(s *dynaflux.Store, c *dynaflux.Catalog, stream string, ptrs []any) (*c
 		return nil, err
 	}
 	return cl, nil
+}
+
+// appendMode returns the mode that opts set for an append to cl's stream.
+func (cl *call) appendMode(opts []dynaflux.AppendOption) (engine.AppendMode, error) {
+	m, err := access.Get().AppendMode(opts)
+	if err != nil {
+		return m, fmt.Errorf("dynaflux: append to %s: %w", cl.stream, err)
+	}
+	return m, nil
 }
 
 // append appends the events whose fields are rows. An event whose values can't be
@@ -311,20 +329,17 @@ func (cl *call) keyValues(ptrs []any) ([]expr.Value, error) {
 	return vals, nil
 }
 
-func (cl *call) token(stored []store.Item) dynaflux.Token {
+// token returns the Token of the events of res that are stored.
+func (cl *call) token(res []engine.Appended) dynaflux.Token {
 	var t dynaflux.Token
-	access.Get().InitToken(&t, cl.e.Token(cl.stream, stored))
+	access.Get().InitToken(&t, cl.e.Token(cl.stream, res))
 	return t
 }
 
-// public returns err with the root package's *ValueError or *ArchiveSizeError in place of
-// the engine's.
+// public returns err with the root package's *ValueError in place of the engine's.
 func public(err error) error {
 	if ve, ok := errors.AsType[*engine.ValueError](err); ok {
 		return &dynaflux.ValueError{Name: ve.Name, Err: ve.Err}
-	}
-	if ae, ok := errors.AsType[*engine.ArchiveSizeError](err); ok {
-		return &dynaflux.ArchiveSizeError{Stream: ae.Stream, Size: ae.Size}
 	}
 	return err
 }

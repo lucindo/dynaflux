@@ -192,12 +192,12 @@ func setScalar(t catalog.Type, v expr.Value, f reflect.Value) error {
 	return nil
 }
 
-// readRange returns the event_time bounds of opts in microseconds, rounded up: an event at
-// a whole microsecond is at or after a time with nanoseconds exactly when it is at or after
-// the next microsecond.
-func readRange(opts []dynaflux.ReadOption) (*int64, *int64) {
-	since, until := access.Get().ReadRange(opts)
-	return ceilMicros(since), ceilMicros(until)
+// readRange returns the event_time bounds of opts in microseconds, rounded up, or the error
+// of a nil option. An event at a whole microsecond is at or after a time with nanoseconds
+// exactly when it is at or after the next microsecond.
+func readRange(opts []dynaflux.ReadOption) (*int64, *int64, error) {
+	since, until, err := access.Get().ReadRange(opts)
+	return ceilMicros(since), ceilMicros(until), err
 }
 
 func ceilMicros(t *time.Time) *int64 {

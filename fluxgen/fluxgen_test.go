@@ -5,6 +5,7 @@ package fluxgen_test
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/lucindo/dynaflux"
 	"github.com/lucindo/dynaflux/fluxgen"
 	"github.com/lucindo/dynaflux/internal/access"
+	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/catalog/catalogtest"
 	"github.com/lucindo/dynaflux/internal/engine"
 	"github.com/lucindo/dynaflux/internal/store"
@@ -111,7 +113,7 @@ func catalogJSON(t *testing.T) string {
 
 func newStore(b store.Backend) *dynaflux.Store {
 	s := new(dynaflux.Store)
-	access.Get().InitStore(s, engine.New(b, engine.Options{Region: "us-east-1"}))
+	access.Get().InitStore(s, engine.New(b, engine.Options{Region: "us-east-1"}), func(*catalog.Catalog) error { return nil })
 	return s
 }
 
@@ -251,7 +253,6 @@ func helperErrors(t *testing.T, s *dynaflux.Store, cat *dynaflux.Catalog) map[st
 	evs := []apiCall{ev}
 	_, appendErr := fluxgen.AppendEvent(t.Context(), s, cat, "api_calls", ev.fields())
 	_, batchErr := fluxgen.AppendEvents(t.Context(), s, cat, "api_calls", evs, (*apiCall).fields)
-	importErr := fluxgen.ImportEvents(t.Context(), s, cat, "api_calls", evs, (*apiCall).fields)
 	key := "acme"
 	var readErr error
 	for _, err := range fluxgen.ReadEvents(t.Context(), s, cat, "api_calls", []any{&key}, (*apiCall).fields) {
@@ -261,7 +262,7 @@ func helperErrors(t *testing.T, s *dynaflux.Store, cat *dynaflux.Catalog) map[st
 	_, rowsErr := fluxgen.QueryRows(t.Context(), s, cat, "Calls", params.fields(), (*callsRow).fields)
 	_, rowErr := fluxgen.QueryRow(t.Context(), s, cat, "Calls", params.fields(), (*callsRow).fields)
 	return map[string]error{
-		"AppendEvent": appendErr, "AppendEvents": batchErr, "ImportEvents": importErr, "ReadEvents": readErr,
+		"AppendEvent": appendErr, "AppendEvents": batchErr, "ReadEvents": readErr,
 		"QueryRows": rowsErr, "QueryRow": rowErr,
 	}
 }
@@ -299,7 +300,7 @@ func TestStoreNotMadeByNewStore(t *testing.T) {
 	for name, s := range map[string]*dynaflux.Store{"nil": nil, "zero": new(dynaflux.Store)} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			const want = "dynaflux: the Store is nil or zero; make one with fluxtest.NewStore"
+			const want = "dynaflux: the Store is nil or zero; make one with dynaflux.Open, or fluxtest.NewStore in tests"
 			for helper, err := range helperErrors(t, s, loadCatalog(t)) {
 				if err == nil || err.Error() != want {
 					t.Errorf("%s: got %v, want %s", helper, err, want)
@@ -307,6 +308,45 @@ func TestStoreNotMadeByNewStore(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A nil option, as a conditional option left unset is, fails the call before it stores or
+// reads anything, and the error names the call and counts the options from 1.
+func TestNilOption(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		cat := loadCatalog(t)
+		s := newStore(mem.New())
+		ev := call(1)
+		var (
+			unsetAppend dynaflux.AppendOption
+			unsetQuery  dynaflux.QueryOption
+			unsetRead   dynaflux.ReadOption
+		)
+		_, appendErr := fluxgen.AppendEvent(t.Context(), s, cat, "api_calls", ev.fields(), dynaflux.Waitable(), unsetAppend)
+		_, batchErr := fluxgen.AppendEvents(t.Context(), s, cat, "api_calls", []apiCall{ev}, (*apiCall).fields, unsetAppend)
+		params := callsParams{Account: "acme", Day: start}
+		_, rowsErr := fluxgen.QueryRows(t.Context(), s, cat, "Calls", params.fields(), (*callsRow).fields,
+			dynaflux.AllowPartial(), dynaflux.WaitFor(dynaflux.Token{}, time.Second), unsetQuery)
+		_, rowErr := fluxgen.QueryRow(t.Context(), s, cat, "Calls", params.fields(), (*callsRow).fields, unsetQuery)
+		key := "acme"
+		var readErrs []error
+		for _, err := range fluxgen.ReadEvents(t.Context(), s, cat, "api_calls", []any{&key}, (*apiCall).fields, dynaflux.Since(start), unsetRead) {
+			readErrs = append(readErrs, err)
+		}
+		got := []string{fmt.Sprint(appendErr), fmt.Sprint(batchErr), fmt.Sprint(rowsErr), fmt.Sprint(rowErr), fmt.Sprint(readErrs)}
+		want := []string{
+			"dynaflux: append to api_calls: option 2 is nil", "dynaflux: append to api_calls: option 1 is nil",
+			"dynaflux: query Calls: option 3 is nil", "dynaflux: query Calls: option 1 is nil",
+			"[dynaflux: read api_calls: option 2 is nil]",
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("append, batch, query rows, query row and read failed with\n%q\nwant\n%q", got, want)
+		}
+		if stored := readAll(t, s, cat); len(stored) != 0 {
+			t.Errorf("the store holds %d events, want none", len(stored))
+		}
+	})
 }
 
 func TestCatalogNotFromGeneratedPackage(t *testing.T) {
@@ -369,17 +409,18 @@ func TestValueErrorNamesTheColumn(t *testing.T) {
 	}
 }
 
-// An event whose archive record would be over Firehose's record limit fails with an
-// *ArchiveSizeError that names the stream.
-func TestArchiveSizeErrorNamesTheStream(t *testing.T) {
+// An event whose archive record would be over Firehose's record limit fails with
+// ErrInvalidValue, and the error names the stream and the record's size.
+func TestArchiveRecordTooLarge(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		ev := call(1)
 		ev.Tags = []string{strings.Repeat("\x01", 180_000)} // 6 bytes each in JSON, 1 in the item
 		_, err := fluxgen.AppendEvent(t.Context(), newStore(mem.New()), loadCatalog(t), "api_calls", ev.fields())
-		ae, ok := errors.AsType[*dynaflux.ArchiveSizeError](err)
-		if !ok || ae.Stream != "api_calls" || ae.Size != 1_080_412 || !errors.Is(err, dynaflux.ErrInvalidValue) {
-			t.Errorf("got %v, want a *dynaflux.ArchiveSizeError for api_calls of 1080412 bytes", err)
+		const want = "dynaflux: append to api_calls: invalid value: the event's archive record can reach 1080412 bytes, " +
+			"over Firehose's record limit of 1024000"
+		if !errors.Is(err, dynaflux.ErrInvalidValue) || err.Error() != want {
+			t.Errorf("got %v, want %q", err, want)
 		}
 	})
 }

@@ -10,7 +10,8 @@ import "github.com/lucindo/dynaflux"
 // Regenerate it with the version in go.mod: go tool dynaflux generate.
 const _ = dynaflux.GeneratedCodeVersion1
 
-// Client appends to the streams and runs the named queries of store analytics.
+// Client appends to the streams and runs the named queries of store analytics. It is
+// safe for concurrent use.
 type Client struct {
 	store *dynaflux.Store
 }

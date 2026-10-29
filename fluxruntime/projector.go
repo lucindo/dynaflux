@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime
+package fluxruntime
 
 import (
 	"context"
@@ -68,7 +68,7 @@ func (p *projectorFn) Invoke(ctx context.Context, payload []byte) ([]byte, error
 	resp := streamevent.Reply{BatchItemFailures: []streamevent.ItemFailure{}}
 	var ev streamevent.Event
 	if err := json.Unmarshal(payload, &ev); err != nil {
-		return nil, p.fail(ctx, projector.Batch{}, reasonEvent, fmt.Errorf("runtime: decode the event: %w", err))
+		return nil, p.fail(ctx, projector.Batch{}, reasonEvent, fmt.Errorf("fluxruntime: decode the event: %w", err))
 	}
 	if len(ev.Records) == 0 {
 		// The window's final invocation; until it succeeds, Lambda stops the shard.
@@ -76,12 +76,12 @@ func (p *projectorFn) Invoke(ctx context.Context, payload []byte) ([]byte, error
 	}
 	b := projector.Batch{Unit: ev.ShardID}
 	if b.Unit == "" {
-		return nil, p.fail(ctx, b, reasonEvent, errors.New("runtime: the event has records but no shardId: "+
+		return nil, p.fail(ctx, b, reasonEvent, errors.New("fluxruntime: the event has records but no shardId: "+
 			"the event source mapping needs TumblingWindowInSeconds (ADR 0003)"))
 	}
 	var ok bool
 	if b.Stream, ok = p.streams[tableName(ev.EventSourceARN)]; !ok {
-		return nil, p.fail(ctx, b, reasonEvent, fmt.Errorf("runtime: %s isn't the stream of a stream table of store %s",
+		return nil, p.fail(ctx, b, reasonEvent, fmt.Errorf("fluxruntime: %s isn't the stream of a stream table of store %s",
 			ev.EventSourceARN, p.store))
 	}
 	if p.guard != nil {
@@ -89,7 +89,7 @@ func (p *projectorFn) Invoke(ctx context.Context, payload []byte) ([]byte, error
 	}
 	var err error
 	if b.Records, err = streamevent.Records(ev.Records); err != nil {
-		return nil, p.fail(ctx, b, reasonEvent, fmt.Errorf("runtime: %w", err))
+		return nil, p.fail(ctx, b, reasonEvent, fmt.Errorf("fluxruntime: %w", err))
 	}
 	res, err := p.core.Handle(ctx, b)
 	logCounts(ctx, p.log, p.store, b, res.Stats)

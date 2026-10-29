@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime
+package fluxruntime
 
 import (
 	"context"
@@ -48,7 +48,7 @@ func awsConfig(ctx context.Context, region string) (aws.Config, error) {
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region), config.WithHTTPClient(httpClient()),
 		config.WithRetryer(retryer))
 	if err != nil {
-		return aws.Config{}, fmt.Errorf("runtime: load the AWS configuration: %w", err)
+		return aws.Config{}, fmt.Errorf("fluxruntime: load the AWS configuration: %w", err)
 	}
 	return cfg, nil
 }

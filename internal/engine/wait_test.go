@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"strconv"
 	"sync"
@@ -98,7 +100,7 @@ func (s *waitStore) append(t *testing.T, e *engine.Engine, m engine.AppendMode, 
 		}
 		stored = append(stored, r.Stored)
 	}
-	return e.Token("visits", stored), stored
+	return e.Token("visits", res), stored
 }
 
 // project hands stored events to the core as the next records of one unit.
@@ -289,10 +291,27 @@ func TestWaitRefuses(t *testing.T) {
 			if err != nil || res[0].Err != nil {
 				t.Fatal(err, res[0].Err)
 			}
-			return s.e.Token("clicks", []store.Item{res[0].Stored}), "the token names stream clicks, which the catalog doesn't have"
+			return s.e.Token("clicks", res), "the token names stream clicks, which the catalog doesn't have"
 		}},
 		{"malformed", func(*testing.T, *waitStore) (string, string) {
-			return "AQ", "malformed token: not the text of a token that an append returned"
+			return "AQ", malformed
+		}},
+		{"with a byte after its last event", func(t *testing.T, s *waitStore) (string, string) {
+			t.Helper()
+			return s.edited(t, func(b []byte) []byte { return append(b, 0) }), malformed
+		}},
+		{"with an unknown flag", func(t *testing.T, s *waitStore) (string, string) {
+			t.Helper()
+			return s.edited(t, func(b []byte) []byte { b[len(b)-1] |= 4; return b }), malformed
+		}},
+		{"with ingest_time in more bytes than it needs", func(t *testing.T, s *waitStore) (string, string) {
+			t.Helper()
+			return s.edited(t, func(b []byte) []byte {
+				// The first event's uvarint ingest_time ends before its flags byte: a high
+				// bit on its last byte and a zero byte after it encode the same number.
+				b[len(b)-2] |= 0x80
+				return slices.Insert(b, len(b)-1, 0)
+			}), malformed
 		}},
 	}
 	for _, tt := range tests {
@@ -311,6 +330,91 @@ func TestWaitRefuses(t *testing.T) {
 			})
 		})
 	}
+}
+
+const malformed = "malformed token: not the text of a token that an append returned"
+
+// edited returns the text of a Waitable append's token, with edit applied to its bytes.
+func (s *waitStore) edited(t *testing.T, edit func([]byte) []byte) string {
+	t.Helper()
+	tok, _ := s.append(t, s.e, engine.AppendMode{Receipt: true}, visit("r1", 100))
+	b, err := base64.RawURLEncoding.DecodeString(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.CheckToken(tok); err != nil {
+		t.Fatalf("the token before the edit: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(edit(b))
+}
+
+// A token of 1,000 events, the most that a wait reads, takes 18 bytes an event after the
+// first, and a wait for it reads every receipt.
+func TestTokenOfAThousandEvents(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		s := newWaitStore(t)
+		var evs [][]expr.Value
+		for i := range engine.MaxWaitEvents {
+			evs = append(evs, visit("r"+strconv.Itoa(i), 100))
+		}
+		tok, stored := s.append(t, s.e, engine.AppendMode{Receipt: true}, evs...)
+		s.project(t, stored...)
+		// 18 bytes of format, region and stream; 25 for the first event, whose ingest_time
+		// takes 8; 18 for each next one, whose ingest_time is the same: 18,025 bytes, which
+		// base64 writes in 4 characters for every 3.
+		n, err := s.views(t.Context(), waitFor(tok, time.Second))
+		if len(tok) != 24034 || n != 1000 || err != nil {
+			t.Errorf("token of %d characters; Views after the wait %d, %v; want 24034 characters, then 1000", len(tok), n, err)
+		}
+	})
+}
+
+// A batch's token names an event that it found stored with that event's own ingest_time,
+// older than the one before it in the token: the wait polls that event's receipt.
+func TestWaitForABatchWithAnOlderDuplicate(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		s := newWaitStore(t)
+		r1 := visit("r1", 100)
+		_, first := s.append(t, s.e, engine.AppendMode{Receipt: true}, r1)
+		s.project(t, first...)
+		time.Sleep(time.Second)
+		tok, stored := s.append(t, s.e, engine.AppendMode{Receipt: true}, visit("r2", 100), r1)
+		s.project(t, stored[0])
+		n, err := s.views(t.Context(), waitFor(tok, time.Second))
+		if !reflect.DeepEqual(stored[1], first[0]) || n != 2 || err != nil || time.Since(start) != time.Second {
+			t.Errorf("Views after the wait = %d, %v, %v after the batch; want 2 at once", n, err, time.Since(start)-time.Second)
+		}
+	})
+}
+
+// A duplicate whose stored event has no readable ingest_time fails alone, and the batch's
+// token names the event that the append stored.
+func TestTokenLeavesOutAnUnreadableDuplicate(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		s := newWaitStore(t)
+		_, first := s.append(t, s.e, engine.AppendMode{}, visit("r1", 100))
+		bad := maps.Clone(first[0])
+		bad[catalog.AttrIngestTime] = store.Value{Type: store.S, Str: "soon"}
+		if err := s.mem.Put(t.Context(), visitsTable, bad, store.Cond{}); err != nil {
+			t.Fatal(err)
+		}
+		res, err := s.e.Append(t.Context(), s.cat, "visits", [][]expr.Value{visit("r1", 100), visit("r2", 100)}, engine.AppendMode{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, events, derr := engine.DecodeToken(s.e.Token("visits", res))
+		wantErr := "dynaflux: append to visits: the event stored at its key: event " + eventID(t, first[0]) +
+			": ingest_time: a DateTime64(6) value must be a DynamoDB N"
+		// The second append's ingest_time, 1 µs after the first's.
+		wantEvents := []engine.TokenEvent{{EventID: eventID(t, res[1].Stored), IngestMicros: 946684800000001}}
+		if res[0].Err == nil || res[0].Err.Error() != wantErr || res[0].Stored != nil || res[1].Err != nil ||
+			!slices.Equal(events, wantEvents) || derr != nil {
+			t.Errorf("results %v, %v; token events %+v, %v\nwant %q, nil; %+v", res[0].Err, res[1].Err, events, derr, wantErr, wantEvents)
+		}
+	})
 }
 
 // A token holds no PRIMARY KEY value of its events.

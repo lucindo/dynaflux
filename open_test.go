@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -110,14 +111,12 @@ func TestOpenSendsNothingUntilAnAppend(t *testing.T) {
 	if len(calls) != 0 {
 		t.Fatalf("Open sent %q; want nothing", calls)
 	}
-	cat := fluxgen.LoadCatalog(string(catalogtest.Marshal(t, "analytics",
-		"CREATE STREAM page_views (user_id String) PRIMARY KEY (user_id);")))
 	var (
 		user, eventID, origin = "u1", "", ""
 		eventTime, ingestTime time.Time
 	)
 	ev := []any{&user, &eventID, &eventTime, &ingestTime, &origin}
-	if _, err = fluxgen.AppendEvent(t.Context(), s, cat, "page_views", ev); err != nil {
+	if _, err = fluxgen.AppendEvent(t.Context(), s, pageViews(t, "us-east-1, eu-west-1"), "page_views", ev); err != nil {
 		t.Fatal(err)
 	}
 	if len(calls) != 1 {
@@ -139,5 +138,59 @@ func TestOpenSendsNothingUntilAnAppend(t *testing.T) {
 	want := []string{"DynamoDB_20120810.PutItem", "prod-analytics-stream-page_views", "eu-west-1"}
 	if !slices.Equal(got, want) {
 		t.Errorf("the append sent (target, table, origin_region) %q; want %q", got, want)
+	}
+}
+
+// pageView and its fields are what dynaflux generate writes for page_views.
+type pageView struct {
+	UserID       string
+	EventTime    time.Time
+	EventID      string
+	IngestTime   time.Time
+	OriginRegion string
+}
+
+func (e *pageView) fields() []any {
+	return []any{&e.UserID, &e.EventID, &e.EventTime, &e.IngestTime, &e.OriginRegion}
+}
+
+// pageViews returns the catalog of store analytics deployed in regions, whose stream
+// page_views has a query, Visits.
+func pageViews(t *testing.T, regions string) *dynaflux.Catalog {
+	t.Helper()
+	return fluxgen.LoadCatalog(string(catalogtest.MarshalFS(t, fstest.MapFS{
+		"dynaflux.yaml": {Data: []byte("store: analytics\nregions: [" + regions + "]\n")},
+		"dynaflux/store.sql": {Data: []byte(`CREATE STREAM page_views (user_id String) PRIMARY KEY (user_id);
+
+-- name: Visits :many
+SELECT user_id FROM page_views WHERE user_id = {user:String};`)},
+	})))
+}
+
+// A Store opened in a region that the catalog doesn't list fails each call over it before
+// any request: its tables don't exist there.
+func TestStoreRefusesARegionTheCatalogDoesNotList(t *testing.T) {
+	t.Parallel()
+	var calls sent
+	s, err := dynaflux.Open(dynaflux.Config{AWS: awsConfig("eu-west-1", &calls), Prefix: "prod-"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat := pageViews(t, "us-west-2, us-east-1")
+	ev := pageView{UserID: "u1"}
+	_, appendErr := fluxgen.AppendEvent(t.Context(), s, cat, "page_views", ev.fields())
+	_, queryErr := fluxgen.QueryRows(t.Context(), s, cat, "Visits", []any{&ev.UserID}, func(u *string) []any { return []any{u} })
+	var readErr error
+	for _, err := range fluxgen.ReadEvents(t.Context(), s, cat, "page_views", []any{&ev.UserID}, (*pageView).fields) {
+		readErr = err
+	}
+	const want = "dynaflux: store analytics has no region eu-west-1; its regions are us-east-1, us-west-2"
+	for name, err := range map[string]error{"append": appendErr, "query": queryErr, "read": readErr} {
+		if err == nil || err.Error() != want {
+			t.Errorf("%s: %v, want %q", name, err, want)
+		}
+	}
+	if len(calls) != 0 {
+		t.Errorf("the calls sent %q; want nothing", calls)
 	}
 }

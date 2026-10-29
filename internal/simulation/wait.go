@@ -106,17 +106,18 @@ func (r *run) checkReceipts(ctx context.Context) {
 	}
 }
 
-// startReader starts a reader that waits for stored, an event that an append with e in rg
-// stored, as ev. Only gated code calls it.
-func (r *run) startReader(id string, rg *region, e *engine.Engine, ev Event, stored store.Item) {
+// startReader starts a reader that waits for the event that a, an append of ev with e in rg,
+// stored. Only gated code calls it.
+func (r *run) startReader(id string, rg *region, e *engine.Engine, ev Event, a engine.Appended) {
 	r.pending++
-	r.sched.goActor(func() { r.read(id, rg, e, ev, stored) })
+	r.sched.goActor(func() { r.read(id, rg, e, ev, a) })
 }
 
-// read queries a version that stored fails, or else one it reaches: once without waiting,
-// which caches the view states as an app that read before it appended would, then after
-// waiting for stored, whose rows it checks (P15).
-func (r *run) read(id string, rg *region, e *engine.Engine, ev Event, stored store.Item) {
+// read queries a version that a's stored event fails, or else one it reaches: once without
+// waiting, which caches the view states as an app that read before it appended would, then
+// after waiting for the event, whose rows it checks (P15).
+func (r *run) read(id string, rg *region, e *engine.Engine, ev Event, a engine.Appended) {
+	stored := a.Stored
 	rng := r.actorRNG(id)
 	ctx := withInvocation(context.Background(), &invocation{id: id, stallAt: -1})
 	if version, q := r.waitQuery(rg, ev, stored, rng.IntN); q != nil {
@@ -127,7 +128,7 @@ func (r *run) read(id string, rg *region, e *engine.Engine, ev Event, stored sto
 		if err := r.query(ctx, e, q.Name, params, engine.QueryOptions{}); err != nil && !errors.Is(err, engine.ErrViewNotReady) && !injected(err) {
 			r.violatef("P15: %s: query %s: %v", id, q.Name, err)
 		}
-		w := engine.Wait{Token: e.Token(ev.Stream, []store.Item{stored}), Timeout: between(rng, time.Second, maxWait)}
+		w := engine.Wait{Token: e.Token(ev.Stream, []engine.Appended{a}), Timeout: between(rng, time.Second, maxWait)}
 		err := r.query(ctx, e, q.Name, params, engine.QueryOptions{Wait: []engine.Wait{w}})
 		r.sched.gate(id, "check")
 		r.waited(rg, id, q.Name, version, ev.Stream, stored, err)

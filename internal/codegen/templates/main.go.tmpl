@@ -11,13 +11,13 @@ package main
 import (
 	"log"
 
-	"github.com/lucindo/dynaflux/runtime"
+	"github.com/lucindo/dynaflux/fluxruntime"
 
 	{{if .Alias}}{{.Package}} {{end}}"{{.ImportPath}}"
 )
 
 func main() {
-	if err := runtime.Run({{.Package}}.Catalog); err != nil {
+	if err := fluxruntime.Run({{.Package}}.Catalog); err != nil {
 		log.Fatal(err)
 	}
 }

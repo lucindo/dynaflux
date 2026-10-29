@@ -1,7 +1,7 @@
 // Copyright 2026 The Dynaflux Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package runtime_test
+package fluxruntime_test
 
 import (
 	"context"
@@ -16,9 +16,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	fh "github.com/aws/aws-sdk-go-v2/service/firehose"
 
+	"github.com/lucindo/dynaflux/fluxruntime"
 	"github.com/lucindo/dynaflux/internal/emulatortest"
 	"github.com/lucindo/dynaflux/internal/expr"
-	"github.com/lucindo/dynaflux/runtime"
 )
 
 // sdkOptions returns the options of the DynamoDB and Firehose clients that Run builds, with
@@ -26,7 +26,7 @@ import (
 // and retryer from Run's configuration.
 func sdkOptions(t *testing.T, mode aws.DefaultsMode) (dynamodb.Options, fh.Options) {
 	t.Helper()
-	cfg, err := runtime.AWSConfig(t.Context(), emulatortest.Region)
+	cfg, err := fluxruntime.AWSConfig(t.Context(), emulatortest.Region)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -355,7 +355,7 @@ func (r *run) wait(id string, rg *region, e *engine.Engine, ev Event, a engine.A
 		return
 	}
 	r.sched.gate(id, "start")
-	r.startReader(id, rg, e, ev, a.Stored)
+	r.startReader(id, rg, e, ev, a)
 }
 
 // expire deletes item k in every region, as their TTL deletes would, and starts its next

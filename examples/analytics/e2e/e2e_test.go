@@ -28,9 +28,9 @@ import (
 	"github.com/lucindo/dynaflux"
 	"github.com/lucindo/dynaflux/examples/analytics/internal/flux"
 	"github.com/lucindo/dynaflux/fluxgen"
+	"github.com/lucindo/dynaflux/fluxruntime"
 	"github.com/lucindo/dynaflux/internal/catalog"
 	"github.com/lucindo/dynaflux/internal/meta"
-	"github.com/lucindo/dynaflux/runtime"
 )
 
 //nolint:gochecknoglobals // a test flag
@@ -50,7 +50,7 @@ const (
 
 func TestMain(m *testing.M) {
 	if os.Getenv(childVar) != "" {
-		if err := runtime.Run(fluxgen.LoadCatalog(os.Getenv(catalogVar))); err != nil {
+		if err := fluxruntime.Run(fluxgen.LoadCatalog(os.Getenv(catalogVar))); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
