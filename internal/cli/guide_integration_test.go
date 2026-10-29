@@ -176,24 +176,25 @@ func (g *guideRun) replaceLibrary() {
 	}
 }
 
-// guideEnv is the environment of the guide's commands: offline Go with the test's module and
-// build caches, a new home so that no Go or AWS configuration of the machine applies, and
-// docEnv's closed AWS endpoint and fake keys, so that a command without -endpoint never
-// reaches AWS.
+// guideEnv is the environment of the guide's commands: Go with the test's module and build
+// caches and its module proxy, a new home so that no other Go or AWS configuration of the
+// machine applies, and docEnv's closed AWS endpoint and fake keys, so that a command without
+// -endpoint never reaches AWS. The proxy stays on because the guide's go mod tidy also needs
+// the test dependencies of the modules it imports, which a fresh cache (as in CI) lacks.
 func guideEnv(t *testing.T) []string {
 	t.Helper()
-	out, err := exec.CommandContext(t.Context(), "go", "env", "GOCACHE", "GOMODCACHE", "GOPATH").Output()
+	names := []string{"GOCACHE", "GOMODCACHE", "GOPATH", "GOPROXY", "GOSUMDB"}
+	out, err := exec.CommandContext(t.Context(), "go", append([]string{"env"}, names...)...).Output()
 	if err != nil {
 		t.Fatal(err)
 	}
 	vals := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(vals) != 3 {
+	if len(vals) != len(names) {
 		t.Fatalf("go env: %q", out)
 	}
-	env := []string{
-		"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(),
-		"GOCACHE=" + vals[0], "GOMODCACHE=" + vals[1], "GOPATH=" + vals[2],
-		"GOPROXY=off", "GOWORK=off", "GOTOOLCHAIN=local", "GOFLAGS=",
+	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "GOWORK=off", "GOTOOLCHAIN=local", "GOFLAGS="}
+	for i, name := range names {
+		env = append(env, name+"="+vals[i])
 	}
 	for k, v := range docEnv() {
 		env = append(env, k+"="+v)
