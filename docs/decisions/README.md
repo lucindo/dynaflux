@@ -33,5 +33,6 @@ whose decision stands, amends it instead: the older record gets the line
 | [0015](0015-wait-tokens-and-receipts.md) | Wait tokens poll receipts that the origin region's projector writes for appends that ask for them | Accepted, amended by 0019 |
 | [0016](0016-archive-export-with-athena.md) | A backfill reads the archive with sliced Athena `UNLOAD`s, after a `DataFreshness` watermark, plus the error prefix | Accepted |
 | [0017](0017-archive-completeness.md) | A region's archive is trusted for a backfill only from a recorded origin, with no hole and no gap evidence since | Accepted |
-| [0018](0018-query-handler-and-front-doors.md) | One query handler serves every front door, from a third template deployed with the application | Accepted |
+| [0018](0018-query-handler-and-front-doors.md) | One query handler serves every front door, from a third template deployed with the application | Accepted, amended by 0020 |
 | [0019](0019-v1-compatibility-promise.md) | v1.x keeps every shipped boundary compatible, not only the Go API | Accepted |
+| [0020](0020-health-checks-follow-a-readiness-alarm.md) | The custom domain's health checks follow a readiness alarm, not `/health` | Accepted |

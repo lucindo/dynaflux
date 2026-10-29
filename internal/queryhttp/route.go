@@ -41,6 +41,8 @@ func (h *Handler) answer(ctx context.Context, r request) reply {
 		return failed(http.StatusBadRequest, codeBadRequest, r.bad)
 	case r.door == doorDirect:
 		return h.query(ctx, r.query, r.body)
+	case r.door == doorSchedule:
+		return h.health(ctx)
 	}
 	return h.route(ctx, r)
 }

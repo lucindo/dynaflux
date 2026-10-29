@@ -72,4 +72,7 @@ const (
 	MetricLeftOut = "LeftOut"
 	// MetricQueryFailures counts the query function's answers with status 500 or 504.
 	MetricQueryFailures = "QueryFailures"
+	// MetricViewsNotReady is 1 when the query function's scheduled check finds a view that an
+	// exposed query reads not live in the region, or can't read the states, and 0 otherwise.
+	MetricViewsNotReady = "ViewsNotReady"
 )

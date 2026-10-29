@@ -714,6 +714,7 @@ projector function, `{base}-projector`, or `{base}-projector-{stream}` with
 | `{base}-query-failures` | warning | The query function answered `500` or `504` for 15 minutes. | Its log gives each request's code and cause. |
 | `{base}-query-throttles` | warning | Lambda throttled the query function for 15 minutes, so callers got errors. | Raise `http.max_concurrency`, or the account's concurrent executions quota. |
 | `{base}-query-certificate` | warning | With `http.domain`, the domain's certificate expires in less than 45 days: ACM, which renews it from 60 days ahead, couldn't. | Check that its DNS validation record is still in the hosted zone. |
+| `{base}-query-views-not-ready` | warning | With `http.domain`, a view that an exposed query reads hasn't been `live` in the region for 2 minutes, or the query function can't read the view states, so the domain sends no queries to the region. | Run `dynaflux status`. |
 
 The dashboard also shows replication latency, throttles on the view and meta tables,
 DynamoDB system errors and divergent duplicates, which have no alarm. A divergent duplicate

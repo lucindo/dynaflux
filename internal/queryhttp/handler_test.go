@@ -428,6 +428,41 @@ func TestHealthReadFails(t *testing.T) {
 	}
 }
 
+// An EventBridge schedule's event checks the views as /health does and logs ViewsNotReady,
+// which the custom domain's health check alarms on: 0 at INFO, or 1 at ERROR, which a raised
+// log level keeps, also when the states can't be read. It never counts in QueryFailures.
+func TestScheduledReadiness(t *testing.T) {
+	t.Parallel()
+	const tick = `{"version":"0","id":"e1","detail-type":"Scheduled Event","source":"aws.events","account":"123456789012",` +
+		`"time":"2000-01-01T00:00:00Z","region":"us-east-1","resources":["arn:aws:events:us-east-1:123456789012:rule/r"],"detail":{}}`
+	same := func(b store.Backend) store.Backend { return b }
+	denied := func(b store.Backend) store.Backend {
+		return failing{Backend: b, err: errors.New("AccessDeniedException: no dynamodb:Query on prod-app-meta")}
+	}
+	tests := []struct {
+		name     string
+		pending  bool
+		wrap     func(store.Backend) store.Backend
+		notReady float64
+		level    string
+	}{
+		{"live", false, same, 0, "INFO"},
+		{"pending", true, same, 1, "ERROR"},
+		{"states unreadable", false, denied, 1, "ERROR"},
+	}
+	for _, tt := range tests {
+		f := newFixtureOn(t, tt.pending, tt.wrap)
+		if _, err := f.invoke(t, []byte(tick)); err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		lines := f.logLines(t)
+		if len(lines) != 1 || lines[0]["ViewsNotReady"] != tt.notReady || lines[0]["level"] != tt.level ||
+			lines[0]["door"] != "schedule" || lines[0]["Store"] != "prod-app" || lines[0]["QueryFailures"] != nil {
+			t.Errorf("%s: log lines %v, want one %s line with ViewsNotReady %v", tt.name, lines, tt.level, tt.notReady)
+		}
+	}
+}
+
 // A view that no exposed query reads doesn't make the region unhealthy.
 func TestHealthReadsOnlyExposedViews(t *testing.T) {
 	t.Parallel()

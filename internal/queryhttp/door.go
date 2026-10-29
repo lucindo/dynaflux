@@ -23,10 +23,13 @@ const (
 	doorFunctionURL
 	doorHTTPAPI
 	doorRESTAPI
+	// doorSchedule is the EventBridge schedule of the custom domain's health check, whose
+	// event asks for the readiness metric.
+	doorSchedule
 )
 
 func (d door) String() string {
-	return [...]string{"direct", "function_url", "http_api", "rest_api"}[d]
+	return [...]string{"direct", "function_url", "http_api", "rest_api", "schedule"}[d]
 }
 
 // request is an event, decoded.
@@ -41,8 +44,11 @@ type request struct {
 }
 
 // probe holds the top-level keys that tell the doors apart. API Gateway and function URLs
-// always send requestContext; direct invoke has no reason to.
+// always send requestContext; direct invoke has no reason to. A schedule's event has source
+// and detail-type.
 type probe struct {
+	Source         string          `json:"source"`
+	DetailType     string          `json:"detail-type"`
 	Version        string          `json:"version"`
 	HTTPMethod     json.RawMessage `json:"httpMethod"`
 	Resource       json.RawMessage `json:"resource"`
@@ -52,11 +58,14 @@ type probe struct {
 }
 
 // parse tells the door of payload by its top-level keys, never by authorizer content, and
-// decodes it. An HTTP-shaped event reaches the same queries as a direct one, so a caller
-// that forges one gains nothing.
+// decodes it. An HTTP-shaped event reaches the same queries as a direct one, and a schedule's
+// event carries nothing that the handler trusts, so a caller that forges one gains nothing.
 func parse(payload []byte) (request, error) {
 	p, isAPI := apiEvent(payload)
-	if !isAPI {
+	switch {
+	case !isAPI && p.Source == "aws.events" && p.DetailType == "Scheduled Event":
+		return request{door: doorSchedule}, nil
+	case !isAPI:
 		return parseDirect(payload), nil
 	}
 	switch {
@@ -143,7 +152,7 @@ func (h *Handler) encode(ctx context.Context, d door, r reply) ([]byte, error) {
 	}
 	var v any
 	switch d {
-	case doorDirect:
+	case doorDirect, doorSchedule:
 		return body, nil
 	case doorFunctionURL:
 		v = events.LambdaFunctionURLResponse{StatusCode: r.status, Headers: headers, Body: string(body)}

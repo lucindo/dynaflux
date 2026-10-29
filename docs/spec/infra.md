@@ -442,7 +442,10 @@ authorizer only.
 | `Certificate` | An ACM certificate of `DomainName` ([§2](#2-parameters)), validated by a DNS record that CloudFormation writes in `HostedZoneId`. |
 | `Domain` | A regional custom domain `DomainName`, with the certificate and TLS 1.2 or later. |
 | `Mapping` | The domain's root to the stage, so `https://<domain>/queries/{name}` on both kinds of API. |
-| `HealthCheck` | A Route 53 check of `GET /health` (`/api/health` on a REST API) over HTTPS, port 443, with SNI, at the region's own `execute-api` host, every 30 seconds. 3 failures in a row make it unhealthy. |
+| `Schedule` | An EventBridge rule that sends the query function a scheduled event every minute, on which it logs `ViewsNotReady` ([http.md §6](http.md#6-health)). CloudFormation names it. |
+| `PermissionSchedule` | `lambda:InvokeFunction` on the query function for `events.amazonaws.com`, from `Schedule` only. |
+| `AlarmViewsNotReadyQuery` | The alarm `{base}-query-views-not-ready` ([§10](#10-alarms-and-dashboard)). |
+| `HealthCheck` | A Route 53 check of type `CLOUDWATCH_METRIC` that follows `AlarmViewsNotReadyQuery` in the region: unhealthy while it is in `ALARM`, and healthy otherwise, also with too little data. |
 | `LatencyRecord` | An `A` alias record of `DomainName` to the regional domain, with the region as its set identifier and its latency region. Route 53 answers with it while the health check passes. |
 
 - The function compares `DYNAFLUX_CATALOG_HASH` with its binary's catalog when it starts,
@@ -454,15 +457,16 @@ authorizer only.
 - A public function URL has no throttling, and the function shares the account's regional
   concurrency with the projectors: `auth: none` without `http.max_concurrency` warns
   (DF6615).
-- On an API, `GET /health` takes anyone, since Route 53 can't sign requests or send tokens.
-  The stage throttle leaves room for the health checks, about one request every 2 seconds
-  each, and keeps anyone else from draining the function's concurrency through it. On a
-  function URL, `/health` has the URL's `AuthType`.
-- A health check calls the region's own host, since a check of the domain would follow the
-  latency record to another region; that host is shared, so it needs SNI. A region leaves
-  the domain about 90 seconds after its `/health` starts to answer `503`
-  ([http.md §6](http.md#6-health)), plus the time resolvers keep the old answer. When every
-  region fails, Route 53 answers with all of them.
+- On an API, `GET /health` takes anyone, for people and probes. The stage throttle keeps
+  them from draining the function's concurrency through it. On a function URL, `/health`
+  has the URL's `AuthType`.
+- The health checks call no endpoint, so a flood of `/health` can't take a region out of
+  the domain. Route 53 follows only an alarm on one standard-resolution metric that alarms
+  on every period it evaluates.
+- A region leaves the domain after 2 one-minute checks in a row find a view not ready,
+  plus CloudWatch's delay and the time resolvers keep the old answer. The 1s are logged at
+  `ERROR`, which a raised application log level keeps. A lost 0 counts as no data, which
+  keeps the region in. When every region is out, Route 53 answers with all of them.
 - Each region's stack has its own certificate. ACM asks for the same validation record in
   every region, so the stacks share it ([§16](#16-to-be-confirmed-on-aws)), and
   `AlarmCertificateQuery` warns when a renewal fails ([§10](#10-alarms-and-dashboard)).
@@ -938,7 +942,8 @@ Every alarm:
   every application in the account shares.
 
 Periods are 5 minutes, except the certificate's 1 day, since ACM publishes
-`DaysToExpiry` once a day. `{projector}` is the projector function's name, and `{base}` is
+`DaysToExpiry` once a day, and the readiness alarm's 1 minute, the query function's
+schedule. `{projector}` is the projector function's name, and `{base}` is
 `{prefix}{store}`.
 
 | Alarm | Metric | Fires when | Severity |
@@ -959,11 +964,12 @@ Periods are 5 minutes, except the certificate's 1 day, since ACM publishes
 | `{base}-query-failures` | `Dynaflux` `QueryFailures`, sum | ≥ 1 for 3 periods: answers with status 500 or 504. | warning |
 | `{base}-query-throttles` | `AWS/Lambda` `Throttles` of the query function, sum | ≥ 1 for 3 periods | warning |
 | `{base}-query-certificate` | `AWS/CertificateManager` `DaysToExpiry` of the custom domain's certificate, minimum | < 45 days in 1 period. ACM renews from 60 days ahead, so the renewal failed: check that the validation record is still in the hosted zone. | warning |
+| `{base}-query-views-not-ready` | `Dynaflux` `ViewsNotReady`, maximum, in 1-minute periods | ≥ 1 for 2 periods. A view that an exposed query reads isn't `live` in the region, or the query function can't read the states, so the custom domain's health check takes the region out ([http.md §6](http.md#6-health)). | warning |
 
 Each region has 4 alarms per projector function, 3 per stream, 3 for the store, and 2 per
 archived stream where it is archived: 12 for a store with one archived stream and
-`split: store`. `query.yaml` adds the 3 query alarms, and the certificate's with
-`http.domain`. The `Dynaflux` metrics come from the
+`split: store`. `query.yaml` adds the 3 query alarms, and the certificate's and the
+readiness alarm with `http.domain`. The `Dynaflux` metrics come from the
 runtime, in the namespace `Dynaflux` with the dimension `Store`.
 
 **Dashboard.** `Dashboard` is named `{base}-{region}`, because dashboard names are
@@ -1226,8 +1232,10 @@ page will record the answers:
 - That each door, with each `auth`, answers as [http.md](http.md) says, and what it answers
   when the function crashes or times out.
 - That the health checks report healthy while the region's views are `live`, a region whose
-  views aren't leaves the domain, and the stage throttles `/health`; and whether a flood of
-  `/health` takes the region out of the domain ([http.md §6](http.md#6-health)).
+  views aren't leaves the domain, and how long that takes; that a flood of `/health` gets
+  `429` and leaves the health check healthy; and that, with the query function's
+  application log level at `ERROR`, a region stays in while its views are ready and leaves
+  when they aren't ([http.md §6](http.md#6-health)).
 - That deleting one region's query stack leaves the certificate validation record that the
   other regions' stacks share.
 - That a REST API's Cognito authorizer takes a user pool of another region, and whether an

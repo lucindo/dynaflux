@@ -6,6 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # ADR 0018: One query handler serves every front door, from a third template deployed with the application
 
 - Status: Accepted
+- Amended by [ADR 0020](0020-health-checks-follow-a-readiness-alarm.md): the health checks
+  follow a readiness alarm instead of calling `/health`, which anyone could flood.
 - Date: 2026-10-27
 
 ## Context

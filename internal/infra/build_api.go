@@ -14,15 +14,15 @@ const (
 	// of its paths.
 	httpStage = "$default"
 	restStage = "api"
-	// Route 53's checkers call a health check about once every 2 seconds in all, so the
-	// stage's throttle of GET /health leaves them room and keeps anyone else from draining
-	// the function's concurrency through it.
+	// GET /health takes anyone, so the stage's throttle keeps them from draining the
+	// function's concurrency through it. The custom domain's health check never calls it.
 	healthRate  = 5
 	healthBurst = 10
-	// healthCheckIntervalSeconds and healthCheckFailures take a region out of the custom
-	// domain about 90 seconds after its views stop being ready.
-	healthCheckIntervalSeconds = 30
-	healthCheckFailures        = 3
+	// The query function checks readiness every minute, and readinessPeriods minutes in a
+	// row not ready take the region out of the custom domain. Route 53 follows no alarm
+	// that needs only some of its periods.
+	readinessPeriodSeconds = 60
+	readinessPeriods       = 2
 	// authorizerTTLSeconds is how long API Gateway keeps a Lambda authorizer's answer for
 	// one Authorization header.
 	authorizerTTLSeconds = 300
@@ -39,6 +39,7 @@ const (
 const (
 	lambdaInvokeFunction        = "lambda:InvokeFunction"
 	serviceAPIGateway           = "apigateway.amazonaws.com"
+	serviceEvents               = "events.amazonaws.com"
 	namespaceCertificateManager = "AWS/CertificateManager"
 	statMinimum                 = "Minimum"
 )
@@ -52,9 +53,11 @@ const (
 	idCertificate          = "Certificate"
 	idDomain               = "Domain"
 	idHealthCheck          = "HealthCheck"
+	idSchedule             = "Schedule"
 	idLatencyRecord        = "LatencyRecord"
 	idPermissionAPI        = "PermissionApi"
 	idPermissionAuthorizer = "PermissionAuthorizer"
+	idPermissionSchedule   = "PermissionSchedule"
 	outputQueryUsagePlanID = "QueryUsagePlanId"
 )
 
@@ -97,7 +100,7 @@ func (b *builder) addAPI(s *Scope, f Function) Text {
 	}
 	host := ref(idAPI, AttrID) + ".execute-api." + Text(placeholder(PlaceholderRegion)+"."+placeholder(PlaceholderURLSuffix))
 	if h.Domain != nil {
-		b.addDomain(s, f, host, path)
+		b.addDomain(s, f)
 	}
 	return "https://" + host + Text(path)
 }
@@ -149,25 +152,40 @@ func (b *builder) addUsagePlan(s *Scope, name string) {
 
 // addDomain adds the custom domain to s: its certificate, with an alarm on its renewal named
 // after the query function f, the domain mapped to the API's stage, and the region's latency
-// record, which Route 53 answers with while a health check of path + "health" at host, the
-// API's own host in the region, passes. A check of the domain itself would follow the latency
-// record to another region.
-func (b *builder) addDomain(s *Scope, f Function, host Text, path string) {
+// record, which Route 53 answers with while the region's views are ready. f checks them on a
+// schedule, and the health check follows the alarm on its checks.
+func (b *builder) addDomain(s *Scope, f Function) {
 	domain, zone := Text(placeholder(PlaceholderDomain)), Text(placeholder(PlaceholderHostedZone))
 	s.Certificates = []Certificate{{Common: Common{ID: idCertificate, Tags: b.tags(TagKindQuery, "")}, Domain: domain, HostedZone: zone}}
 	s.Domains = []Domain{{
 		Common: Common{ID: idDomain, Tags: b.tags(TagKindQuery, "")}, Name: domain,
 		Certificate: ref(idCertificate, AttrARN), API: ref(idAPI, AttrID), Stage: ref(idStage, AttrName),
 	}}
-	s.HealthChecks = []HealthCheck{{
-		Common: Common{ID: idHealthCheck, Tags: b.tags(TagKindQuery, "")}, Host: host, Path: path + "health",
-		IntervalSeconds: healthCheckIntervalSeconds, FailureThreshold: healthCheckFailures,
-	}}
+	notReady := b.notReadyAlarm(f)
+	s.Schedules = []Schedule{{Common: Common{ID: idSchedule, Tags: b.tags(TagKindQuery, "")}, Function: ref(idQuery, AttrARN)}}
+	s.Permissions = append(s.Permissions, Permission{
+		Common: Common{ID: idPermissionSchedule}, Function: ref(idQuery, AttrName), Action: lambdaInvokeFunction,
+		Principal: serviceEvents, SourceARN: ref(idSchedule, AttrARN),
+	})
+	s.HealthChecks = []HealthCheck{{Common: Common{ID: idHealthCheck, Tags: b.tags(TagKindQuery, "")}, Alarm: ref(notReady.ID, AttrName)}}
 	s.LatencyRecords = []LatencyRecord{{
 		Common: Common{ID: idLatencyRecord}, Name: domain, HostedZone: zone, Target: ref(idDomain, AttrRegionalName),
 		TargetZone: ref(idDomain, AttrRegionalZone), HealthCheck: ref(idHealthCheck, AttrID),
 	}}
-	s.Alarms = append(s.Alarms, b.certificateAlarm(f))
+	s.Alarms = append(s.Alarms, b.certificateAlarm(f), notReady)
+}
+
+// notReadyAlarm returns the alarm on the readiness checks of the query function f, which the
+// custom domain's health check follows. A check whose line is lost leaves no data, which
+// doesn't breach: only a check that finds a view not ready takes the region out.
+func (b *builder) notReadyAlarm(f Function) Alarm {
+	a := b.alarm(f.ID, string(f.Name), b.tags(TagKindQuery, ""), rule{"ViewsNotReady", SeverityWarning, 1, readinessPeriods,
+		"a view that an exposed query reads isn't live in this region, or the query function can't read the view states, " +
+			"so the custom domain sends no queries here. Run dynaflux status."},
+		Metric{Namespace: catalog.MetricNamespace, Name: catalog.MetricViewsNotReady, Statistic: statMaximum,
+			Dimensions: []Dimension{{Name: catalog.MetricDimensionStore, Value: Text(b.naming.Base())}}})
+	a.PeriodSeconds = readinessPeriodSeconds
+	return a
 }
 
 // certificateAlarm returns the alarm on the renewal of the custom domain's certificate,

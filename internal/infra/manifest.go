@@ -52,6 +52,7 @@ type Scope struct {
 	UsagePlans        []UsagePlan
 	Certificates      []Certificate
 	Domains           []Domain
+	Schedules         []Schedule
 	HealthChecks      []HealthCheck
 	LatencyRecords    []LatencyRecord
 	StreamLookups     []StreamLookup
@@ -491,16 +492,22 @@ type Domain struct {
 	Stage       Text // the stage's name
 }
 
-// HealthCheck is a Route 53 health check, "HealthCheck": a GET of Path at Host over HTTPS
-// on port 443, with SNI, which the shared hosts of AWS endpoints need, every
-// IntervalSeconds. FailureThreshold failures in a row make it unhealthy. It provides AttrID.
+// Schedule is an EventBridge rule, "Schedule", that sends Function a scheduled event every
+// minute. CloudFormation names it. It provides AttrARN.
+type Schedule struct {
+	Common
+
+	Function Text // the function's ARN
+}
+
+// HealthCheck is a Route 53 health check, "HealthCheck", that follows the CloudWatch alarm
+// Alarm in the scope's region rather than calling an endpoint, which anyone could flood:
+// unhealthy while the alarm is in ALARM, and healthy otherwise, also while it has too little
+// data. It provides AttrID.
 type HealthCheck struct {
 	Common
 
-	Host             Text
-	Path             string
-	IntervalSeconds  int
-	FailureThreshold int
+	Alarm Text // the alarm's name
 }
 
 // LatencyRecord is the region's Route 53 latency record of Name in the hosted zone

@@ -17,11 +17,12 @@ import (
 	"github.com/lucindo/dynaflux/internal/infra/cloudformation"
 )
 
-// The invariants of query.yaml (ADR 0018) hold in every golden case and the example's: the
-// query role writes nothing, names no resource by a wildcard, and queries the meta table's
-// view partition only; on API doors, GET /health has no auth and a stage throttle; every
-// health check uses HTTPS on port 443 with SNI; and a permission for anyone to invoke the
-// function holds only through a function URL. Each invariant applies somewhere in them.
+// The invariants of query.yaml (ADR 0018, ADR 0020) hold in every golden case and the
+// example's: the query role writes nothing, names no resource by a wildcard, and queries the
+// meta table's view partition only; on API doors, GET /health has no auth and a stage
+// throttle; every health check follows an alarm, so no one can flood what it calls, and
+// stays healthy without data; and a permission for anyone to invoke the function holds only
+// through a function URL. Each invariant applies somewhere in them.
 func TestQueryInvariants(t *testing.T) {
 	t.Parallel()
 	templates := goldenTemplates(t, cloudformation.QueryTemplate)
@@ -90,8 +91,8 @@ func queryInvariants(resources *yaml.Node, typ string, props *yaml.Node, applied
 		check("stage throttle", i >= 0 && throttled(value(props, "MethodSettings").Content[i]), "doesn't throttle GET /health")
 	case "AWS::Route53::HealthCheck":
 		c := value(props, "HealthCheckConfig")
-		check("health check", value(c, "Type").Value == "HTTPS" && value(c, "Port").Value == "443" && value(c, "EnableSNI").Value == "true",
-			"isn't HTTPS on port 443 with SNI")
+		check("health check", value(c, "Type").Value == "CLOUDWATCH_METRIC" && value(c, "InsufficientDataHealthStatus").Value == "Healthy",
+			"doesn't follow an alarm, or is unhealthy without data")
 	case "AWS::Lambda::Permission":
 		if value(props, "Principal").Value == "*" && value(props, "Action").Value == "lambda:InvokeFunction" {
 			check("public invoke", value(props, "InvokedViaFunctionUrl").Value == "true", "lets anyone invoke the function directly")

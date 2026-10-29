@@ -179,17 +179,21 @@ It never names a version: on API Gateway doors `/health` has no authentication, 
 log names the versions that aren't ready. A store whose exposed queries read only streams is always
 healthy.
 
-With `http.domain`, a Route 53 health check calls each region's own endpoint, so DNS stops
-sending clients to a region while its views aren't ready. On API Gateway doors, the stage
-throttles `/health` to 5 requests a second with bursts of 10. On a function URL, `/health`
-has the URL's authentication.
+With `http.domain`, DNS stops sending clients to a region while its views aren't ready.
+Each region's Route 53 health check follows an alarm rather than calling `/health`:
 
-The throttle is shared by everyone. A caller who sends far more than 5 requests a second to a
-region's `/health` makes Route 53's checkers get `429` too, so the health check fails and the
-region leaves the domain until the flood stops. When every region is out, Route 53 answers
-with all of them. So anyone can steer clients away from a region, and while they do, the
-health checks no longer follow the views. End-to-end experiment Q1 measures it
-([e2e.md](../runbooks/e2e.md)).
+- Every minute, a schedule makes the query function check the views as `/health` does. It
+  logs `ViewsNotReady`: 0, or 1 when a view isn't ready or the states can't be read.
+- After 2 minutes in a row of 1, the region leaves the domain, until a check finds the
+  views ready again. CloudWatch's delay and the time resolvers keep the old answer come on
+  top.
+- A check that leaves no data, such as one whose log line a raised log level drops, keeps
+  the region in. When every region is out, Route 53 answers with all of them.
+
+On API Gateway doors, the stage throttles `/health` to 5 requests a second with bursts of
+10, so no one can drain the function's concurrency through it. No health check calls it, so
+a flood of it can't take a region out of the domain. On a function URL, `/health` has the
+URL's authentication.
 
 ## 7. Limits
 

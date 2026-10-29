@@ -69,6 +69,9 @@ func addDoors(rs *resources, r *resolver, s infra.Scope) {
 	for _, d := range s.Domains {
 		addDomain(rs, r, d)
 	}
+	for _, x := range s.Schedules {
+		rs.add(x.ID, func() *yaml.Node { return schedule(r, x) })
+	}
 	for _, h := range s.HealthChecks {
 		rs.add(h.ID, func() *yaml.Node { return healthCheck(r, h) })
 	}
@@ -341,16 +344,21 @@ func addDomain(rs *resources, r *resolver, d infra.Domain) {
 	})
 }
 
+func schedule(r *resolver, s infra.Schedule) *yaml.Node {
+	return resource("AWS::Events::Rule", mapping(
+		kv("ScheduleExpression", str("rate(1 minute)")),
+		kv("State", str("ENABLED")),
+		kv("Targets", seq(mapping(kv("Arn", r.value(s.Function)), kv("Id", str("Function"))))),
+		kv("Tags", tags(s.Tags)),
+	))
+}
+
 func healthCheck(r *resolver, h infra.HealthCheck) *yaml.Node {
 	return resource("AWS::Route53::HealthCheck", mapping(
 		kv("HealthCheckConfig", mapping(
-			kv("Type", str("HTTPS")),
-			kv("FullyQualifiedDomainName", r.value(h.Host)),
-			kv("ResourcePath", str(h.Path)),
-			kv("Port", num(httpsPort)),
-			kv("EnableSNI", boolean(true)),
-			kv("RequestInterval", num(h.IntervalSeconds)),
-			kv("FailureThreshold", num(h.FailureThreshold)),
+			kv("Type", str("CLOUDWATCH_METRIC")),
+			kv("AlarmIdentifier", mapping(kv("Name", r.value(h.Alarm)), kv("Region", ref("AWS::Region")))),
+			kv("InsufficientDataHealthStatus", str("Healthy")),
 		)),
 		kv("HealthCheckTags", tags(h.Tags)),
 	))

@@ -36,6 +36,7 @@ const (
 	kindUsagePlan        = "usage plan"
 	kindCertificate      = "certificate"
 	kindDomain           = "custom domain"
+	kindSchedule         = "schedule"
 	kindHealthCheck      = "health check"
 	kindLatencyRecord    = "latency record"
 	kindOutput           = "output"
@@ -244,7 +245,7 @@ func (s *Scope) entries(scope string) []entry {
 		for _, m := range x.Metrics {
 			fs = append(fs, dimensionFields(m.Dimensions)...)
 		}
-		add(kindAlarm, x.Common, x.Name, nil, fs...)
+		add(kindAlarm, x.Common, x.Name, []string{AttrName}, fs...)
 	}
 	for _, x := range s.Dashboards {
 		add(kindDashboard, x.Common, x.Name, nil, required("name", x.Name))
@@ -284,8 +285,11 @@ func (s *Scope) doorEntries(scope string) []entry {
 		add(kindDomain, x.Common, x.Name, []string{AttrRegionalName, AttrRegionalZone}, required("name", x.Name),
 			required("certificate", x.Certificate), required("API", x.API), required("stage", x.Stage))
 	}
+	for _, x := range s.Schedules {
+		add(kindSchedule, x.Common, "", []string{AttrARN}, required("function", x.Function))
+	}
 	for _, x := range s.HealthChecks {
-		add(kindHealthCheck, x.Common, "", id, required("host", x.Host))
+		add(kindHealthCheck, x.Common, "", id, required("alarm", x.Alarm))
 	}
 	for _, x := range s.LatencyRecords {
 		add(kindLatencyRecord, x.Common, x.Name, nil, required("name", x.Name), required("hosted zone", x.HostedZone),
