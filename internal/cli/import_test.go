@@ -303,7 +303,7 @@ func TestImport(t *testing.T) {
 			want: result{1, "", header +
 				"input/generated.jsonl:1: error DF7401: the line isn't valid UTF-8\n" +
 				"input/generated.jsonl:2: error DF7401: user_id: invalid value: the partition key is 2049 bytes, over 2048\n" +
-				"input/generated.jsonl:3: error DF7401: tags: invalid value: 1001 elements, over 1000\n" +
+				"input/generated.jsonl:3: error DF7401: tags: invalid Array(String): more than 1000 elements\n" +
 				"input/generated.jsonl:4: error DF7401: invalid value: the event is over DynamoDB's 400 KB item limit\n" +
 				"dynaflux import: 4 of 4 events can't be imported; nothing written\n"},
 			stream: "page_views",

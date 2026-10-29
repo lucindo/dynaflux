@@ -37,13 +37,17 @@ func AppendJSON(dst []byte, t catalog.Type, v expr.Value) []byte {
 // ParseJSON parses data, one JSON value of type t.
 func ParseJSON(t catalog.Type, data []byte) (expr.Value, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	var x any
-	err := dec.Decode(&x)
+	// A RawMessage checks the syntax, with encoding/json's errors, without decoding elements.
+	var raw json.RawMessage
+	err := dec.Decode(&raw)
 	if err == nil {
 		if _, end := dec.Token(); !errors.Is(end, io.EOF) {
 			err = errors.New("more than one JSON value")
 		}
+	}
+	var x any
+	if err == nil {
+		x, err = decode(t, raw)
 	}
 	var v expr.Value
 	if err == nil {
@@ -56,6 +60,33 @@ func ParseJSON(t catalog.Type, data []byte) (expr.Value, error) {
 		return expr.Value{}, fmt.Errorf("invalid %s: %w", t, err)
 	}
 	return v, nil
+}
+
+// decode decodes raw, one well-formed JSON value, with numbers as [json.Number]. It stops in
+// an array of t at its first element past catalog.MaxArrayLen, so that refusing a long one
+// costs no more than a full one.
+func decode(t catalog.Type, raw json.RawMessage) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if !t.Array || raw[0] != '[' {
+		var x any
+		return x, dec.Decode(&x)
+	}
+	if _, err := dec.Token(); err != nil { // the '['
+		return nil, err
+	}
+	list := []any{}
+	for dec.More() {
+		if len(list) == catalog.MaxArrayLen {
+			return nil, fmt.Errorf("more than %d elements", catalog.MaxArrayLen)
+		}
+		var e any
+		if err := dec.Decode(&e); err != nil {
+			return nil, err
+		}
+		list = append(list, e)
+	}
+	return list, nil
 }
 
 func appendJSONScalar(dst []byte, t catalog.Type, v expr.Value) []byte {

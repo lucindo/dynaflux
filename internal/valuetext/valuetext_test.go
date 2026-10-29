@@ -186,9 +186,12 @@ func TestParseJSONErrors(t *testing.T) {
 		{"Array(UInt8)", `"[1]"`, "invalid Array(UInt8): want a JSON array"},
 		{"UInt8", "1 2", "invalid UInt8: more than one JSON value"},
 		{"UInt8", "", "invalid UInt8: EOF"},
+		{"Array(UInt8)", "[1 2]", "invalid Array(UInt8): invalid character '2' after array element"},
+		{"Array(UInt8)", "[1,", "invalid Array(UInt8): unexpected EOF"},
+		{"Array(UInt8)", jsonArray(catalog.MaxArrayLen + 1), "invalid Array(UInt8): more than 1000 elements"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.typ+" "+tt.in, func(t *testing.T) {
+		t.Run(tt.typ+" "+tt.in[:min(len(tt.in), 20)], func(t *testing.T) {
 			t.Parallel()
 			_, err := valuetext.ParseJSON(typ(t, tt.typ), []byte(tt.in))
 			if err == nil || err.Error() != tt.want {
@@ -196,4 +199,31 @@ func TestParseJSONErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ParseJSON takes an array of catalog.MaxArrayLen elements, and stops reading a longer one
+// at the first element past it: what refusing one allocates doesn't grow with its length,
+// so a large request body can't use up the function's memory.
+func TestParseJSONArrayLimit(t *testing.T) { //nolint:paralleltest // AllocsPerRun panics in a parallel test
+	at := typ(t, "Array(UInt8)")
+	if v, err := valuetext.ParseJSON(at, []byte(jsonArray(catalog.MaxArrayLen))); err != nil || len(v.AsArray()) != catalog.MaxArrayLen {
+		t.Fatalf("ParseJSON of %d elements: %v", catalog.MaxArrayLen, err)
+	}
+	refuse := func(n int) float64 {
+		data := []byte(jsonArray(n))
+		return testing.AllocsPerRun(5, func() {
+			if _, err := valuetext.ParseJSON(at, data); err == nil {
+				t.Fatalf("ParseJSON of %d elements: no error", n)
+			}
+		})
+	}
+	if short, long := refuse(catalog.MaxArrayLen+1), refuse(100*catalog.MaxArrayLen); long > 2*short {
+		t.Errorf("refusing %d elements allocates %.0f times, %d elements %.0f times", 100*catalog.MaxArrayLen, long,
+			catalog.MaxArrayLen+1, short)
+	}
+}
+
+// jsonArray returns a JSON array of n ones.
+func jsonArray(n int) string {
+	return "[" + strings.Repeat("1,", n-1) + "1]"
 }
