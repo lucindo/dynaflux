@@ -253,7 +253,3 @@ func intRange(t catalog.Type) (*big.Int, *big.Int) {
 	lo := new(big.Int).Neg(hi)
 	return lo, hi.Sub(hi, big.NewInt(1))
 }
-
-func pow10(n int) *big.Int {
-	return new(big.Int).Exp(big.NewInt(decimalBase), big.NewInt(int64(n)), nil)
-}

@@ -187,8 +187,8 @@ func setups() map[catalog.Op]setup {
 		catalog.OpMultiIf:  choice(evalMultiIf, func(i, n int) bool { return i%2 == 1 || i == n-1 }),
 		catalog.OpCoalesce: choice(evalCoalesce, func(int, int) bool { return true }),
 
-		catalog.OpLower:  is(stringOp(lowerASCII)),
-		catalog.OpUpper:  is(stringOp(upperASCII)),
+		catalog.OpLower:  is(stringOp(LowerASCII)),
+		catalog.OpUpper:  is(stringOp(UpperASCII)),
 		catalog.OpConcat: is(evalConcat),
 		catalog.OpLength: is(unary(evalLength)),
 

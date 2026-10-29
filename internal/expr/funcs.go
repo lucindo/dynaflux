@@ -15,8 +15,9 @@ func stringOp(fn func(string) string) evalFunc {
 	return unary(func(_ *node, v Value) (Value, error) { return String(fn(v.AsString())), nil })
 }
 
-// lowerASCII and upperASCII change only ASCII letters (sql.md §6).
-func lowerASCII(s string) string {
+// LowerASCII returns s with its ASCII letters in lower case: LOWER changes no other
+// letter (sql.md §6).
+func LowerASCII(s string) string {
 	b := []byte(s)
 	for i, c := range b {
 		if 'A' <= c && c <= 'Z' {
@@ -26,7 +27,9 @@ func lowerASCII(s string) string {
 	return string(b)
 }
 
-func upperASCII(s string) string {
+// UpperASCII returns s with its ASCII letters in upper case: UPPER changes no other
+// letter (sql.md §6).
+func UpperASCII(s string) string {
 	b := []byte(s)
 	for i, c := range b {
 		if 'a' <= c && c <= 'z' {

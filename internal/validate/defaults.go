@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/expr"
 	"github.com/lucindo/dynaflux/internal/sql"
 )
 
@@ -155,8 +156,8 @@ func fitNumber(r *big.Rat, t catalog.Type) (catalog.Expr, bool) {
 		lo, hi := intRange(t)
 		return literal(t, r.Num().String()), r.IsInt() && r.Num().Cmp(lo) >= 0 && r.Num().Cmp(hi) <= 0
 	}
-	m := new(big.Rat).Mul(r, new(big.Rat).SetInt(pow10(t.Scale)))
-	if !m.IsInt() || new(big.Int).Abs(m.Num()).Cmp(pow10(t.Precision)) >= 0 {
+	m := new(big.Rat).Mul(r, new(big.Rat).SetInt(expr.Pow10(t.Scale)))
+	if !m.IsInt() || new(big.Int).Abs(m.Num()).Cmp(expr.Pow10(t.Precision)) >= 0 {
 		return catalog.Expr{}, false
 	}
 	return literal(t, r.FloatString(t.Scale)), true

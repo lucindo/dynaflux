@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lucindo/dynaflux/internal/catalog"
+	"github.com/lucindo/dynaflux/internal/expr"
 )
 
 // evalLogic evaluates AND and OR left to right, stopping once the result is known, with
@@ -134,8 +135,8 @@ func scalarEvaluators() []scalarEvaluator {
 		return func(args []cval) (cval, error) { return cval{tm: args[0].tm.Truncate(step)}, nil }
 	}
 	return []scalarEvaluator{
-		{catalog.OpLower, func(args []cval) (cval, error) { return cval{str: lowerASCII(args[0].str)}, nil }},
-		{catalog.OpUpper, func(args []cval) (cval, error) { return cval{str: upperASCII(args[0].str)}, nil }},
+		{catalog.OpLower, func(args []cval) (cval, error) { return cval{str: expr.LowerASCII(args[0].str)}, nil }},
+		{catalog.OpUpper, func(args []cval) (cval, error) { return cval{str: expr.UpperASCII(args[0].str)}, nil }},
 		{catalog.OpConcat, func(args []cval) (cval, error) {
 			var b strings.Builder
 			for _, v := range args {
@@ -178,27 +179,6 @@ func startOfWeek(day time.Time, monday bool) time.Time {
 		return epoch
 	}
 	return start
-}
-
-// lowerASCII and upperASCII change only ASCII letters (sql.md §6).
-func lowerASCII(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if 'A' <= c && c <= 'Z' {
-			b[i] = c + ('a' - 'A')
-		}
-	}
-	return string(b)
-}
-
-func upperASCII(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if 'a' <= c && c <= 'z' {
-			b[i] = c - ('a' - 'A')
-		}
-	}
-	return string(b)
 }
 
 // convert converts the value a conditional returns to the conditional's type (sql.md
