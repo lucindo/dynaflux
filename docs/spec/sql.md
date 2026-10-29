@@ -1446,8 +1446,10 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
     token's text back, so another process in the same region can wait for it. A token
     grants nothing: anyone can write one, and `WaitFor` reads only receipts with it.
   - Receipts and waits use the meta table: one write per waitable event, and about six
-    strongly consistent reads per wait. With provisioned meta capacity, size it for them,
-    or keep the meta table on demand.
+    strongly consistent reads per wait. A forged token can name up to 1,000 events that
+    never arrive, and each poll reads every receipt still missing, so a wait for one costs
+    up to about 1,000 read units per poll until its timeout. With provisioned meta
+    capacity, size it for them, or keep the meta table on demand.
 
 ### 9.8 SPLIT
 

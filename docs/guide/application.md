@@ -527,6 +527,12 @@ func (r pageViewRequest) event() flux.PageView {
 A waited query must reach the region of the append, so route a user's requests to one
 region.
 
+A token that a client sends back is untrusted: anyone can write one, naming up to 1,000
+events that never arrive. A wait reads every receipt still missing at each poll, with
+strong consistency, so such a token costs about 1,000 read units of the meta table per
+poll until the timeout, which is about 13,000 in 5 seconds. Keep `WaitFor`'s timeout short,
+and rate-limit the clients whose tokens you wait on.
+
 ## 7. Errors
 
 Errors wrap these sentinels, for `errors.Is`:
