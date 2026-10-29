@@ -194,7 +194,7 @@ name: `New`, `Client`, `Catalog`, each event type and its fields, `Append<Event>
 `Append<Event>Batch`, `Read<Stream>`, `<Stream>Key`, and each query with its
 `<Name>Params` and `<Name>Row` and their fields. An event type is the stream name in
 singular CamelCase, and a field is the column name in CamelCase with Go initialisms
-(`user_id` becomes `UserID`), as in sqlc. Code generation (M2) fixes the exact rules, and
+(`user_id` becomes `UserID`), as in sqlc. Code generation fixes the exact rules, and
 `validate` uses the same ones. So streams `page_view` and `page_views` collide, and
 `-- go:type` resolves it. Every event type also has the fields `EventID`, `EventTime`,
 `IngestTime` and `OriginRegion` for the implicit columns ([§8.3](#83-implicit-columns)), so
@@ -2097,7 +2097,7 @@ The article before a placeholder fits the word that replaces it: `an avg column`
 | DF3306 | error | SPLIT must be between 2 and 16 | |
 | DF3307 | error | a row can reach <n> KB before its high-water marks; DynamoDB's 400 KB item limit leaves 368 KB after the 32 KB reserved for them | move some aggregates to another view, or use quantileDD with a larger rel_acc |
 | DF3501 | warning | MODE SYNC on a view whose rows many partition keys of <stream> share; concurrent appends will conflict, and canceled transactions are billed | add the stream's PRIMARY KEY columns to GROUP BY, or use MODE ASYNC |
-| DF3502 | retired | Was: <aggregate> over Float64 converges only up to rounding. Retired in M2, when `sum` and `avg` over `Float64` became exact ([§7.2](#72-function-reference)). | |
+| DF3502 | retired | Was: <aggregate> over Float64 converges only up to rounding. Retired before v1.0, when `sum` and `avg` over `Float64` became exact ([§7.2](#72-function-reference)). | |
 | DF3503 | warning | <aggregate> skips rows where <arg> is NULL, so NULL never replaces a value | use a sentinel: <fn>(coalesce(<arg>, <default>), <val>). A UUID <arg> gets no hint. |
 | DF3504 | warning | view reads <column> from DEDUP stream <stream>; a duplicate accepted in two regions has a different <column> in each | group by event_time instead of ingest_time; avoid origin_region |
 

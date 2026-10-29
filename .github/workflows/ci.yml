@@ -90,3 +90,7 @@ jobs:
       # image ships pipx.
       - run: pipx install cfn-lint==1.58.0
       - run: make infra-lint
+      # The scripts that only the maintainer runs, on AWS or at a release, and the guides'
+      # sh blocks, which delete AWS resources.
+      - run: command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+      - run: make shellcheck

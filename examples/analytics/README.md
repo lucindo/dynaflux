@@ -10,6 +10,11 @@ archive on in both regions. Everything Dynaflux generates for it is committed he
 can read the client, the runtime's `main.go` and the CloudFormation templates without
 running anything.
 
+This page lists the files and commands. For the explanations, see
+[getting-started.md](../../docs/guide/getting-started.md), which builds a smaller store
+step by step, and [operations.md](../../docs/guide/operations.md), which deploys and runs
+one.
+
 | Path | What it is |
 |------|------------|
 | `dynaflux.yaml` | The store's configuration ([config.md](../../docs/spec/config.md)). |
@@ -49,8 +54,7 @@ Formation must be at its defaults, and you need the SAM CLI and the AWS CLI.
 
 ```sh
 cd examples/analytics
-export CGO_ENABLED=0 GOFLAGS=-tags=lambda.norpc
-sam build -t infra/dynaflux/regional.yaml
+CGO_ENABLED=0 GOFLAGS=-tags=lambda.norpc sam build -t infra/dynaflux/regional.yaml
 
 # 1. The stream tables, in the home region:
 sam deploy -t infra/dynaflux/global.yaml --stack-name demo-analytics-global \
@@ -70,7 +74,7 @@ done
 go run ../../cmd/dynaflux backfill -all -yes
 
 # 5. With the application, the query function of TagTotals, in each region:
-sam build -t infra/dynaflux/query.yaml --build-dir .aws-sam/query
+CGO_ENABLED=0 GOFLAGS=-tags=lambda.norpc sam build -t infra/dynaflux/query.yaml --build-dir .aws-sam/query
 for region in us-east-1 us-west-2; do
   sam deploy -t .aws-sam/query/template.yaml --stack-name demo-analytics-query --region "$region" \
     --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND --resolve-s3

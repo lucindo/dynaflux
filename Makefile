@@ -254,10 +254,12 @@ infra-lint: ## Lint the golden CloudFormation templates and the example's with c
 	go test -count=1 -run '^TestCfnLint$$' -v ./internal/infra/cloudformation
 	cfn-lint --regions us-east-1 us-west-2 --non-zero-exit-code warning -- $(E2E_PKG)/fis.yaml
 
-# -x follows the files that scripts source.
-shellcheck: ## Lint the shell scripts under scripts/ with shellcheck (needs shellcheck on PATH).
+# -x follows the files that scripts source. TestDocShell checks the sh blocks of the README and
+# the guides, and runs only with -shellcheck.
+shellcheck: ## Lint the shell scripts under scripts/, and the sh blocks of the README and the guides, with shellcheck (needs shellcheck on PATH).
 	$(call require_cmd,shellcheck,brew install shellcheck)
 	shellcheck -x $(SHELL_SCRIPTS)
+	go test -count=1 -run '^TestDocShell$$' ./internal/cli -shellcheck
 
 trivy: ## Scan the repo for vulnerabilities, secrets, and misconfigurations with trivy (needs trivy on PATH).
 	$(call require_cmd,trivy,brew install trivy)

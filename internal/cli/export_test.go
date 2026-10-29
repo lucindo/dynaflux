@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"runtime/debug"
 	"strings"
@@ -134,3 +135,21 @@ func Confirm(ctx context.Context, stdin io.Reader, terminal, yes bool) (int, str
 
 // IsTerminal is isTerminal.
 func IsTerminal(r io.Reader) bool { return isTerminal(r) }
+
+// ParseCommand parses args, the arguments after the program name, as Run does, without
+// running the command. It returns the command's name and the operands left after its flags.
+func ParseCommand(args []string) (string, []string, error) {
+	if len(args) == 0 {
+		return "", nil, errors.New("no command")
+	}
+	c := &cli{}
+	cmd, ok := c.find(args[0])
+	if !ok {
+		msg, _, _ := strings.Cut(c.errOut.String(), "\n")
+		return "", nil, errors.New(msg)
+	}
+	fs := flagSet(cmd)
+	cmd.setup(fs)
+	operands, err := parse(fs, args[1:])
+	return cmd.name, operands, err
+}

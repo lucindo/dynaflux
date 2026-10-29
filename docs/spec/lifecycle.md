@@ -54,42 +54,35 @@ command needs), [config.md](config.md).
 Dynaflux never deploys. Your infrastructure tool deploys the templates that
 `dynaflux generate` writes ([infra.md §11](infra.md#11-deploying)), and the commands below
 move versions through their states. Commands take flags with one dash, such as `-all`.
+[operations.md §3](../guide/operations.md#3-change-procedures) gives each change as numbered
+steps. They follow these rules:
 
-**First deploy of a store:**
-
-1. `dynaflux generate`, then build the runtime binary.
-2. Deploy `global.yaml`, then `regional.yaml` in every region.
-3. Run `dynaflux backfill -all -yes`. On a store that has no events yet, every version
-   becomes `live` in about two minutes in a region that archives the stream with
-   `archive.events: all` (the default), and in about 30 minutes in other regions
-   ([§4.3](#43-fresh-streams)). In those regions it also records each stream's origin,
-   from which the region's archive of the stream is complete
-   ([§5.5](#55-when-the-archive-is-complete)). It can do that only before the stream's
-   first event, and within 23 hours of the `global.yaml` deploy.
-4. Deploy the application, and `query.yaml` when `generate` wrote one: it holds the query
-   function of the queries annotated `-- expose: http`
-   ([infra.md §6.6](infra.md#66-query-function)).
-
-**A changed view (a new version):**
-
-1. `dynaflux generate` and `dynaflux diff`. `diff` shows the new version and refuses changes
-   that would lose data.
-2. Deploy `regional.yaml` in every region.
-3. `dynaflux backfill <view>`. It fills the version `dynaflux.lock` makes current, in every
-   region at once. Start it while `dynaflux status` shows no projector lag
-   ([§5.1](#51-how-events-are-split)).
-4. When `dynaflux status` shows the version `live` in every region the application reads
-   from, deploy the application and `query.yaml`. Until then the old build and the deployed
-   query function keep querying the previous version, which keeps running.
-5. Retire the previous version ([§8](#8-retiring-a-version)).
-
-**A new stream:** deploy `global.yaml`, then `regional.yaml` in every region, then run
-`dynaflux backfill -all`, then deploy the application that writes to it. Run `backfill`
-within 23 hours of the `global.yaml` deploy, so that it records the stream's origin in each
-region that archives it with `events: all` ([§5.5](#55-when-the-archive-is-complete)).
-`status` warns until it has (DF7218).
-
-**A new region:** see [§10](#10-regions-and-environments).
+- **Templates first.** Build and deploy from the tree that `generate` wrote: `global.yaml`
+  in the home region, then `regional.yaml` in every region. A backfill activates a version
+  only in a region whose deployed catalog defines it ([§4.1](#41-guards)).
+- **A backfill before any read.** A new version is `pending_backfill`, and its queries
+  return `ErrViewNotReady`, until a backfill makes it `live` ([§3](#3-view-version-states)):
+  `dynaflux backfill -all` after the first deploy and after a new stream, and
+  `dynaflux backfill <view>` after a changed view. On a stream without events, a version
+  becomes `live` in about two minutes in a region that archives the stream with
+  `archive.events: all`, the default, and in about 30 minutes elsewhere
+  ([§4.3](#43-fresh-streams)).
+- **No lag before a time split.** Start a backfill while `dynaflux status` shows no
+  projector lag ([§5.1](#51-how-events-are-split)).
+- **A new stream's origin.** `backfill` records a stream's origin, from which the region's
+  archive of the stream is complete, only before the stream's first event and within 23
+  hours of the `global.yaml` deploy that created its table
+  ([§5.5](#55-when-the-archive-is-complete)). `status` warns until it has (DF7218).
+- **The application last.** Deploy the application, and `query.yaml` when `generate` wrote
+  one ([infra.md §6.6](infra.md#66-query-function)), once `dynaflux status` shows the
+  versions it reads `live` in every region it reads from. Until then, the deployed
+  application and query function keep querying the previous version, which keeps running.
+  An application that writes to a new stream deploys after the stream's backfill, and one
+  that writes a new column after `regional.yaml` in every region: a projector of the older
+  build ignores the column, and archives the events without it.
+- **Retire after the readers move.** Retire a version that is no longer current once no
+  deployed application or query function reads it ([§8](#8-retiring-a-version)).
+- **A new region** is filled as [§10](#10-regions-and-environments) says.
 
 **Locally:** `dynaflux dev` runs the store on DynamoDB Local. It creates the tables that are
 missing, registers the catalog, projects every stream, and fills each version that isn't
@@ -106,12 +99,6 @@ AWS, and refuses an event appended in another region: give the application that 
 stops in that region until a build that defines it is deployed again
 ([§4.1](#41-guards)). A rollback doesn't undo a retire: a version that a deploy retired
 stays `retired` ([§8](#8-retiring-a-version)).
-
-**`SYNC` views and older builds:** builds before M6 don't skip the versions that an
-append's transaction applied, so they would apply those events a second time
-([§4.4](#44-sync-views)). Deploy `regional.yaml` before an application that appends to a
-stream with a `SYNC` view, as above, and don't roll a regional stack back to such a build
-while that application runs.
 
 ## 3. View-version states
 
@@ -229,7 +216,6 @@ region skips exactly those versions for that event; other regions apply it as us
   the projector, as for an `ASYNC` view.
 - `retire` stops appends from applying a version within 30 seconds, as it stops projectors
   ([§8](#8-retiring-a-version)).
-- Builds before M6 don't skip what appends applied: see [§2](#2-deploying-changes).
 
 ## 5. Backfill
 
@@ -665,7 +651,7 @@ and the findings read from the meta table still print. Codes are stable as in
 | DF7209 | error | `status`: projectors block on a version their catalog doesn't know (guard 2); the hint names the build to deploy and the time records start to be lost. |
 | DF7210 | warning | `status`: the archive is stale, or rows failed. |
 | DF7216 | warning | `status`: a backfill is interrupted (its execution ended without finishing). |
-| DF7217 | retired | Was: `status`: a backfill waits for the archive read of a later release. Retired in M6, when backfills read the archive. |
+| DF7217 | retired | Was: `status`: a backfill waits for the archive read of a later release. Retired before v1.0, when backfills read the archive. |
 | DF7218 | warning | `status`, `backfill -all`, `import`: a stream table is less than 23 hours old and has no origin in a region that archives it with `events: all`; run `backfill -all` before its first event, or the region's archive of it is never complete ([§5.5](#55-when-the-archive-is-complete)). `backfill -all` says why it recorded none, and `import` warns of a table that holds an event already, whose archive is never complete. |
 | DF7219 | error | `status`: a version's backfill job failed on an archive that wasn't complete, with the job's error; the version stays `activating` and can't go live. Rebuild the view ([§7.3](#73-rebuilding-a-version)). |
 | DF7220 | warning | `status`: a version that the deployed catalog keeps but no longer makes current is still `live`, and the view's current version is `live` too, or the view has no current version; retire it ([§8](#8-retiring-a-version)). The hint retires it in the regions that `status` read, or in its region alone when another of them would refuse it with DF7303. |
@@ -683,5 +669,5 @@ and the findings read from the meta table still print. Codes are stable as in
 | DF7502 | error | `backfill`: the version is broken or retired. |
 | DF7503 | error | `backfill`: `-source archive`, but the region's archive of the stream isn't complete (the rule that failed, [§5.5](#55-when-the-archive-is-complete)). |
 | DF7504 | error | `backfill -cancel`: the version has no running job to cancel. |
-| DF7505 | retired | Was: `backfill`: the version's job waits for the archive read of a later release. Retired in M6, when backfills read the archive. |
+| DF7505 | retired | Was: `backfill`: the version's job waits for the archive read of a later release. Retired before v1.0, when backfills read the archive. |
 | DF7506 | error | `backfill`: the version's job failed on an archive that wasn't complete; rebuild the view ([§5.4](#54-jobs)). |

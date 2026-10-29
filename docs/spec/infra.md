@@ -186,7 +186,7 @@ One `AWS::DynamoDB::GlobalTable` per stream, `Stream<Name>`:
 | Stream | `NEW_AND_OLD_IMAGES` | The projector compares both images of a `MODIFY`. The view type can't change once a table has two replicas. |
 | Time to live | On, attribute `_ttl` | Events expire after the stream's `LOG RETENTION` ([encoding.md §5.4](encoding.md#54-_ttl)). It is on even for `LOG RETENTION FOREVER`, whose events have no `_ttl`: DynamoDB allows one TTL change per hour, so turning it on and off would make a quick redeploy or a rollback fail. |
 | Replicas | One per region in `regions` | |
-| Deletion protection | On for every replica, except the region named by `generate --unprotect-region` ([§13](#13-checks-in-generate)) | It protects the facts. It is set per replica, because DynamoDB doesn't copy it between replicas. |
+| Deletion protection | On for every replica, except the region named by `generate -unprotect-region` ([§13](#13-checks-in-generate)) | It protects the facts. It is set per replica, because DynamoDB doesn't copy it between replicas. |
 | Point-in-time recovery | On for every replica | The stream tables hold the facts, and with a short log it costs little. |
 | Deletion and replacement | `Retain` | Facts outlive the stack. Not `RetainExceptOnCreate`: deletion protection would make a create rollback fail anyway. |
 | Encryption | AWS owned key, the default | [§14](#14-deliberate-omissions) |
@@ -1011,8 +1011,7 @@ so new view versions appear without a change to the template.
 **Build** the runtime binary once, from the project root, after `dynaflux generate`:
 
 ```sh
-export CGO_ENABLED=0 GOFLAGS=-tags=lambda.norpc
-sam build -t infra/dynaflux/regional.yaml
+CGO_ENABLED=0 GOFLAGS=-tags=lambda.norpc sam build -t infra/dynaflux/regional.yaml
 ```
 
 AWS recommends both settings for Go on `provided.al2023`, and SAM's Go builder sets neither.
@@ -1057,7 +1056,7 @@ of the `global.yaml` deploy; without one, backfills in that region never read th
 `regions`. It builds apart from `regional.yaml`, from the same tree:
 
 ```sh
-sam build -t infra/dynaflux/query.yaml --build-dir .aws-sam/query
+CGO_ENABLED=0 GOFLAGS=-tags=lambda.norpc sam build -t infra/dynaflux/query.yaml --build-dir .aws-sam/query
 sam deploy -t .aws-sam/query/template.yaml --stack-name prod-analytics-query \
   --region us-east-1 --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND --resolve-s3 \
   --parameter-overrides Prefix=prod-
@@ -1094,11 +1093,11 @@ region.
 | Remove the last `-- expose: http` | `generate` deletes `query.yaml`. Delete the query stack in every region. |
 | Change `http.frontend`, `http.auth` or `http.domain` | Deploy `query.yaml` in every region. Another `frontend` replaces the door, and its `QueryEndpoint` changes. Another `auth` changes what the door asks of callers as soon as it deploys, so give them their new credentials first. |
 | Retire a view version | Deploy the application and `query.yaml` first. Run `dynaflux retire <view>@v<N>`, with each environment's `-prefix`, then `generate`, and deploy `regional.yaml` in every region. CloudFormation deletes the version's table at the end of the update ([lifecycle.md §8](lifecycle.md#8-retiring-a-version)). |
-| Roll back, or deploy an older build | Never past a view version that is `activating` or `live` in the region: the older build can't apply it, so its stream stops in that region until a build that defines it is deployed again (`dynaflux status` reports DF7209). `Catalog` registers the older catalog again ([§6.4](#64-catalog-registration)). A rollback doesn't undo a retire. Never to a build before M6 while an application appends to a stream with a `SYNC` view: older projectors don't skip the versions its transactions applied ([lifecycle.md §2](lifecycle.md#2-deploying-changes)). |
+| Roll back, or deploy an older build | Never past a view version that is `activating` or `live` in the region: the older build can't apply it, so its stream stops in that region until a build that defines it is deployed again (`dynaflux status` reports DF7209). `Catalog` registers the older catalog again ([§6.4](#64-catalog-registration)). A rollback doesn't undo a retire. |
 | Change `runtime.split` | Deploy `regional.yaml`. Functions are created and deleted, and the mappings are updated in place. |
 | Change capacity | Deploy the template that holds the table. DynamoDB lets a table switch from provisioned to on-demand at most 4 times in 24 hours. |
 | Add a region | One region per change (`generate` refuses more, DF6017), and nothing else in the same deploy. Add it to `regions`, run `generate`, and deploy `global.yaml`: DynamoDB copies the existing items to the new replica, which can take hours. Then deploy `regional.yaml` in the new region, and run `dynaflux backfill -all -region <region>`. Its view versions hold only the events inside each stream's `LOG RETENTION`, and `status` labels them partial ([lifecycle.md §10](lifecycle.md#10-regions-and-environments)). |
-| Remove a region | Never the home region. Delete the region's regional stack. Run `generate --unprotect-region <region>` and deploy `global.yaml`, which turns off deletion protection on that region's replicas; `generate` refuses to remove the region before that (DF6018). Then remove the region from `regions`, run `generate`, and deploy `global.yaml`: DynamoDB deletes the region's replicas, with their data. The region's bucket and Glue database stay. |
+| Remove a region | Never the home region. Delete the region's regional stack. Run `generate -unprotect-region <region>` and deploy `global.yaml`, which turns off deletion protection on that region's replicas; `generate` refuses to remove the region before that (DF6018). Then remove the region from `regions`, run `generate`, and deploy `global.yaml`: DynamoDB deletes the region's replicas, with their data. The region's bucket and Glue database stay. |
 | Stop archiving a stream: `enabled: false`, a dropped stream, or a shorter `archive.regions` | CloudFormation deletes the Firehose stream, and Firehose doesn't promise to deliver the records it still buffers (up to 300 seconds or 128 MiB), although the projector counted them as sent. To drop a stream: stop writing to it, wait until the projector's iterator age is near 0 and the archive's data freshness has drained, then deploy. For a stream that stays, the archive may miss up to one buffer before the change; when only `archive.regions` shrinks, the other regions' archives keep their copies. The Glue database, the Iceberg tables and their files stay, and archiving again goes on with them. `ArchiveMode` records the change as a hole in the region's archive history of the stream, so from then on that region's backfills read the table ([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete)); so does archiving again. |
 | Drop a stream | Its Global Table, Iceberg table and archive files stay; its mapping, lookup and Firehose stream go. Delete what stays by hand. |
 | Change `prefix` or `store` | Deploy new stacks. Updating an existing stack fails: the setup function's ARN changes, and a custom resource's service token can't. The stack policy also refuses to replace stream tables. |
@@ -1130,7 +1129,7 @@ ones when:
 - the replica regions of the old `global.yaml` and the new `regions` differ by more than one
   region (DF6017): a Global Table update adds or removes one replica at a time;
 - `regions` drops a region whose replicas have deletion protection in the old `global.yaml`
-  (DF6018): run `generate --unprotect-region <region>` and deploy `global.yaml` first
+  (DF6018): run `generate -unprotect-region <region>` and deploy `global.yaml` first
   ([§12](#12-changes-after-the-first-deploy)).
 
 The messages say how to repair the lock. To start over on purpose, delete the old templates
@@ -1139,7 +1138,7 @@ stops too: restore them, or delete them. These checks see only the files in `inf
 `dynaflux diff` compares with what is deployed
 ([lifecycle.md §12](lifecycle.md#12-diagnostics)).
 
-**`--unprotect-region <region>`** turns deletion protection off on that region's stream table
+**`-unprotect-region <region>`** turns deletion protection off on that region's stream table
 replicas in the `global.yaml` it writes: the first step of removing a region
 ([§12](#12-changes-after-the-first-deploy)). The region must be in `regions`. The flag
 applies to one run; the next `generate` without it turns protection back on.
@@ -1174,7 +1173,7 @@ archived streams and 60 provisioned view versions pass the limit. Roles have the
 
 | What | When | Why |
 |------|------|-----|
-| Checks of the deployed stacks that `status` doesn't make yet: the event source mappings' settings against [§8](#8-fixed-values), stream replicas outside `regions`, the archive schema and the optimizer runs in each region | M7 | `status` covers the states, jobs, mappings, lag, archive freshness and gaps ([lifecycle.md §12](lifecycle.md#12-diagnostics)). |
+| Checks of the deployed stacks that `status` doesn't make yet: the event source mappings' settings against [§8](#8-fixed-values), stream replicas outside `regions`, the archive schema and the optimizer runs in each region | After v1 | `status` covers the states, jobs, mappings, lag, archive freshness and gaps ([lifecycle.md §12](lifecycle.md#12-diagnostics)). |
 | Orphan-file removal for the archive tables | When a store needs it | Table locations already can't overlap ([§7.3](#73-tables-and-columns)). |
 | Splitting `regional.yaml` past 500 resources | When a store needs it | `generate` refuses with the count ([§13](#13-checks-in-generate)). CloudFormation stack refactoring can later move the alarms and the dashboard to a third stack without replacing them. |
 | Managed policies for the projector and setup roles past the inline size limit | When a store needs it | `generate` refuses with guidance ([§9.5](#95-policy-size)). The backfill role's statements that grow with the store already go in managed policies ([§9.6](#96-backfill-role)). |
@@ -1215,7 +1214,7 @@ page will record the answers:
 - That `dynamodb:EnclosingOperation` limits an application's `PutItem` on view tables to its
   transactions ([§9.9](#99-applications)).
 - Whether deletion protection blocks removing a replica. If it doesn't,
-  `--unprotect-region` goes.
+  `-unprotect-region` goes.
 - Whether a new replica's initial copy of the existing items appears in its stream.
 - Whether, after a `split` change, the old function's last batch on a shard can overlap the
   new function's first.

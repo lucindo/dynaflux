@@ -9,9 +9,9 @@ SPDX-License-Identifier: Apache-2.0
 definitions live, and how code and infrastructure are generated. This page is the normative
 schema.
 
-Every command that loads a project (`dynaflux validate`, `dynaflux explain`, and later
-`dynaflux generate`) applies all the rules below, including those for keys that only later
-milestones use.
+Every command that loads a project, such as `dynaflux validate`, `dynaflux explain` and
+`dynaflux generate`, applies all the rules below, including those for keys that the command
+doesn't use.
 
 The SQL dialect is specified in [sql.md](sql.md), how Dynaflux stores data in
 [encoding.md](encoding.md), and the infrastructure that `dynaflux generate` writes in
@@ -156,9 +156,9 @@ The **Used by** column names who reads each value. `validate` checks every key.
 | Tag | Reader |
 |-----|--------|
 | `validate` | Only the checks on this page. |
-| `explain` | The cost model of `dynaflux explain` (M1). |
-| `catalog` | Resolved into the catalog that the generated code embeds and the runtime reads (M2). |
-| `codegen` | The Go files that `dynaflux generate` writes (M2). |
+| `explain` | The cost model of `dynaflux explain`. |
+| `catalog` | Resolved into the catalog that the generated code embeds and the runtime reads. |
+| `codegen` | The Go files that `dynaflux generate` writes. |
 | `infra` | The generated CloudFormation/SAM templates ([infra.md](infra.md)). |
 | `names` | The [resource names](#resource-names). The operator commands find resources by these names. |
 
@@ -408,7 +408,7 @@ deterministic, the CLI finds every resource from the project's files alone.
 
 `validate` computes each name below for the current SQL and config, and checks it against
 the AWS rules (`DF6110`, `DF6111`). View version numbers come from `dynaflux.lock`
-([sql.md §9.9](sql.md#99-view-versions)), which `validate` reads from M2 and only
+([sql.md §9.9](sql.md#99-view-versions)), which `validate` reads and only
 `dynaflux generate` writes:
 
 - The table name of every version in the catalog, current and retained, is checked.
@@ -544,7 +544,7 @@ such as `status` and `backfill`, are in [lifecycle.md §12](lifecycle.md#12-diag
 | Code | Severity | Meaning | Hint |
 |------|----------|---------|------|
 | DF6001 | error | No `dynaflux.yaml` in the working directory or any parent. | Run the command inside your project, or create `dynaflux.yaml` at its root. |
-| DF6002 | error | A file can't be read: `dynaflux.yaml`, a file matched by `sql`, or, from M2, `dynaflux.lock` when it exists. The message carries the operating system's error. | Check the path and its permissions. |
+| DF6002 | error | A file can't be read: `dynaflux.yaml`, a file matched by `sql`, or `dynaflux.lock` when it exists. The message carries the operating system's error. | Check the path and its permissions. |
 | DF6003 | error | YAML syntax error. The message carries the parser's error. | Fix the YAML at the position shown. |
 | DF6004 | error | The file isn't one YAML mapping: it's empty or has only comments, it has more than one document, or its top level is a list or a scalar. | Keep one document of `key: value` lines. |
 | DF6005 | error | Unknown key. | `did you mean "<key>"?` when a known key is close; otherwise the keys allowed there. |
@@ -555,7 +555,7 @@ such as `status` and `backfill`, are in [lifecycle.md §12](lifecycle.md#12-diag
 | DF6010 | error | An integer is out of range. | The range and where it comes from, such as the Lambda limit. |
 | DF6011 | error | A list that needs at least one entry is empty. | Add at least one entry, or, for a key with a default, remove the key. |
 | DF6012 | error | A list has the same entry twice. | Remove the repeat. |
-| DF6013 | error | `dynaflux.lock` can't be used: it isn't valid JSON in the lock format (for example, it has merge-conflict markers), it has an unknown field or `format`, a key that appears twice in one object (as "accept both" in a merge tool can leave) or isn't in lower case, a view repeats a version number, an entry's definition doesn't match its fingerprint (a hand edit), a `retired` entry holds more than its `number`, `state` and `fingerprint`, or a rebuild count is below 1, names a view the lock doesn't hold, or is below the count of one of the view's versions (a merge lost it). The message gives the reason. Reported from M2. | If it has merge conflicts, keep the lock from the branch that merged first, then run `dynaflux generate`. Undo hand edits. Don't delete the file: that renumbers every view. |
+| DF6013 | error | `dynaflux.lock` can't be used: it isn't valid JSON in the lock format (for example, it has merge-conflict markers), it has an unknown field or `format`, a key that appears twice in one object (as "accept both" in a merge tool can leave) or isn't in lower case, a view repeats a version number, an entry's definition doesn't match its fingerprint (a hand edit), a `retired` entry holds more than its `number`, `state` and `fingerprint`, or a rebuild count is below 1, names a view the lock doesn't hold, or is below the count of one of the view's versions (a merge lost it). The message gives the reason. | If it has merge conflicts, keep the lock from the branch that merged first, then run `dynaflux generate`. Undo hand edits. Don't delete the file: that renumbers every view. |
 | DF6014 | error | The file uses an anchor (`&a`), an alias (`*a`), a merge key (`<<`) or an explicit tag (`!!str`, `!x`). | Write each value out in full. Quote a string instead of tagging it. |
 | DF6015 | error | A view version that `dynaflux.lock` retains can't be maintained: the stream it reads is gone, the stream no longer has a column it reads with the type it reads, the stream now has a column named like the version's `ARRAY JOIN` alias (the column would win), or a stream now has the view's name. The message names the version and the reason. | Restore the stream or the column, or rename the stream or the new column; or retire the version with `dynaflux retire`. |
 | DF6016 | error | Reported by `generate` only. A view version's table in the `regional.yaml` that `generate` wrote last time is missing from the new one, and `dynaflux.lock` doesn't mark the version retired; or a version keeps its number but its fingerprint changed. Deploying would delete a table the application reads, or write rows of a new definition into an old version's table. This happens when the lock was lost, reverted or merged badly. | Restore `dynaflux.lock` from version control and run `dynaflux generate` again. To start over on purpose, delete the old templates first. |

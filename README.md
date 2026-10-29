@@ -8,9 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 Dynaflux is a Go library and CLI for event-sourced fact streams and materialized views on
 DynamoDB Global Tables. You declare streams, views and queries in ClickHouse-flavored SQL.
 Dynaflux rejects, at build time, any query that DynamoDB can't serve efficiently, and
-estimates what each event and query costs. The goal is to turn these definitions into
-typed Go code and infrastructure that run active-active in several AWS regions. None of it
-has run on AWS yet: see [Status](#status).
+estimates what each event and query costs. It generates a typed Go client and the
+CloudFormation templates that run your store active-active in several AWS regions. None of
+it has run on AWS yet: see [Status](#status).
 
 ## Why
 
@@ -33,56 +33,61 @@ rules:
 - **A library, not a service.** No Dynaflux server sits in the request path, and you own the
   generated infrastructure.
 
-Every query is declared ahead of time and there are no joins. Ad-hoc exploration will run in
-Athena, over an archive of events that Dynaflux writes to S3.
+Every query is declared ahead of time and there are no joins. For ad-hoc questions, Athena
+reads the archive of every event that Dynaflux keeps in S3.
+
+## What you get
+
+- `dynaflux validate` checks a project and reports each problem with its file, line and a
+  hint on how to fix it. `dynaflux explain` shows the table layout and the estimated cost of
+  a stream, view or query.
+- `dynaflux generate` writes a typed Go client package, the `main.go` of the Lambda binary
+  that runs the store's functions, and the CloudFormation templates. It numbers view
+  versions in `dynaflux.lock`, a file you commit.
+- The library appends events and runs queries. `DEDUP BY` makes appends safe to retry,
+  `SYNC` views update in the append's transaction, and wait tokens let an application read
+  its own writes.
+- In each region, a Lambda function, the projector, keeps the views current. It also
+  archives every event to Apache Iceberg tables on S3, for Athena and for backfills.
+- The operator commands work on a deployed store: `status`, `diff`, `backfill`, `retire`,
+  `inspect`, `query` and `import`.
+- `dynaflux dev` runs the store on DynamoDB Local while you build the application, and
+  `fluxtest` gives its tests an in-memory store.
+- A query marked `-- expose: http` is served over HTTP, for clients in other languages.
 
 ## Status
 
-Dynaflux is in early development, at milestone M5: the operator commands. What works:
+Dynaflux is preparing its first release, v1.0.0. Release candidates come first, tagged
+`v1.0.0-rc.1` and up. [CHANGELOG.md](CHANGELOG.md) lists what each release changes.
 
-- The SQL dialect and `dynaflux.yaml` are specified in [docs/spec](docs/spec).
-- `dynaflux validate` checks a project and reports each problem with its file, line and a
-  hint on how to fix it.
-- `dynaflux explain` shows the table layout and the estimated cost of a stream, view or
-  query.
-- `dynaflux generate` writes the typed Go client package of a project and numbers its view
-  versions in `dynaflux.lock`, a file you commit. It also writes the store's AWS
-  infrastructure as CloudFormation templates ([docs/spec/infra.md](docs/spec/infra.md)),
-  and the `main.go` of the Lambda binary that its functions run.
-- The generated client appends events and runs queries against an in-memory store from
-  `fluxtest`, with the projector keeping views current.
-  [examples/analytics](examples/analytics) compiles and passes its tests this way.
-- `dynaflux.Open` returns a store backed by DynamoDB. The Lambda binary runs the projector,
-  which keeps views current and archives events through Firehose, the setup function that
-  the templates' custom resources call, and the backfill function that each region's state
-  machine steps. The integration tests run the store, the projector and the commands against
-  DynamoDB Local.
-- The operator commands work on a deployed store, one environment per run. `status` shows
-  each view version's state in each region and what needs an action, `diff` compares the
-  project with the deployed store, `backfill` fills new view versions so they go live, and
-  `retire` removes the ones no longer current. `inspect` and `query` read events, rows and
-  named queries, and `import` loads past events.
-  [docs/spec/lifecycle.md](docs/spec/lifecycle.md) specifies them.
-- `dynaflux init` starts a project, and `dynaflux dev` runs its store on DynamoDB Local for
-  an application under development.
+Everything above is tested without AWS: unit tests, a simulation of three regions with
+faults, integration tests on DynamoDB Local, and an end-to-end suite that runs the
+[example store](examples/analytics) on DynamoDB Local. Nothing has run on AWS yet. Before
+v1.0.0, a release candidate must pass two runs on AWS: the end-to-end suite, and the
+[getting started](docs/guide/getting-started.md) guide followed from the first command to
+the teardown.
 
-Nothing has run on AWS yet. Milestone M6 adds `SYNC` views and wait tokens, backfills that
-read the archive of a stream that already has events, and HTTP query endpoints. Until v1.0,
-the dialect, the configuration and the commands may change.
+Until v1.0.0, anything may still change. From v1.0.0 on, every v1.x release keeps the Go
+API, your projects, the stored data, the AWS resource names, the CLI's commands and flags,
+and the wire formats compatible, as
+[ADR 0019](docs/decisions/0019-v1-compatibility-promise.md) lists.
 
 ## Install
 
-Dynaflux needs Go 1.26 or later. There is no tagged release yet, so `@latest` installs the
-newest commit on `main`.
+Dynaflux needs Go 1.26 or later. A project that uses it is a Go module. In the module's
+directory, add the CLI as a Go tool, so that `go.mod` pins its version and the library's:
 
-Add the CLI to your project as a Go tool, so its version is pinned in your `go.mod`:
-
+<!-- doctest: skip -->
 ```sh
 go get -tool github.com/lucindo/dynaflux/cmd/dynaflux@latest
-go tool dynaflux help
+go tool dynaflux version
 ```
 
-Or install it on your `PATH`:
+`version` shows the versions of the CLI, of the library that `go.mod` requires, and of the
+code that `generate` writes.
+
+Or install the CLI on your `PATH`. Then `dynaflux init` tells you to add the library to
+your module with `go get`:
 
 ```sh
 go install github.com/lucindo/dynaflux/cmd/dynaflux@latest
@@ -95,6 +100,7 @@ This example counts page views. The commands use `dynaflux`; if you added it as 
 
 At the root of your project, create `dynaflux.yaml` with the store's name and its regions:
 
+<!-- doctest: file dynaflux.yaml -->
 ```yaml
 store: analytics
 regions: [us-east-1, us-west-2]
@@ -103,6 +109,7 @@ regions: [us-east-1, us-west-2]
 Then create `dynaflux/pages.sql` with a stream of page views, a view with daily totals per
 page, and a query over that view:
 
+<!-- doctest: file dynaflux/pages.sql -->
 ```sql
 CREATE STREAM page_views (
     user_id     String,
@@ -190,6 +197,7 @@ on their own.
 Now add a query that DynamoDB can't serve without scanning every page. Create
 `dynaflux/top_pages.sql`:
 
+<!-- doctest: file dynaflux/top_pages.sql -->
 ```sql
 -- name: TopPages :many
 SELECT page, views
@@ -201,55 +209,41 @@ LIMIT 10;
 
 `validate` rejects it, and exits with status 1:
 
+<!-- doctest: exit 1 -->
 ```console
 $ dynaflux validate
 dynaflux/top_pages.sql:4:1: error DF4101: TopPages: view page_daily is partitioned by (page), but WHERE does not bind "page" with = or IN. Every query must fix the partition key.
   hint: add page = {page:String} to WHERE, or declare a view whose PRIMARY KEY matches this query
 ```
 
+[Getting started](docs/guide/getting-started.md) builds a store like this one step by step,
+runs it on your machine, then deploys it to two AWS regions.
+
 ## Documentation
 
-- [docs/spec/sql.md](docs/spec/sql.md): the SQL dialect, with every diagnostic code.
-- [docs/spec/config.md](docs/spec/config.md): the `dynaflux.yaml` reference.
-- [docs/spec/encoding.md](docs/spec/encoding.md): how Dynaflux stores data in DynamoDB.
-- [docs/spec/infra.md](docs/spec/infra.md): the CloudFormation templates that
-  `dynaflux generate` writes.
-- [docs/spec/lifecycle.md](docs/spec/lifecycle.md): view versions from deploy to removal,
-  and the operator commands.
-- [docs/decisions](docs/decisions/README.md): architecture decision records.
-- [docs/README.md](docs/README.md): an index of all the docs.
+The guides:
 
-## Development
+- [Getting started](docs/guide/getting-started.md): build a store, run it on your machine,
+  deploy it to two AWS regions, and delete it.
+- [Concepts](docs/guide/concepts.md): the parts of a store, how an event flows, and what to
+  expect across regions and during an outage.
+- [Writing the application](docs/guide/application.md): the generated Go client, values,
+  errors and tests.
+- [SQL recipes](docs/guide/dialect.md): streams, views and queries for common tasks.
+- [Operating a store](docs/guide/operations.md): `status`, change procedures, backfills,
+  alarms and the archive.
+- [What a store costs](docs/guide/cost.md): where the money goes, the settings that lower
+  it, and how to read `explain`.
 
-- `make help` lists the development targets. `make verify` runs the formatters,
-  `go mod tidy`, a check that no module needs a Go newer than 1.26, the linters, the
-  vulnerability check, the tests and a `linux/arm64` build of the example's Lambda binary.
-  If the linter reports an unknown linter, your `golangci-lint` is older than
-  `.golangci.yml`: run `make tools-update`.
-- `Float64` results must be the same on every CPU, so `make cross-arch` runs the
-  cross-architecture tests as amd64: natively on an amd64 machine, and through Rosetta on
-  Apple silicon. It isn't part of `make verify`.
-- A test fails when `dynaflux generate` would change the files generated in
-  [examples/analytics](examples/analytics): its Go code, CloudFormation templates and lock.
-  After changing what generate writes, run `go run ../../cmd/dynaflux generate` in that
-  directory.
-- `make test` runs a smoke tier of the simulation harness. `make sim` and `make sim-controls`
-  run its full tier and its negative controls, as
-  [docs/runbooks/simulation.md](docs/runbooks/simulation.md) describes.
-- `make integration` runs the packages that have `*_integration_test.go` files against
-  DynamoDB Local in Docker. Each run recreates the container, which takes 1–2 s, so it
-  starts from an empty emulator: DynamoDB Local keeps about 200 MB from every run even after
-  the tests delete their tables, and its requests time out once it holds a few GB. Run one
-  at a time on a machine, because a second run would recreate the emulator under the first.
-  The container keeps running afterwards; `make emulators-down` stops it, and
-  `make emulators-up` starts it without recreating a running one, for tests you run by hand.
-  These tests never call AWS: they reach DynamoDB Local at the loopback address in
-  `DYNAFLUX_DYNAMODB_ENDPOINT`, which the target sets, and fail without it. CI runs
-  `make verify` and `make integration` on every push and pull request. The lane takes about
-  25 s on an Apple M2 Max, or 40 s with an empty build cache; it must stay under 3 minutes.
-  `runtime`'s tests also check every DynamoDB and Firehose call the projector made against
-  the projector's role in the templates: a call the role doesn't allow fails the run and,
-  after a run of all the tests, so does an action the role allows that no call used.
+[docs/README.md](docs/README.md) also lists the specifications, which define what Dynaflux
+accepts and does, and the architecture decision records.
+[examples/analytics](examples/analytics) is a larger store in two regions, with every
+generated file committed.
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) explains how to build and test Dynaflux, and how to keep
+the docs' outputs current.
 
 ## License
 
