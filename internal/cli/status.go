@@ -162,7 +162,7 @@ func (c *cli) status(o statusOptions, args []string) int {
 	for _, r := range rs {
 		for _, err := range append([]error{r.err}, r.unread...) {
 			if err != nil {
-				c.errorf("dynaflux status: %s: %v", r.region, err)
+				c.errorf("dynaflux status: %s: %s", r.region, cellLines(err.Error()))
 				status = exitUsage
 			}
 		}

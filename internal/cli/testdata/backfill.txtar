@@ -347,6 +347,16 @@ us-east-1:
 us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
 us-east-1  plan_counts@v1  activate  0/0 applied
 us-east-1  plan_counts@v1  failed: backfill: the archive isn't complete: signups in us-east-1: rule 3: no event source mapping reads the stream
+-- want/watch_a_job_that_fails_on_a_key_with_control_characters.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+A new job activates its version, which can't be undone: its source and split are fixed for its life.
+-- want/watch_a_job_that_fails_on_a_key_with_control_characters.stdout --
+us-east-1:
+  stream signups: origin recorded; the region's archive of it is complete from now on
+  plan_counts@v1  start    archive source, split by fences
+us-east-1: plan_counts@v1: started in execution plan_counts-v1-e428b1-a1
+us-east-1  plan_counts@v1  activate  0/0 applied
+us-east-1  plan_counts@v1  failed: backfill: the archive isn't complete: signups in us-east-1: the error prefix holds errors/firehose/signups/x\x1b[2J
 -- want/watch_failed_execution.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 A new job activates its version, which can't be undone: its source and split are fixed for its life.

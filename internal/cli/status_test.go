@@ -448,6 +448,20 @@ func statusDeliveryCases() []statusCase {
 			s.aws["us-east-1"].fail = map[string]error{"ListObjectsV2": errors.New("AccessDenied: s3:ListBucket")}
 			brokenSeen(t, s)
 		}},
+		// What Lambda's records hold and their keys are printed with their control characters
+		// escaped, so a record written to the bucket can't drive the operator's terminal.
+		{"gap records with control characters", east, 2, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			before := time.Now()
+			time.Sleep(time.Hour)
+			at := before.Add(30 * time.Minute)
+			s.aws["us-east-1"].objects["aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-a"] = fmt.Sprintf(
+				`{"requestContext":{"requestId":"r1","condition":"RetryAttemptsExhausted"},"version":"1.0","DDBStreamBatchInfo":`+
+					`{"shardId":"shardId-\u001b]52;c;aGk=\u0007","startSequenceNumber":"100","endSequenceNumber":"250",`+
+					`"approximateArrivalOfFirstRecord":"%s","approximateArrivalOfLastRecord":"%s","batchSize":3,"streamArn":%q},"payload":"{}"}`,
+				at.Add(-time.Minute).Format(time.RFC3339), at.Format(time.RFC3339), streamARN(shop, "us-east-1", "page_views"))
+			s.aws["us-east-1"].objects["aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-\x1b[2J"] = "not a record"
+		}},
 		{"a gap record unreadable", east, 2, func(t *testing.T, s *statusStore) {
 			t.Helper()
 			s.aws["us-east-1"].objects["aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-z"] = "not a record"
@@ -552,6 +566,14 @@ func statusArchiveCases() []statusCase {
 			t.Helper()
 			s.fenceJob(t, meta.PhaseStage)
 			failJob(t, s.metas["us-east-1"], "plan_counts@v2", "signups in us-east-1: rule 3: no event source mapping reads the stream")
+		}},
+		// A job's error can quote an object key, which anyone who can write to the bucket
+		// chooses: its escape sequence is printed escaped, its line breaks kept.
+		{"archive job failed on a key with control characters", east, 1, func(t *testing.T, s *statusStore) {
+			t.Helper()
+			s.fenceJob(t, meta.PhaseStage)
+			failJob(t, s.metas["us-east-1"], "plan_counts@v2",
+				"signups in us-east-1: the error prefix holds errors/firehose/signups/x\x1b[2J: a line isn't JSON\nand another")
 		}},
 	}
 }

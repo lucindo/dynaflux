@@ -81,6 +81,23 @@ us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:0
   stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
   stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, not complete: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z
   backfill plan_counts@v2: failed, attempt 1, phase stage, 0 of 0 records applied; archive source, split by fences; Athena scanned 1.2 GB; its last error, in phase stage at 2000-01-01T00:00:00Z: backfill: the archive isn't complete: signups in us-east-1: rule 2: a deploy changed its archive mode from all to off at 2000-01-01T00:00:00Z
+-- want/archive_job_failed_on_a_key_with_control_characters.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7219: the backfill of plan_counts@v2 failed on an archive of stream signups that wasn't complete, so plan_counts@v2 can't go live; its last error, in phase stage at 2000-01-01T00:00:00Z: backfill: the archive isn't complete: signups in us-east-1: the error prefix holds errors/firehose/signups/x\x1b[2J: a line isn't JSON
+and another
+  hint: run dynaflux generate -rebuild plan_counts, deploy regional.yaml in every region, and run dynaflux backfill plan_counts
+-- want/archive_job_failed_on_a_key_with_control_characters.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+plan_counts@v2  activating
+
+us-east-1: catalog 6a2c85d90092 (dynaflux v0.6.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 1999-12-31T23:57:00Z, complete since 1999-12-29T01:00:00Z
+  backfill plan_counts@v2: failed, attempt 1, phase stage, 0 of 0 records applied; archive source, split by fences; Athena scanned 1.2 GB; its last error, in phase stage at 2000-01-01T00:00:00Z: backfill: the archive isn't complete: signups in us-east-1: the error prefix holds errors/firehose/signups/x\x1b[2J: a line isn't JSON
+and another
 -- want/archive_job_failed_on_a_missing_mapping.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7219: the backfill of plan_counts@v2 failed on an archive of stream signups that wasn't complete, so plan_counts@v2 can't go live; its last error, in phase stage at 2000-01-01T00:00:00Z: backfill: the archive isn't complete: signups in us-east-1: rule 3: no event source mapping reads the stream
@@ -376,6 +393,22 @@ store shop  prefix (none)  account 123456789012  region us-east-1
     }
   ]
 }
+-- want/gap_records_with_control_characters.stderr --
+store shop  prefix (none)  account 123456789012  region us-east-1
+us-east-1: error DF7203: Lambda discarded 3 records of stream page_views: unit shardId-\x1b]52;c;aGk=\a, sequence numbers 100 to 250, which arrived from 2000-01-01T00:29:00Z to 2000-01-01T00:30:00Z; page_counts@v1, page_seen@v1 miss them
+  hint: run dynaflux generate -rebuild page_counts, dynaflux generate -rebuild page_seen, deploy regional.yaml in every region, and run dynaflux backfill page_counts page_seen; the records are in s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-a
+dynaflux status: us-east-1: the history of stream page_views couldn't be read: backfill: the history of shop-stream-page_views: awsbackfill: the archive's gaps are unknown until the objects under s3://shop-123456789012-us-east-1-an/aws/lambda/ that aren't Lambda's on-failure records are removed (1 of them): deployed: read s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-\x1b[2J: invalid character 'o' in literal null (expecting 'u')
+dynaflux status: us-east-1: the history of stream signups couldn't be read: backfill: the history of shop-stream-signups: awsbackfill: the archive's gaps are unknown until the objects under s3://shop-123456789012-us-east-1-an/aws/lambda/ that aren't Lambda's on-failure records are removed (1 of them): deployed: read s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-\x1b[2J: invalid character 'o' in literal null (expecting 'u')
+dynaflux status: us-east-1: 1 of Lambda's records under s3://shop-123456789012-us-east-1-an/aws/lambda/ couldn't be read, such as: deployed: read s3://shop-123456789012-us-east-1-an/aws/lambda/uuid/shardId-0001/2000/01/01/2000-01-01T00.30.00-\x1b[2J: invalid character 'o' in literal null (expecting 'u')
+-- want/gap_records_with_control_characters.stdout --
+version         us-east-1
+page_counts@v1  live
+page_seen@v1    live
+plan_counts@v1  live
+
+us-east-1: catalog 003db85e4f0e (dynaflux v0.5.0), registered 2000-01-01T00:00:00Z
+  stream page_views: lag 2s; mapping us-east-1-page_views-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, completeness couldn't be read
+  stream signups: lag 2s; mapping us-east-1-signups-shop-projector to shop-projector enabled, last result OK; archive delivered through 2000-01-01T00:57:00Z, completeness couldn't be read
 -- want/gaps.stderr --
 store shop  prefix (none)  account 123456789012  region us-east-1
 us-east-1: error DF7201: page_seen@v1 broke at 2000-01-01T01:00:00Z: event e4 failed to evaluate: division by zero

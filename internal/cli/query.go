@@ -298,6 +298,16 @@ func cell(s string) string {
 	return b.String()
 }
 
+// cellLines is cell for text that may hold several lines, such as an error that joins
+// others: it keeps the line breaks.
+func cellLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = cell(l)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // writeJSONLines writes each row as a JSON object, its keys in column order.
 func writeJSONLines(b *strings.Builder, cols []column, rows [][]expr.Value) {
 	name := catalog.Type{Kind: catalog.KindString}

@@ -293,7 +293,7 @@ func (w *watched) observe(j meta.Job, executions bool, err error) (string, watch
 	case meta.JobBroken, meta.JobFailed:
 		w.ended, line = true, string(j.State)
 		if j.Error != nil {
-			line += ": " + j.Error.Message
+			line += ": " + cellLines(j.Error.Message)
 		}
 	case meta.JobCancelled:
 		w.ended, line = true, "cancelled"

@@ -26,13 +26,14 @@ func regionFinding(region string, sev diag.Severity, code, msg, hint string) fin
 	return finding{regions: []string{region}, severity: sev, code: code, message: msg, hint: hint}
 }
 
-// write prints f: from its source, or else its regions.
+// write prints f: from its source, or else its regions. Its message and hint can quote what
+// the bucket holds, so their control characters are escaped.
 func (f finding) write(b *strings.Builder) {
 	where := strings.Join(f.regions, ", ")
 	if f.pos != nil {
 		where = f.pos.String()
 	}
-	fmt.Fprintf(b, "%s: %s %s: %s\n  hint: %s\n", where, f.severity, f.code, f.message, f.hint)
+	fmt.Fprintf(b, "%s: %s %s: %s\n  hint: %s\n", where, f.severity, f.code, cellLines(f.message), cellLines(f.hint))
 }
 
 // findingJSON is a finding in -json output.

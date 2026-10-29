@@ -551,6 +551,16 @@ func backfillWatchCases() []backfillCase {
 		{name: "watch", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), progress: watchLive},
 		{name: "watch failed execution", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), status: 1, progress: watchFail},
 		{name: "watch a job that fails", args: slices.Concat([]string{"plan_counts", "-yes", "-watch"}, east), status: 1, progress: watchIncomplete},
+		// A job's error can quote an object key, which anyone who can write to the bucket
+		// chooses: its escape sequence is printed escaped.
+		{
+			name: "watch a job that fails on a key with control characters", args: slices.Concat([]string{"plan_counts", "-yes", "-watch"}, east),
+			status: 1, progress: func(t *testing.T, s *backfillStore) {
+				t.Helper()
+				time.Sleep(7 * time.Second)
+				failJob(t, s.metas["us-east-1"], "plan_counts@v1", "signups in us-east-1: the error prefix holds errors/firehose/signups/x\x1b[2J")
+			},
+		},
 		{
 			// The reads fail before backfill runs, so that the first poll's read fails too.
 			name: "watch through a failed read", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), progress: watchFailedRead,

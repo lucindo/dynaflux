@@ -286,7 +286,7 @@ func jobError(j meta.Job) string {
 	if j.Error == nil {
 		return ""
 	}
-	return fmt.Sprintf("; its last error, in phase %s at %s: %s", j.Error.Phase, timeText(j.Error.At), j.Error.Message)
+	return fmt.Sprintf("; its last error, in phase %s at %s: %s", j.Error.Phase, timeText(j.Error.At), cellLines(j.Error.Message))
 }
 
 // broken is DF7201 for the broken version vs, which the catalog defines as vv when defined.
