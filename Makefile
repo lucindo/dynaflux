@@ -147,10 +147,12 @@ lint: ## Run `golangci-lint run ./...`, then again with the integration and e2e 
 	$(GOLANGCI_LINT) run --build-tags integration ./...
 	$(GOLANGCI_LINT) run --build-tags e2e $(E2E_PKG)/...
 
-vuln: tools ## Check dependencies for known vulnerabilities (needs network).
+vuln: ## Check dependencies for known vulnerabilities (needs network).
+	$(call ensure_gobin_tool,$(GOVULNCHECK),golang.org/x/vuln/cmd/govulncheck@latest)
 	$(GOVULNCHECK) ./...
 
-osv: tools ## Scan every lockfile in the repo with OSV-Scanner (needs network; not part of verify).
+osv: ## Scan every lockfile in the repo with OSV-Scanner (needs network; not part of verify).
+	$(call ensure_gobin_tool,$(OSV_SCANNER),github.com/google/osv-scanner/v2/cmd/osv-scanner@latest)
 	$(OSV_SCANNER) scan source --recursive --all-vulns .
 
 gomod: ## Run `go mod tidy` on the library and the tools module.
@@ -189,7 +191,7 @@ check-go-bound: ## Fail if go.mod's go or toolchain line, or any module's go lin
 mod-download: ## Run `go mod download`.
 	go mod download
 
-verify: check-git-hooks tools fmt gomod notices check-go-bound lint vuln test bench-smoke lambda-build ## Run fmt, gomod, notices, the Go version bound, lint, vuln, test, the benchmarks once and the Lambda build.
+verify: check-git-hooks fmt gomod notices check-go-bound lint vuln test bench-smoke lambda-build ## Run fmt, gomod, notices, the Go version bound, lint, vuln, test, the benchmarks once and the Lambda build.
 
 check-clean: ## Fail if the working tree is dirty (CI guard: verify must not rewrite files).
 	@status="$$(git status --porcelain)"; \
