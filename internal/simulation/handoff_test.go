@@ -34,7 +34,7 @@ import (
 // archiveDelay is how long every archived record takes to arrive.
 const archiveDelay = time.Minute
 
-// handoff is one region of pageViewsSQL's store with every version but site_totals live,
+// handoff is one region of the fixture's store with every version but site_totals live,
 // and an archive that delivers each record archiveDelay after its put.
 type handoff struct {
 	sys     *pageViews
