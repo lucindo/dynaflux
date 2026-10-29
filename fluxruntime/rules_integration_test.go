@@ -438,38 +438,40 @@ func TestS1BatchErrorRetried(t *testing.T) {
 	r.checkRow("acct-a 2 7", "quota_by_account@v1", "acct-a")
 }
 
-// An event that a version can't evaluate opens that version's breaker, with the record that
-// broke it, and every other version applies the batch. The function never writes the
-// version again, even with the view states it cached before the breaker opened.
+// An event that versions can't evaluate opens each one's breaker, with the record that broke
+// it, and every other version applies the batch. The function never writes those versions
+// again, even with the view states it cached before the breakers opened.
 func TestS1Breaker(t *testing.T) {
 	t.Parallel()
 	r := newLocalRig(t)
 	r.pageView("/a", "u1", 100)
-	poison := r.pageView("/b", "u2", 0) // page_rates divides by ms
+	poison := r.pageView("/b", "u2", 0) // page_rates and user_latest divide by ms
 	shard, recs := r.next(pageViews)
 	r.deliver(r.fn, pageViews, shard, recs...)
 	_, eventID, err := keys.ParseStreamSK(poison.SK)
 	if err != nil {
 		t.Fatal(err)
 	}
-	states := r.checkStates("page_rates@v1")
-	if f := states["page_rates@v1"].Failure; f == nil || f.Unit != shard || f.Seq != storedSeq(t, recs[1]) || f.EventID != eventID {
-		t.Errorf("page_rates@v1 broke with %+v, want unit %s, seq %s, event %s", f, shard, storedSeq(t, recs[1]), eventID)
+	states := r.checkStates("page_rates@v1", "user_latest@v1")
+	for _, id := range []string{"page_rates@v1", "user_latest@v1"} {
+		if f := states[id].Failure; f == nil || f.Unit != shard || f.Seq != storedSeq(t, recs[1]) || f.EventID != eventID {
+			t.Errorf("%s broke with %+v, want unit %s, seq %s, event %s", id, f, shard, storedSeq(t, recs[1]), eventID)
+		}
 	}
 	lines := r.metrics()
-	if len(lines) != 1 || lines[0]["level"] != "ERROR" || lines[0]["BreakerOpened"] != 1.0 ||
-		!reflect.DeepEqual(lines[0]["broken"], []any{"page_rates@v1"}) {
-		t.Errorf("metrics %v, want one ERROR line with BreakerOpened 1 for page_rates@v1", lines)
+	if len(lines) != 1 || lines[0]["level"] != "ERROR" || lines[0]["BreakerOpened"] != 2.0 ||
+		!reflect.DeepEqual(lines[0]["broken"], []any{"page_rates@v1", "user_latest@v1"}) {
+		t.Errorf("metrics %v, want one ERROR line with BreakerOpened 2 for page_rates@v1 and user_latest@v1", lines)
 	}
 	r.checkRow("s1 2 2", "site_totals@v1", "s1")
 	r.pageView("/c", "u3", 50)
 	_, recs = r.next(pageViews)
 	r.deliver(r.fn, pageViews, shard, recs...)
 	r.checkRow("s1 3 3", "site_totals@v1", "s1")
-	table := r.naming.ViewTable("page_rates", 1)
+	tables := []string{r.naming.ViewTable("page_rates", 1), r.naming.ViewTable("user_latest", 1)}
 	for _, c := range r.fn.rec.Calls() {
-		if c.Target == putItem && c.Resources[0] == table {
-			t.Fatalf("wrote to %s, whose version is broken", table)
+		if c.Target == putItem && slices.Contains(tables, c.Resources[0]) {
+			t.Fatalf("wrote to %s, whose version is broken", c.Resources[0])
 		}
 	}
 }
@@ -567,12 +569,12 @@ func TestS1InvalidRequest(t *testing.T) {
 	if got := r.reasons(); !slices.Equal(got, []string{"invalid_request"}) {
 		t.Errorf("reasons %q, want invalid_request", got)
 	}
-	r.checkStates("")
+	r.checkStates()
 }
 
 // checkStates fails the test unless every version of the suite's catalog has a state:
-// broken for the version called broken, live for the others. It returns the states.
-func (r *localRig) checkStates(broken string) map[string]meta.ViewState {
+// broken for the versions named in broken, live for the others. It returns the states.
+func (r *localRig) checkStates(broken ...string) map[string]meta.ViewState {
 	r.t.Helper()
 	states, err := r.meta.ViewStates(r.t.Context())
 	if err != nil {
@@ -583,7 +585,7 @@ func (r *localRig) checkStates(broken string) map[string]meta.ViewState {
 		for _, vv := range v.Versions {
 			n++
 			id, want := catalog.VersionID(v.Name, vv.Number), meta.Live
-			if id == broken {
+			if slices.Contains(broken, id) {
 				want = meta.Broken
 			}
 			if got := states[id].State; got != want {
