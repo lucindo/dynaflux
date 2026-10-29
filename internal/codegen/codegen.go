@@ -151,11 +151,7 @@ func newModel(cat *catalog.Catalog, o Options) (*model, error) {
 	}
 	m := &model{Package: o.Package, Version: o.Version, Store: cat.Store, CatalogLit: goString(string(data))}
 	for i := range cat.Streams {
-		sm, serr := newStream(cat, &cat.Streams[i])
-		if serr != nil {
-			return nil, serr
-		}
-		m.Streams = append(m.Streams, sm)
+		m.Streams = append(m.Streams, newStream(cat, &cat.Streams[i]))
 	}
 	for i := range cat.Queries {
 		qm := newQuery(&cat.Queries[i])
@@ -188,7 +184,7 @@ func syncViews(cat *catalog.Catalog, stream string) string {
 	return "views " + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
-func newStream(cat *catalog.Catalog, s *catalog.Stream) (streamModel, error) {
+func newStream(cat *catalog.Catalog, s *catalog.Stream) streamModel {
 	sm := streamModel{
 		Stream:       goname.ForStream(s.Name, s.GoType),
 		SQLName:      s.Name,
@@ -200,11 +196,7 @@ func newStream(cat *catalog.Catalog, s *catalog.Stream) (streamModel, error) {
 		sm.AcceptPast = s.Accept.Past.String()
 	}
 	if p, ok := s.LogRetention.Period(); ok {
-		text, err := p.MarshalText()
-		if err != nil {
-			return streamModel{}, fmt.Errorf("codegen: stream %s: %w", s.Name, err)
-		}
-		sm.Retention = string(text)
+		sm.Retention = p.String()
 	}
 	for _, c := range s.Columns {
 		comment := c.Name + " " + c.Type.String()
@@ -223,7 +215,7 @@ func newStream(cat *catalog.Catalog, s *catalog.Stream) (streamModel, error) {
 		c, _ := s.Column(k) // The compiler checked that the key columns exist.
 		sm.KeyFields = append(sm.KeyFields, field{goname.Field(c.Name), gotype.Of(c.Type).String(), withUTCDate(c.Name+" "+c.Type.String(), c.Type)})
 	}
-	return sm, nil
+	return sm
 }
 
 func newQuery(q *catalog.Query) queryModel {
