@@ -227,9 +227,10 @@ The repository is public by then: `go get` through the proxy, pkg.go.dev and
 
 Anyone can check the config without publishing. [GoReleaser](https://goreleaser.com)
 v2.18.3 is the version that `release.yml` runs, and
-[syft](https://github.com/anchore/syft) v1.54.0 on `PATH` writes the SBOMs. `release.yml`
-checks both release archives against the SHA-256 it pins, so a version bump there updates
-the hash too: take it from the release's checksums file.
+[syft](https://github.com/anchore/syft) v1.54.0 on `PATH` writes the SBOMs.
+`scripts/install-release-tools.sh` installs both for the workflows, and checks their release
+archives against the SHA-256 it pins. A version bump there updates the hash too: take it
+from the release's checksums file.
 
 ```sh
 goreleaser check

@@ -77,27 +77,8 @@ jobs:
       # Outside the checkout: a new file in it would make Go stamp the binaries +dirty.
       - name: Release notes
         run: scripts/release-notes.sh "$TAG" >"$RUNNER_TEMP/notes.md"
-      # Release archives checked against the SHA-256 pinned here, the vendors' checksums.txt
-      # when pinned, so a replaced release asset fails the build instead of running in it. A
-      # version bump updates its hash too.
-      - name: Install GoReleaser and syft
-        env:
-          GORELEASER: v2.18.3
-          GORELEASER_SHA256: b8dee4728bca1aba0d71a832a17cd0a3799f75372878e7ffa36aef2343bce0bc
-          SYFT: v1.54.0
-          SYFT_SHA256: 54a87372498168b2d033e876fd41fa4e8035b872699e525a57046e1f2f09c860
-        run: |
-          bin="$RUNNER_TEMP/bin"
-          mkdir -p "$bin"
-          curl -fsSL -o "$RUNNER_TEMP/goreleaser.tar.gz" \
-            "https://github.com/goreleaser/goreleaser/releases/download/$GORELEASER/goreleaser_Linux_x86_64.tar.gz"
-          curl -fsSL -o "$RUNNER_TEMP/syft.tar.gz" \
-            "https://github.com/anchore/syft/releases/download/$SYFT/syft_${SYFT#v}_linux_amd64.tar.gz"
-          printf '%s  %s\n' "$GORELEASER_SHA256" "$RUNNER_TEMP/goreleaser.tar.gz" "$SYFT_SHA256" "$RUNNER_TEMP/syft.tar.gz" |
-            sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/goreleaser.tar.gz" -C "$bin" goreleaser
-          tar -xzf "$RUNNER_TEMP/syft.tar.gz" -C "$bin" syft
-          echo "$bin" >>"$GITHUB_PATH"
+      - name: Install GoReleaser and syft, checked against pinned hashes
+        run: scripts/install-release-tools.sh
       - name: Build the archives and the draft release
         run: goreleaser release --clean --release-notes="$RUNNER_TEMP/notes.md"
         env:

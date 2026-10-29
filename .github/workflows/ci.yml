@@ -113,7 +113,7 @@ jobs:
         env:
           BASE: ${{ github.event_name == 'push' && github.event.before || 'HEAD^1' }}
         run: |
-          if git diff --quiet "$BASE" HEAD -- .goreleaser.yaml .github/workflows/release.yml .github/workflows/ci.yml CHANGELOG.md scripts/release-notes.sh; then
+          if git diff --quiet "$BASE" HEAD -- .goreleaser.yaml .github/workflows/release.yml .github/workflows/ci.yml CHANGELOG.md scripts/release-notes.sh scripts/install-release-tools.sh; then
             echo "run=false" >>"$GITHUB_OUTPUT"
           else
             echo "run=true" >>"$GITHUB_OUTPUT"
@@ -124,13 +124,8 @@ jobs:
           go-version-file: go.mod
           cache: false
       - if: steps.changed.outputs.run == 'true'
-        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
-      - if: steps.changed.outputs.run == 'true'
-        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
-        with:
-          distribution: goreleaser
-          version: v2.18.3
-          install-only: true
+        name: Install GoReleaser and syft, checked against pinned hashes
+        run: scripts/install-release-tools.sh
       - if: steps.changed.outputs.run == 'true'
         run: goreleaser check
       # The notes of the newest release in CHANGELOG.md. The run goes in a copy of the commit
