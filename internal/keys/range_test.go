@@ -140,7 +140,7 @@ func TestRangeMatchesTypedPredicate(t *testing.T) {
 	r := rand.New(rand.NewPCG(3, 4))
 	var drops, empties int
 	for scenario := range 20_000 {
-		sc := newRangeScenario(r)
+		sc := newRangeScenario(t, r)
 		got, err := keys.Range(sc.prefix, sc.ts[sc.j], sc.lo, sc.hi)
 		if err != nil {
 			t.Fatalf("scenario %d: Range: %v", scenario, err)
@@ -180,14 +180,15 @@ type rangeScenario struct {
 	vals   [][]expr.Value
 }
 
-func newRangeScenario(r *rand.Rand) rangeScenario {
+func newRangeScenario(t *testing.T, r *rand.Rand) rangeScenario {
+	t.Helper()
 	sc := rangeScenario{ts: randSchema(r), split: r.IntN(2) == 0}
 	sc.base = randTuple(r, sc.ts)
 	seen := map[string]bool{}
 	for range 40 {
 		v := randTuple(r, sc.ts)
 		copy(v[:r.IntN(len(sc.ts)+1)], sc.base)
-		k, _ := keys.Key(sc.ts, v)
+		k := mustKey(t, sc.ts, v)
 		if seen[k] {
 			continue
 		}
@@ -202,7 +203,7 @@ func newRangeScenario(r *rand.Rand) rangeScenario {
 	}
 	sc.j = r.IntN(len(sc.ts))
 	if sc.j > 0 {
-		sc.prefix, _ = keys.Key(sc.ts[:sc.j], sc.base[:sc.j])
+		sc.prefix = mustKey(t, sc.ts[:sc.j], sc.base[:sc.j])
 	}
 	sc.lo, sc.hi = sc.randBound(r), sc.randBound(r)
 	return sc
