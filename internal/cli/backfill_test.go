@@ -551,7 +551,13 @@ func backfillWatchCases() []backfillCase {
 		{name: "watch", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), progress: watchLive},
 		{name: "watch failed execution", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), status: 1, progress: watchFail},
 		{name: "watch a job that fails", args: slices.Concat([]string{"plan_counts", "-yes", "-watch"}, east), status: 1, progress: watchIncomplete},
-		{name: "watch through a failed read", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), progress: watchFailedRead},
+		{
+			// The reads fail before backfill runs, so that the first poll's read fails too.
+			name: "watch through a failed read", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), progress: watchFailedRead,
+			change: func(_ *testing.T, s *backfillStore) {
+				s.sfn["us-east-1"].fail = errors.New("ThrottlingException: Rate exceeded")
+			},
+		},
 		{name: "watch json", args: slices.Concat([]string{"page_seen", "-yes", "-watch", "-json"}, east), progress: watchLive},
 		{name: "json without watch", args: []string{"page_seen", "-json"}, status: 2},
 		{name: "watch interrupted", args: slices.Concat([]string{"page_seen", "-yes", "-watch"}, east), status: 1, interrupt: 12 * time.Second},
@@ -699,13 +705,11 @@ func watchLive(t *testing.T, s *backfillStore) {
 	setJob(t, m, func(j *meta.Job) { j.State, j.Phase, j.Applied = meta.JobDone, meta.PhaseLive, 3000 })
 }
 
-// watchFailedRead fails Step Functions' reads for 35 seconds, then makes page_seen@v1 live.
+// watchFailedRead lets Step Functions' failed reads succeed after 35 seconds, then makes
+// page_seen@v1 live.
 func watchFailedRead(t *testing.T, s *backfillStore) {
 	t.Helper()
 	f := s.sfn["us-east-1"]
-	f.mu.Lock()
-	f.fail = errors.New("ThrottlingException: Rate exceeded")
-	f.mu.Unlock()
 	time.Sleep(35 * time.Second)
 	f.mu.Lock()
 	f.fail = nil
