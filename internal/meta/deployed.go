@@ -157,10 +157,8 @@ func (m *Meta) decodeBody(hash string, it store.Item) ([]byte, error) {
 		return nil, m.decodeError(it, err)
 	}
 	data, err := gunzip(body.Bin)
-	if err == nil {
-		if catalog.Hash(data) != hash {
-			err = errors.New("the body doesn't match its hash")
-		}
+	if err == nil && catalog.Hash(data) != hash {
+		err = errors.New("the body doesn't match its hash")
 	}
 	if err != nil {
 		return nil, m.decodeError(it, err)
