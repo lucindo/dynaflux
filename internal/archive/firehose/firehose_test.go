@@ -76,7 +76,6 @@ func newFake(t *testing.T, answer func(call int, recs [][]byte) ([]string, error
 	return &fakeFirehose{t: t, answer: answer, accepted: map[string]bool{}}
 }
 
-// acceptAll accepts every record.
 func acceptAll(_ int, recs [][]byte) ([]string, error) { return make([]string, len(recs)), nil }
 
 // writer returns the writer of us-east-1 of a store with streams pv and other, whose

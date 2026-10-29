@@ -361,7 +361,6 @@ func (a *archiveFake) Start(_ context.Context, q backfill.Query, token string) (
 
 func queryID(i int) string { return "q" + strconv.Itoa(i) }
 
-// query returns the query of id.
 func (a *archiveFake) query(id string) (fakeQuery, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

@@ -321,7 +321,6 @@ func sameMark(a, b *keys.Mark) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
-// names returns the names of runs.
 func names(runs []meta.Run) []string {
 	out := make([]string, len(runs))
 	for i, r := range runs {

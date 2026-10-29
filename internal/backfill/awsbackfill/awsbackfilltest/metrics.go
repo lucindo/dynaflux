@@ -187,7 +187,6 @@ func seconds(s float64) time.Time {
 	return time.UnixMicro(int64(s * float64(time.Second/time.Microsecond))).UTC()
 }
 
-// find returns the series of a metric.
 func (m *Metrics) find(x metric) (series, bool) {
 	i := slices.IndexFunc(m.series, func(s series) bool {
 		return s.namespace == x.Namespace && s.metric == x.MetricName && maps.Equal(s.dims, x.dims())
