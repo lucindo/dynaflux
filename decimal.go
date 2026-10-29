@@ -36,6 +36,12 @@ func ParseDecimal(s string) (Decimal, error) {
 	if !isDigits(whole) || point && !isDigits(frac) {
 		return Decimal{}, fmt.Errorf("dynaflux: %q is not a decimal number", s)
 	}
+	if len(strings.TrimLeft(whole+frac, "0")) > maxDecimalDigits {
+		// DecimalFromBig's error for any value this long, without SetString, which takes
+		// time quadratic in the digits.
+		_, err := DecimalFromBig(pow10(maxDecimalDigits), len(frac))
+		return Decimal{}, fmt.Errorf("dynaflux: decimal %q: %w", s, err)
+	}
 	u, _ := new(big.Int).SetString(whole+frac, decimalBase)
 	if neg {
 		u.Neg(u)

@@ -304,6 +304,10 @@ func parseDecimal(s string, scale int, exp bool) (*big.Int, error) {
 	default:
 		digits = digits[:len(digits)+shift]
 	}
+	// No type holds more, and SetString takes time quadratic in the digits.
+	if len(digits) > catalog.MaxDecimalPrecision {
+		return nil, fmt.Errorf("more than %d digits", catalog.MaxDecimalPrecision)
+	}
 	d, _ := new(big.Int).SetString(digits, decimalBase) // only digits, checked above
 	if neg {
 		d.Neg(d)
