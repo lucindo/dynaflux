@@ -7,6 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 - Status: Accepted. Amends [ADR 0004](0004-runtime-storage-boundary.md), whose decision stands.
 - Date: 2026-10-26
+- Amended by [ADR 0019](0019-v1-compatibility-promise.md): the package is `fluxruntime`, and
+  later options on `Run` come as a new function, since a variadic parameter changes `Run`'s
+  type
 
 ## Context
 

@@ -7,6 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by [ADR 0019](0019-v1-compatibility-promise.md): `dynaflux.AsImport()` replaces
+  `Import<Stream>` and `fluxgen.ImportEvents`; the runtime package is `fluxruntime`;
+  `fluxtest.NewStore` takes every catalog its store serves; N rises whenever generated code
+  needs anything the previous release lacks, and every v1.x release keeps every
+  `GeneratedCodeVersionN`
 
 ## Context
 

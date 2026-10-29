@@ -7,6 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 
 - Status: Accepted
 - Date: 2026-10-27
+- Amended by [ADR 0019](0019-v1-compatibility-promise.md): in format 1, each event carries
+  its `event_id` as 16 bytes and its `_it` in microseconds, in place of `sk` and `_it` as
+  text. The first `_it` is a uvarint, and each next one a varint of the difference from the
+  one before. A 1,000-event token shrinks from 97,358 characters to about 24,000.
 
 ## Context
 

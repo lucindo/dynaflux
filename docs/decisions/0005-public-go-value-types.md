@@ -7,6 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 - Status: Accepted
 - Date: 2026-10-26
+- Amended by [ADR 0019](0019-v1-compatibility-promise.md): `UUID` stays a defined type for
+  all of v1 and never becomes an alias of `uuid.UUID`; on Go 1.27, callers convert, as in
+  `dynaflux.UUID(uuid.NewV7())`
 
 ## Context
 
@@ -87,9 +90,9 @@ func (u *UUID) UnmarshalText(b []byte) error    // same forms as ParseUUID
 - The methods are a subset of Go 1.27's `uuid.UUID`, with the same behavior. `ParseUUID` and
   `UnmarshalText` accept exactly what Go 1.27's `uuid.Parse` accepts: `xxxxxxxx-xxxx-…`,
   `{…}`, `urn:uuid:…` and 32 bare hex digits, either case, tested against the same inputs.
-  So when Dynaflux's minimum Go version reaches 1.27 and `UUID` becomes
-  `type UUID = uuid.UUID`, callers' code compiles unchanged and decodes the same text. Until
-  then, callers on Go 1.27 convert for free with `uuid.UUID(u)`.
+  So both types decode the same text, and callers on Go 1.27 convert for free with
+  `uuid.UUID(u)` and `dynaflux.UUID(id)`. `UUID` stays a defined type for all of v1
+  ([ADR 0019](0019-v1-compatibility-promise.md)).
 - SQL literals and HTTP parameters keep their strict 8-4-4-4-12 parsers in their own code.
 - Making one, as `UUID`'s doc comment says: on Go 1.26, `rand.Read(id[:])` from
   `crypto/rand`; on Go 1.27, `dynaflux.UUID(uuid.NewV7())`.
@@ -154,7 +157,7 @@ text. A wrong Go type is an error, never a panic.
 | `UUID` | `uuid.UUID` from the standard library now | Needs Go 1.27 as the minimum, while Dynaflux supports Go 1.26. |
 | | `github.com/google/uuid` | A dependency for a 16-byte value; the standard type replaces it. |
 | | `string`, `[16]byte` | Letter case makes equal strings unequal; a bare array prints as bytes. |
-| | Strict 8-4-4-4-12 text decoding | Decoding would widen silently on the switch to the alias. |
+| | Strict 8-4-4-4-12 text decoding | Text that `uuid.Parse` accepts would fail here, so the two types would decode different text. |
 | `Nullable` | `sql.Null[T]` (Go 1.22) | Brings `database/sql` into generated code; `Null[T]{V: x, Valid: true}` is wordier than `new(x)`. |
 | | A `dynaflux.Null[T]` type | One more public type for what `*T` already says. |
 | `Date` | `time.Time`, calendar date in the value's own location (`t.Date()`) | Matches local midnights, but disagrees with `toDate(event_time)` and with the UTC day buckets of views: `time.Now()` in Tokyo at 08:00 would name the next UTC day. |
