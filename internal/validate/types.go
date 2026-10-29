@@ -15,7 +15,6 @@ const (
 	typeNullable       = "Nullable"
 	typeArray          = "Array"
 	typeLowCardinality = "LowCardinality"
-	typeString         = "String"
 
 	hintDecimal = "Decimal(P, S) needs 1 ≤ P ≤ 38 and 0 ≤ S ≤ P"
 )
