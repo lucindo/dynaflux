@@ -102,10 +102,8 @@ func (f *backfillFn) Invoke(ctx context.Context, payload []byte) ([]byte, error)
 	}
 	env, bucket := f.env, f.env.Naming.Bucket(account, f.region)
 	env.Runs = f.runs(bucket)
-	if f.archive != nil {
-		a := f.archive(bucket)
-		env.Archive, env.Witness = a, a
-	}
+	a := f.archive(bucket)
+	env.Archive, env.Witness = a, a
 	wait, done, err := backfill.Step(ctx, &env, ev.Job, ev.Attempt, ev.Execution)
 	if err != nil {
 		return nil, f.fail(ctx, ev, err)
