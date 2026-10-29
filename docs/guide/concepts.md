@@ -54,23 +54,27 @@ regions and during an outage, and what Dynaflux doesn't do.
 
 ## How an event flows
 
-```text
-                your application, with the generated client
-                   |                             ^
-                   | append                      | query, read
-  +-- region A ----|-----------------------------|------------------------+
-  |                v                             |                        |
-  |          stream table --> projector --> view tables                   |
-  |                |              |                                       |
-  |                |              +-------> meta table (states, receipts) |
-  |                |              +-------> Firehose --> archive on S3 <-------- Athena
-  +----------------|------------------------------------------------------+
-                   | DynamoDB copies the event, usually in about a second
-  +-- region B ----|------------------------------------------------------+
-  |                v                                                      |
-  |          stream table --> projector --> view tables                   |
-  |                               +-------> meta table, Firehose, archive |
-  +-----------------------------------------------------------------------+
+```mermaid
+flowchart TB
+    app["Your application, with the generated client"]
+
+    subgraph regionA["Region A"]
+        streamA["Stream table"] --> projectorA["Projector"]
+        projectorA --> viewsA["View tables"]
+        projectorA --> metaA["Meta table (states, receipts)"]
+        projectorA --> firehoseA["Firehose"] --> archiveA["Archive on S3"]
+    end
+
+    subgraph regionB["Region B"]
+        streamB["Stream table"] --> projectorB["Projector"]
+        projectorB --> viewsB["View tables"]
+        projectorB --> restB["Meta table, Firehose, archive"]
+    end
+
+    app -- append --> streamA
+    viewsA -- "query, read" --> app
+    streamA -- "DynamoDB copies the event, usually in about a second" --> streamB
+    athena["Athena"] --> archiveA
 ```
 
 1. The application appends an event through the generated client. The client writes it
