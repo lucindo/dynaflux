@@ -126,7 +126,7 @@ type Optimizer struct {
 
 // Request is a CloudFormation custom resource request.
 type Request struct {
-	// Type is the resource type: TypeStreamARN, TypeArchiveSchema or TypeCatalog.
+	// Type is the resource type: TypeStreamARN, TypeArchiveSchema, TypeCatalog or TypeArchiveMode.
 	Type string
 	// Action is the request type: ActionCreate, ActionUpdate or ActionDelete.
 	Action string
