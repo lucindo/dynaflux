@@ -186,11 +186,7 @@ func (rg *region) syncRows(puts []store.TxPut) (map[string][]string, error) {
 		case !ok:
 			return nil, fmt.Errorf("row %s of %s has expired", keyText(put.Item), version)
 		}
-		key := make([]string, len(kvs))
-		for i, kv := range kvs {
-			key[i] = FormatValue(kv, vv.Keys[i].Expr.Type)
-		}
-		rows[version] = append(rows[version], strings.Join(key, " "))
+		rows[version] = append(rows[version], rowKey(kvs, vv))
 	}
 	for _, keys := range rows {
 		slices.Sort(keys)

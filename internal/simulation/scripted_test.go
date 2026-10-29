@@ -403,10 +403,10 @@ type write struct {
 // writes is a script whose first invocation puts ws in order, unconditionally.
 func writes(ws ...write) func(context.Context, store.Backend, int64) error {
 	return func(ctx context.Context, b store.Backend, n int64) error {
+		if n > 1 {
+			return nil
+		}
 		for _, w := range ws {
-			if n > 1 {
-				break
-			}
 			if err := b.Put(ctx, w.table, w.item, store.Cond{}); err != nil {
 				return err
 			}
