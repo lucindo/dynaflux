@@ -14,9 +14,11 @@ GOBIN_DIR := $(shell go env GOPATH)/bin
 
 # golangci-lint is pinned in tools/go.mod and runs through `go tool`, because other
 # projects pin their own copy in GOBIN_DIR and .golangci.yml needs this version.
-# The other Go tools are not pinned: `make tools` installs the latest release of any
-# that is missing, and `make tools-update` upgrades them all and bumps the pin.
+# govulncheck is pinned to the version release.yml runs, because verify installs it on
+# every CI run. The other Go tools are not pinned: `make tools` installs the latest release
+# of any that is missing, and `make tools-update` upgrades them all and bumps the pin.
 GOLANGCI_LINT ?= go tool -modfile=tools/go.mod golangci-lint
+GOVULNCHECK_VERSION := v1.9.0
 
 # Absolute paths to the tool binaries installed into GOBIN_DIR.
 GITLEAKS      := $(GOBIN_DIR)/gitleaks
@@ -79,9 +81,9 @@ help: ## Show this help — auto-generated from inline annotations on each targe
 
 # === Go tools
 
-tools: ## Install missing Go tools at their latest release.
+tools: ## Install missing Go tools: govulncheck at its pin, the others at their latest release.
 	$(call ensure_gobin_tool,$(GITLEAKS),github.com/zricethezav/gitleaks/v8@latest)
-	$(call ensure_gobin_tool,$(GOVULNCHECK),golang.org/x/vuln/cmd/govulncheck@latest)
+	$(call ensure_gobin_tool,$(GOVULNCHECK),golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION))
 	$(call ensure_gobin_tool,$(OSV_SCANNER),github.com/google/osv-scanner/v2/cmd/osv-scanner@latest)
 
 tools-update: ## Reinstall all Go tools at their latest release and bump the golangci-lint pin.
@@ -150,7 +152,7 @@ lint: ## Run `golangci-lint run ./...`, then again with the integration and e2e 
 	$(GOLANGCI_LINT) run --build-tags e2e $(E2E_PKG)/...
 
 vuln: ## Check dependencies for known vulnerabilities (needs network).
-	$(call ensure_gobin_tool,$(GOVULNCHECK),golang.org/x/vuln/cmd/govulncheck@latest)
+	$(call ensure_gobin_tool,$(GOVULNCHECK),golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION))
 	$(GOVULNCHECK) ./...
 
 osv: ## Scan every lockfile in the repo with OSV-Scanner (needs network; not part of verify).
