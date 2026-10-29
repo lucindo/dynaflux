@@ -88,7 +88,10 @@ dynaflux status -prefix staging- -region us-west-2
 of each command. `status`, `diff`, `inspect` and `query` only read, so a monitor can run
 them with read-only credentials. `backfill` and `retire` write meta items, `backfill` also
 starts and stops the backfill state machine's executions, and `import` writes events.
-`init`, `validate`, `explain`, `generate`, `dev` and `version` never call AWS.
+`init`, `validate`, `explain`, `generate`, `dev` and `version` never call AWS. Give no one
+else `s3:PutObject` on a store's buckets: a backfill rebuilds views from what they hold, so
+whoever can write to them can change what a rebuilt view counts
+([infra.md §5.2](../spec/infra.md#52-bucket)).
 
 **Locally,** `dynaflux dev` runs the store on DynamoDB Local. `-endpoint
 http://127.0.0.1:8000` points `status`, `diff`, `inspect`, `query`, `import` and `retire`

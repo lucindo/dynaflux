@@ -251,6 +251,11 @@ event source mappings write what they discard to it.
 - **Deletion:** the bucket stays when the stack is deleted, and goes when the create that
   made it rolls back, so a failed first deploy can be retried as it is. S3 refuses to
   delete a bucket that holds objects, so this can't destroy data.
+- **Writers:** a backfill rebuilds views from what the bucket holds, the records under
+  `errors/firehose/` included, and `status` reads what Lambda discarded. So anyone who can
+  write objects to the bucket can change what a rebuilt view counts and what `status`
+  reports. The templates give `s3:PutObject` on it only to Dynaflux's roles; grant it to
+  no other principal. The bucket policy doesn't enforce this.
 
 | Key prefix | Written by | Holds |
 |------------|------------|-------|
