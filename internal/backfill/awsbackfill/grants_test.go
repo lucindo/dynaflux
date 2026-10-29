@@ -449,7 +449,10 @@ func TestBackfillGrantsControls(t *testing.T) {
 		}, "statement ArchiveQueries allows athena:GetQueryExecution on arn:aws:athena:us-east-1:123456789012:workgroup/dev-analytics-backfill"},
 		{"no delivery streams", "ArchiveDelivery", func(st *infra.Statement) { st.Actions = nil },
 			"no statement allows firehose:DescribeDeliveryStream on arn:aws:firehose:us-east-1:123456789012:deliverystream/prod-analytics-archive-clicks"},
-		{"no error prefix", "ArchiveErrorsList", func(st *infra.Statement) { st.Conditions[0].Values = []infra.Text{"aws/lambda/*"} },
+		{"no error prefix", "ArchiveErrorsList", func(st *infra.Statement) {
+			st.Conditions = slices.Clone(st.Conditions)
+			st.Conditions[0].Values = []infra.Text{"aws/lambda/*"}
+		},
 			"no statement allows s3:ListBucket on arn:aws:s3:::prod-analytics-123456789012-us-east-1-an map[s3:prefix:errors/firehose/page_views/]"},
 		{"one region's replicas", "StreamTables", func(st *infra.Statement) {
 			st.Resources = slices.DeleteFunc(slices.Clone(st.Resources), func(r infra.Text) bool { return strings.Contains(string(r), "us-west-2") })
