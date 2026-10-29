@@ -72,4 +72,4 @@ release:
 
     The archives hold the same CLI for machines without Go. Check one with
     `sha256sum --ignore-missing -c checksums.txt`, and where it was built with
-    `gh attestation verify <archive> --repo lucindo/dynaflux`.
+    `gh attestation verify <archive> --repo lucindo/dynaflux --cert-identity https://github.com/lucindo/dynaflux/.github/workflows/release.yml@refs/tags/{{ .Tag }}`.

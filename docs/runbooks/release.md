@@ -116,16 +116,18 @@ the guides, so a change to a guide needs a new release candidate and a new accep
 
 13. The push starts `release.yml`. It stops before the build when the tag isn't on `main`,
     its release is published, govulncheck finds a vulnerability, or `CHANGELOG.md` has no
-    notes for it. After a failure, run it again on the same tag:
+    notes for it. After a failure, find the run with `gh run list --workflow release.yml`,
+    and rerun its failed jobs:
 
     ```sh
-    gh workflow run release.yml -f tag=vX.Y.Z
+    gh run rerun <run ID> --failed
     ```
 
-    The rerun takes `release.yml` from `main` and every other file from the tag. So a fix
-    to the workflow helps a rerun, and a fix to any other file needs a new tag. Rerun only a
-    tag whose release is still a draft: the rerun replaces the draft's files. The workflow
-    refuses a tag whose release is published.
+    The rerun takes every file from the tag, `release.yml` included, so a fix to any file
+    needs a new tag. GitHub reruns a run for 30 days after it started. Rerun only a tag
+    whose release is still a draft: the rerun replaces the draft's files. The workflow
+    refuses a tag whose release is published. Nothing else starts `release.yml`, so every
+    attestation it signs names a release tag, which the check in step 16 pins.
 
     Once a tag is pushed, the provenance of its archives is public and permanent: the
     workflow records it in GitHub's attestation store and in the public Sigstore log
@@ -166,7 +168,8 @@ the guides, so a change to a guide needs a new release candidate and a new accep
 
     ```sh
     sha256sum --ignore-missing -c checksums.txt
-    gh attestation verify dynaflux_X.Y.Z_darwin_arm64.tar.gz --repo lucindo/dynaflux
+    gh attestation verify dynaflux_X.Y.Z_darwin_arm64.tar.gz --repo lucindo/dynaflux \
+      --cert-identity https://github.com/lucindo/dynaflux/.github/workflows/release.yml@refs/tags/vX.Y.Z
     tar -xzf dynaflux_X.Y.Z_darwin_arm64.tar.gz dynaflux
     ./dynaflux version
     ```
@@ -284,7 +287,8 @@ The `release-config` job of `ci.yml` runs when a push or pull request changes
 Set both before the first tag:
 
 - A tag ruleset on `v*`: only the maintainer creates these tags, and nobody updates or
-  deletes them.
+  deletes them. The provenance check trusts `release.yml` at a `v*` tag, so this ruleset
+  is what limits it to the maintainer's releases.
 - Immutable releases: once published, a release's tag and files can't change. A draft
   stays editable, so a rerun of `release.yml` can replace it. `release.yml` also refuses a
   published release, but only this setting protects one from every other change.

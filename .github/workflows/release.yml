@@ -6,24 +6,19 @@
 # tool and go install.
 name: Release
 
+# Only a tag push starts it, so every attestation it signs names a release tag, which the
+# documented check pins. A failed release is rerun with gh run rerun, which keeps the tag.
 on:
   push:
     # A semantic version, such as v1.0.0 or v1.0.0-rc.1.
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
-  # Reruns a failed release: a pushed tag never moves, so the rerun takes the same tag.
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: The pushed tag to release, such as v1.0.0-rc.1
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 # Two runs for one tag would replace the same draft's files at once.
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -33,7 +28,7 @@ jobs:
     permissions:
       contents: write # the draft release
     env:
-      TAG: ${{ inputs.tag || github.ref_name }}
+      TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,7 +36,6 @@ jobs:
           # main's history, for the check below.
           fetch-depth: 0
           persist-credentials: false
-      # HEAD, not GITHUB_SHA: a manual run's GITHUB_SHA is the head of the branch it ran from.
       - name: Check that the tag is on main
         run: |
           if ! git merge-base --is-ancestor HEAD origin/main; then
