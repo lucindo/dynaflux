@@ -21,6 +21,7 @@ type MemRuns struct {
 	objects map[string][]byte
 }
 
+// NewMemRuns returns a MemRuns that holds no object.
 func NewMemRuns() *MemRuns { return &MemRuns{objects: map[string][]byte{}} }
 
 // Put implements [Runs].

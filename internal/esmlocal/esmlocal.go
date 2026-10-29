@@ -35,6 +35,8 @@ type Reader struct {
 	iters     map[string]*string // by ShardId: where the next read starts; nil once the shard ended
 }
 
+// NewReader returns a Reader of the stream streamARN that reads each shard from its oldest
+// record (TRIM_HORIZON).
 func NewReader(c *dynamodbstreams.Client, streamARN string) *Reader {
 	return &Reader{c: c, streamARN: streamARN, iters: map[string]*string{}}
 }

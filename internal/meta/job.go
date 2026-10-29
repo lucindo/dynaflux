@@ -81,6 +81,7 @@ const (
 // jobLifetime is how long the item of a job that ended done, broken or failed stays.
 const jobLifetime = 400 * 24 * time.Hour
 
+// Refusals of a meta write; the methods that return one name it.
 var (
 	ErrJobExists = errors.New("meta: the version has a job")
 	ErrNoJob     = errors.New("meta: the version has no job")

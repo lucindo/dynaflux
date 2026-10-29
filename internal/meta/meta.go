@@ -52,6 +52,7 @@ func (b Bounds) check() error {
 	return nil
 }
 
+// Refusals of a meta write; the methods that return one name it.
 var (
 	ErrFenced        = errors.New("meta: a fence exists for a version this batch didn't apply")
 	ErrTransition    = errors.New("meta: view state can't move there")
