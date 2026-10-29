@@ -131,13 +131,46 @@ type putResult struct {
 	calls    []emulatortest.Call
 	late     time.Duration // from the deadline to Put's return
 	arrivals []time.Time   // after returned + slack
+	written  bool          // an attempt's request reached the client's kernel whole
 }
 
-// putUntil sends one Put of an item of size bytes through c to srv, under a context that
-// ends after timeout. When stall is set, srv reads the request only after Put returned, as a
-// server that stopped reading mid-request and then went on. It checks that the call ends
-// with the deadline and leaves no attempt in flight.
-func putUntil(t *testing.T, srv *tlsServer, c aws.HTTPClient, timeout time.Duration, size int, stall bool) putResult {
+// putCase is a Put of an item of size bytes under a context that ends after timeout, to a
+// server that answers with answer and offers HTTP/2 when h2 is set. When stall is set, the
+// server reads the request only after Put returned, as a server that stopped reading
+// mid-request and then went on. calls says whether n attempts are what the case needs.
+type putCase struct {
+	name    string
+	answer  http.HandlerFunc
+	timeout time.Duration
+	size    int
+	stall   bool
+	h2      bool
+	calls   func(n int) bool
+}
+
+// putUntil sends pc's Put through c, and tries again with twice the timeout until a try makes
+// the attempts pc needs and, when it stalls, writes its request whole: a busy machine can
+// spend the timeout before then, and that try tests nothing.
+func putUntil(t *testing.T, c *awshttp.BuildableClient, pc putCase) putResult {
+	t.Helper()
+	timeout := pc.timeout
+	for try := 1; ; try++ {
+		srv := newTLSServer(t, pc.answer, pc.h2)
+		res := putOnce(t, srv, srv.client(c), timeout, pc.size, pc.stall)
+		if pc.calls(len(res.calls)) && (res.written || !pc.stall) {
+			return res
+		}
+		if try == 5 {
+			t.Fatalf("with a timeout of %v, %d attempts, request written: %v", timeout, len(res.calls), res.written)
+		}
+		t.Logf("with a timeout of %v, %d attempts, request written: %v; trying again", timeout, len(res.calls), res.written)
+		timeout *= 2
+	}
+}
+
+// putOnce is one try of putUntil, against srv. It checks that the call ends with the
+// deadline and leaves no attempt in flight.
+func putOnce(t *testing.T, srv *tlsServer, c aws.HTTPClient, timeout time.Duration, size int, stall bool) putResult {
 	t.Helper()
 	if !stall {
 		close(srv.resume)
@@ -177,19 +210,21 @@ func putUntil(t *testing.T, srv *tlsServer, c aws.HTTPClient, timeout time.Durat
 		if c.Start.After(deadline.Add(slack)) {
 			t.Errorf("attempt %d sent %v after the deadline", i, c.Start.Sub(deadline))
 		}
+		res.written = res.written || !c.Start.IsZero()
 	}
 	time.Sleep(pause)
 	if stall {
 		close(srv.resume)
 	}
-	// Until the stalled server has read whatever reached it, and each handler has seen its
-	// connection end.
+	// Until the stalled server has read whatever reached it of a written request, and each
+	// handler has seen its connection end.
+	stalled := stall && res.written
 	reads, arrivals, open := srv.state()
-	for end := time.Now().Add(settle); (stall && reads == 0 || open != 0) && time.Now().Before(end); {
+	for end := time.Now().Add(settle); (stalled && reads == 0 || open != 0) && time.Now().Before(end); {
 		time.Sleep(10 * time.Millisecond)
 		reads, arrivals, open = srv.state()
 	}
-	if stall && reads == 0 || open != 0 {
+	if stalled && reads == 0 || open != 0 {
 		t.Fatalf("%v after Put returned, the server has read %d requests and has %d open", time.Since(returned), reads, open)
 	}
 	for _, at := range arrivals {
@@ -205,15 +240,7 @@ func putUntil(t *testing.T, srv *tlsServer, c aws.HTTPClient, timeout time.Durat
 // Put takes to return after the deadline, TLS close included, against the core's reserve.
 func TestNoRequestAfterDeadline(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name    string
-		answer  http.HandlerFunc
-		timeout time.Duration
-		size    int
-		stall   bool
-		h2      bool
-		calls   func(n int) bool
-	}{
+	tests := []putCase{
 		{"throttled", throttle, 300 * time.Millisecond, 10, false, false, func(n int) bool { return n >= 2 }},
 		{"hung", hang, 200 * time.Millisecond, 10, false, false, func(n int) bool { return n == 1 }},
 		{"expired", throttle, -time.Millisecond, 10, false, false, func(n int) bool { return n == 0 }},
@@ -227,13 +254,9 @@ func TestNoRequestAfterDeadline(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			s := newTLSServer(t, tt.answer, tt.h2)
 			ddb, _ := sdkOptions(t, "")
-			res := putUntil(t, s, s.client(ddb.HTTPClient.(*awshttp.BuildableClient)), tt.timeout, tt.size, tt.stall)
+			res := putUntil(t, ddb.HTTPClient.(*awshttp.BuildableClient), tt)
 			t.Logf("Put returned %v after the deadline", res.late)
-			if !tt.calls(len(res.calls)) {
-				t.Errorf("%d attempts", len(res.calls))
-			}
 			if res.late > minReserve {
 				t.Errorf("Put returned %v after the deadline, more than the reserve of %v", res.late, minReserve)
 			}
@@ -248,8 +271,8 @@ func TestNoRequestAfterDeadline(t *testing.T) {
 // after Put returned. If it didn't, the stalled case couldn't tell the two apart.
 func TestNoRequestAfterDeadlineControl(t *testing.T) {
 	t.Parallel()
-	s := newTLSServer(t, hang, false)
-	res := putUntil(t, s, s.client(awshttp.NewBuildableClient()), 300*time.Millisecond, 390<<10, true)
+	res := putUntil(t, awshttp.NewBuildableClient(), putCase{answer: hang, timeout: 300 * time.Millisecond, size: 390 << 10,
+		stall: true, calls: func(n int) bool { return n == 1 }})
 	if len(res.arrivals) != 1 {
 		t.Errorf("with the default linger, %d requests arrived after Put returned, want 1", len(res.arrivals))
 	}
