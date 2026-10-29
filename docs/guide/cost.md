@@ -489,8 +489,8 @@ is ±30%: use it to compare designs. For a budget, use the
 [AWS Pricing Calculator](https://calculator.aws/).
 
 `explain`'s numbers and wording can change in any release, for example when measurements
-correct the model: they are outside the v1 compatibility promise
-([ADR 0019](../decisions/0019-v1-compatibility-promise.md)).
+correct the model: they are outside the
+[v1 compatibility promise](../spec/compatibility.md).
 
 ## 7. Measured against the model
 

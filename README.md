@@ -69,8 +69,8 @@ the teardown.
 
 Until v1.0.0, anything may still change. From v1.0.0 on, every v1.x release keeps the Go
 API, your projects, the stored data, the AWS resource names, the CLI's commands and flags,
-and the wire formats compatible, as
-[ADR 0019](docs/decisions/0019-v1-compatibility-promise.md) lists.
+and the wire formats compatible, as the
+[compatibility promise](docs/spec/compatibility.md) lists.
 
 ## Install
 

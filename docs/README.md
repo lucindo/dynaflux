@@ -32,6 +32,7 @@ The specifications are normative: they define what Dynaflux accepts and what it 
 | [spec/infra.md](spec/infra.md) | The CloudFormation templates that `dynaflux generate` writes: every resource with its name and settings, IAM, alarms, and how to deploy and change them. |
 | [spec/lifecycle.md](spec/lifecycle.md) | What happens to a view version from deploy to removal: its states, activation, backfill, when queries may read it, repairs and retiring, and the diagnostics of the operator commands. |
 | [spec/http.md](spec/http.md) | The wire format of the query function: routes, request and response bodies, value forms, error codes, health, limits, what each kind of authentication asks of a caller, and a Python client. |
+| [spec/compatibility.md](spec/compatibility.md) | The v1 compatibility promise: what every v1.x release keeps compatible, from the Go API to the stored data and the wire formats, and what may change in any release. |
 
 ## Decisions
 
