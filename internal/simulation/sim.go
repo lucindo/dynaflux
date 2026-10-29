@@ -370,7 +370,8 @@ type Outcome struct {
 // REMOVE records. Backfills counts the versions a backfill made live, Fresh those the
 // fresh-stream rule made live, Chunks the chunks applied, and Unlisted the units created after
 // a backfill listed their stream's units; Resumed counts the attempts claimed after a step
-// died, Twins the duplicate workers, and Lost the times staged runs were lost. Idle counts the times a unit went quiet. Pruned counts the
+// died, Twins the duplicate workers, and Lost the times staged runs were lost. Idle counts the
+// times a unit went quiet. Pruned counts the
 // high-water marks that row writes dropped, and PrunedOpen those of units still delivering.
 // Deploys counts the builds regions moved to, Guarded the batches that failed under G3, and
 // Tombstones the regions that retired Config.Retire. Skewed counts the appends a writer's

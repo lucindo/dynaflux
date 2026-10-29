@@ -181,10 +181,10 @@ func factsArchive(t *testing.T, now time.Time, f factsFakes) *awsbackfill.Archiv
 	}, now)
 }
 
-// The facts are the stream's ARN now, whether a mapping that reads it invokes its projector, the
-// gaps Lambda wrote for the origin's stream since the origin, and the first hour with writes
-// to the stream table and no projector run that succeeded in it or the next 22, checked from the origin's
-// hour or the last check's end, as far as CloudWatch keeps hourly data.
+// The facts are the stream's ARN now, whether a mapping that reads it invokes its projector,
+// the gaps Lambda wrote for the origin's stream since the origin, and the first hour with
+// writes to the stream table and no projector run that succeeded in it or the next 22, checked
+// from the origin's hour or the last check's end, as far as CloudWatch keeps hourly data.
 func TestArchiveFacts(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 28, 12, 30, 0, 0, time.UTC)

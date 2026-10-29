@@ -257,8 +257,8 @@ type regionPlan struct {
 }
 
 // plan records the origins it can, and works out, otherwise with reads only, what the run
-// does in each region it can work in, the regions at once. It reports each region it can't work in, and returns the status that
-// calls for.
+// does in each region it can work in, the regions at once. It reports each region it can't
+// work in, and returns the status that calls for.
 func (f *fleet) plan(c *cli, o backfillOptions, targets []string) ([]*regionPlan, int) {
 	status := exitOK
 	plans := make([]*regionPlan, len(f.regions))

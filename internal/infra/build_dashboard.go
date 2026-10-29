@@ -55,8 +55,7 @@ type expression struct {
 
 // dashboard returns the store's dashboard in a region: the states of the alarms of s, then
 // graphs of the projectors, the archive, the tables, the backfill executions and the
-// runtime's metrics. In the
-// regions that don't archive, the archive graphs stay empty.
+// runtime's metrics. In the regions that don't archive, the archive graphs stay empty.
 func (b *builder) dashboard(s *Scope) (Dashboard, error) {
 	var widgets []widget
 	y := 0

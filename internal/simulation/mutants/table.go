@@ -656,8 +656,8 @@ func applyControls() []control {
 }
 
 // pruneControls returns the controls of D23a's prune (S9 rule 3), and S9's baselines: no
-// pruning, and a backfill namespace per unit. Seeds seldom line up the races that the time rule and the
-// margin guard, so the scripted tests are their acceptance: TestPruneBoundary,
+// pruning, and a backfill namespace per unit. Seeds seldom line up the races that the time
+// rule and the margin guard, so the scripted tests are their acceptance: TestPruneBoundary,
 // TestLateProgress, TestWarmContainerReadsProgressAgain and the projector's lifetime tests.
 func pruneControls() []control {
 	return []control{

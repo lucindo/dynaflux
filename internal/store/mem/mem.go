@@ -133,8 +133,8 @@ func (m *Mem) nextPage(table string, q store.Query, c *cursor) []store.Item {
 
 // ScanPage implements [store.Backend]. A scan's first page snapshots its segment, and a page
 // that continues from a key reads the segment's latest snapshot after that key, so no write
-// made after that snapshot appears: the most a DynamoDB scan may miss. Segments split the range of a hash of pk, and items come
-// in the order of that hash, not of their keys.
+// made after that snapshot appears: the most a DynamoDB scan may miss. Segments split the
+// range of a hash of pk, and items come in the order of that hash, not of their keys.
 func (m *Mem) ScanPage(ctx context.Context, table string, s store.Scan, start *store.Key) ([]store.Item, *store.Key, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, fmt.Errorf("mem: scan: %w", err)

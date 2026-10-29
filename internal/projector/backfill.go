@@ -39,7 +39,8 @@ func (b BackfillRecord) record() (record, error) {
 }
 
 // ApplyBackfill applies a chunk of archive records in mark order, by unit key then sequence
-// number and without repeats, or of table items in time-mark order, to version, in the backfill's one namespace B: a row holds the records after the
+// number and without repeats, or of table items in time-mark order, to version, in the
+// backfill's one namespace B: a row holds the records after the
 // last one it holds, by mark. The caller applies the chunks in that order, each once the one
 // before succeeded. A table item goes to SPLIT item bucket(event_id, n), so every worker puts
 // it in the same item.
