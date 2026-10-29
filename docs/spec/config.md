@@ -96,6 +96,8 @@ Commands find `dynaflux.yaml` the way the `go` command finds `go.mod`:
 1. Start in the working directory.
 2. If it holds an entry named `dynaflux.yaml`, use it. It must be a regular file or a link
    to one: a directory, FIFO or other entry of that name stops the command (exit status 2).
+   So does a `dynaflux.yaml` in a directory that anyone can write to, such as `/tmp`: it
+   could be another user's. The check doesn't apply on Windows.
 3. Otherwise move to the parent directory and repeat.
 4. If no directory up to the filesystem root holds one, stop with `DF6001` (exit status 2).
 
