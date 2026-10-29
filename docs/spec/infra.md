@@ -12,13 +12,7 @@ Dynaflux never deploys anything itself: you deploy the templates with the SAM CL
 own pipeline.
 
 The inputs are `dynaflux.yaml` ([config.md](config.md)) and the SQL files
-([sql.md](sql.md)); what the tables hold is in [encoding.md](encoding.md). Four decision
-records explain the less obvious parts:
-[ADR 0003](../decisions/0003-shard-identity-from-tumbling-window.md) (the event source
-mapping), [ADR 0008](../decisions/0008-archive-schema-migration.md) (the archive schema
-and the setup function), [ADR 0013](../decisions/0013-deployed-catalog-registration.md)
-(the catalog's registration) and [ADR 0018](../decisions/0018-query-handler-and-front-doors.md)
-(the query function's template).
+([sql.md](sql.md)); what the tables hold is in [encoding.md](encoding.md).
 
 ## Contents
 
@@ -291,8 +285,7 @@ backfill function, `Backfill`. Each function has its own log group, `Logs<ID>`, 
   `runtime.prune_window_seconds` (DF6305) because projectors write view rows; the setup
   function never does, and its Athena queries can take minutes.
 - The backfill function ignores it too: it writes view rows only in the backfill's own
-  namespace, which the prune window doesn't govern
-  ([ADR 0011](../decisions/0011-backfill-coordinator.md)). Its memory holds the runs it
+  namespace, which the prune window doesn't govern. Its memory holds the runs it
   sorts and merges.
 
 ### 6.2 Stream ARN lookup
@@ -331,7 +324,7 @@ replica's stream to its projector. Its settings are the fixed values of
 | `EventSourceArn` | The ARN that `Lookup<Stream>` returns. |
 | `MaximumBatchingWindowInSeconds` | `runtime.batching_window_seconds` |
 | `DestinationConfig.OnFailure` | The bucket. |
-| `FilterCriteria` | None. A filter can't be combined with a tumbling window ([ADR 0003](../decisions/0003-shard-identity-from-tumbling-window.md)), so the projector skips `REMOVE` records itself. |
+| `FilterCriteria` | None. A filter can't be combined with a tumbling window, so the projector skips `REMOVE` records itself. |
 
 The logical ID, the source ARN and the starting position depend only on the stream's name
 and table, so no ordinary change replaces a mapping. A replacement would briefly put a
@@ -341,8 +334,7 @@ second reader on the stream.
 
 `Catalog`, a `Custom::DynafluxCatalog` custom resource that the setup function serves,
 records in the meta table the catalog that the region's functions run
-([lifecycle.md §9](lifecycle.md#9-the-deployed-catalog),
-[ADR 0013](../decisions/0013-deployed-catalog-registration.md)). The commands read it, and a
+([lifecycle.md §9](lifecycle.md#9-the-deployed-catalog)). The commands read it, and a
 backfill activates a version only when that catalog defines it.
 
 | Property | Value |
@@ -371,8 +363,8 @@ backfill activates a version only when that catalog defines it.
 
 `BackfillStateMachine` (`AWS::StepFunctions::StateMachine`, `STANDARD`, named
 `{prefix}{store}-backfill`) runs each backfill job that `dynaflux backfill` starts in the
-region, one execution per attempt ([lifecycle.md §5.4](lifecycle.md#54-jobs),
-[ADR 0011](../decisions/0011-backfill-coordinator.md)). Its definition uses JSONata:
+region, one execution per attempt ([lifecycle.md §5.4](lifecycle.md#54-jobs)). Its
+definition uses JSONata:
 
 | State | Does |
 |-------|------|
@@ -483,8 +475,7 @@ authorizer only.
 `ArchiveMode`, a `Custom::DynafluxArchiveMode` custom resource that the setup function
 serves, records each stream's archive mode in the region's meta table before any function
 changes. A backfill trusts the region's archive of a stream only from an origin with no
-change of that mode since ([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete),
-[ADR 0017](../decisions/0017-archive-completeness.md)).
+change of that mode since ([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete)).
 
 | Property | Value |
 |----------|-------|
@@ -530,7 +521,7 @@ in `ArchiveSchema`. Its Iceberg table, data and optimizers stay.
 
 The Glue database and the Iceberg tables aren't CloudFormation resources. `ArchiveSchema`
 holds their desired state as properties, and the setup function applies it with the Glue
-API and Athena DDL ([ADR 0008](../decisions/0008-archive-schema-migration.md)):
+API and Athena DDL:
 
 - **Properties:** the database and its location, `s3://<bucket>/warehouse/<database>/`, the
   workgroup, the optimizer role and settings, and for each archived stream its table:
@@ -650,10 +641,10 @@ change and a new Dynaflux release.
 | Batch size | 100 | Lambda's default. The batching window (`runtime.batching_window_seconds`), not the size, controls cost; `dynaflux explain` assumes 100. |
 | Parallelization factor | 1 | The projector applies each shard in order, one batch at a time. |
 | Bisect batch on error | On | It isolates a failing record, and splitting doesn't use up retries. |
-| Function response types | `ReportBatchItemFailures` | Retries resume at the failed record ([ADR 0003](../decisions/0003-shard-identity-from-tumbling-window.md)). |
+| Function response types | `ReportBatchItemFailures` | Retries resume at the failed record. |
 | Maximum retry attempts | -1 (unlimited) | A discarded batch would leave a hole that the view rows' high-water marks can't represent, so failures retry until the stream trims the records after 24 hours. |
 | Maximum record age | -1 (unlimited) | Lambda never discards a record it can still read. A finite age would also discard records that are merely old when a mapping is created, for example after a regional deploy that lags a new stream by a day. |
-| Tumbling window | 900 seconds | It only tells the projector its shard ([ADR 0003](../decisions/0003-shard-identity-from-tumbling-window.md)). |
+| Tumbling window | 900 seconds | It only tells the projector its shard. |
 | Mapping metrics | `EventCount` | Per-mapping counts for the discarded and polling alarms ([§10](#10-alarms-and-dashboard)). |
 | Log retention | 30 days | Long enough to investigate an incident; logs aren't the record. |
 | Firehose buffering and retries | 300 seconds or 128 MiB; 7,200 seconds | [§7.4](#74-firehose-streams) |
@@ -679,10 +670,8 @@ change and a new Dynaflux release.
   `{store}-view-…`.
 - Statements about archive resources exist only in archive regions.
 - No role can call `dynamodb:DeleteItem` or `UpdateItem`: the runtime always writes whole
-  items ([ADR 0004](../decisions/0004-runtime-storage-boundary.md)). No generated role
-  writes in a transaction either. IAM has no transaction action: it governs a transaction's
-  writes as `PutItem` and its condition checks as `GetItem`
-  ([ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md)).
+  items. No generated role writes in a transaction either. IAM has no transaction action:
+  it governs a transaction's writes as `PutItem` and its condition checks as `GetItem`.
 - Functions publish metrics in CloudWatch embedded metric format logs, so no role needs
   `cloudwatch:PutMetricData`.
 - A trust policy names the service, with a condition only where the service documents one:
@@ -785,9 +774,7 @@ versions.
 Trusts `lambda.amazonaws.com`. The statements in the first table are inline; those of the
 second name every stream and view table, so they go in managed policies attached to the
 role, `RoleBackfillPolicy<n>`, as many as fit 6,144 characters each. The statements whose
-names start with `Archive` exist only in archive regions: a job reads the archive with them
-([ADR 0016](../decisions/0016-archive-export-with-athena.md),
-[ADR 0017](../decisions/0017-archive-completeness.md)).
+names start with `Archive` exist only in archive regions: a job reads the archive with them.
 
 | Statement | Actions | Resources | Condition |
 |-----------|---------|-----------|-----------|
@@ -899,9 +886,7 @@ matches the tables of a store named `{store}-view-…`.
 ### 9.9 Applications
 
 `generate` writes no policy for applications either. An application's role needs these, in
-each region it uses, with the ARN forms of [§9.8](#98-operators)
-([ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md),
-[ADR 0015](../decisions/0015-wait-tokens-and-receipts.md)):
+each region it uses, with the ARN forms of [§9.8](#98-operators):
 
 | Actions | Resources | Condition | For |
 |---------|-----------|-----------|-----|

@@ -25,6 +25,7 @@ var (
 	urlScheme  = regexp.MustCompile(`^[a-z][a-z0-9+.-]*:`)
 	heading    = regexp.MustCompile(`^#{1,6}\s+(.*)`)
 	headLink   = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
+	decision   = regexp.MustCompile(`\bADR \d{4}\b|decisions/`)
 	dfCode     = regexp.MustCompile(`\bDF\d{4}\b`)
 	specRow    = regexp.MustCompile(`(?m)^\| (DF\d{4}) \| (error|warning|retired) \|`)
 	cliCode    = regexp.MustCompile(`"(DF7\d{3})"`)
@@ -231,6 +232,24 @@ func headingAnchors(m markdown) map[string]bool {
 		seen[slug]++
 	}
 	return anchors
+}
+
+// TestDocNoDecisions checks that the README, the guides and the specs never cite a decision
+// record: they hold what a user needs themselves, and a later record can supersede the one
+// they would cite.
+func TestDocNoDecisions(t *testing.T) {
+	t.Parallel()
+	specs, err := fs.Glob(os.DirFS(repoRoot), "docs/spec/*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range append(testedDocs(t), specs...) {
+		for i, line := range readMarkdown(t, p).lines {
+			if m := decision.FindString(line); m != "" {
+				t.Errorf("%s:%d: %q cites a decision record: state what the reader needs instead", p, i+1, m)
+			}
+		}
+	}
 }
 
 // TestDocCodes checks that every diagnostic code in the README and the guides is a current

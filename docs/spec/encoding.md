@@ -40,8 +40,7 @@ and `internal/agg` implement exactly what it says, and their tests check it.
   ([sql.md §5.8](sql.md#58-evaluation-errors)), never a failure of the whole batch.
 - Terms:
   - **Delivery unit:** one shard of a stream table's DynamoDB change stream, named by its
-    `ShardId` ([ADR 0003](../decisions/0003-shard-identity-from-tumbling-window.md)). It is
-    unrelated to the `SHARDS` clause.
+    `ShardId`. It is unrelated to the `SHARDS` clause.
   - **Sequence number:** a record's position in its delivery unit, as DynamoDB delivers it:
     21 to 40 decimal digits ([StreamRecord][streamrecord]). Anything else is rejected.
   - **Logical row:** one view row, which `SPLIT n` stores as n items.
@@ -309,7 +308,7 @@ DynamoDB's rule about TTL values more than five years in the past never applies.
 |-----------|-------|
 | `pk`, `sk` | §2 and §3: `sk` is `event_time` (`DateTime64(6)`, 27 bytes), `#`, then `event_id` (26 bytes). |
 | one per declared column | The column's value (§5.1), key columns included. |
-| `_r` | S: `origin_region`, the region of the append that wrote the event, by its canonical name, such as `us-east-1`; never a FIPS pseudo-region such as `fips-us-east-1` ([ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md)). |
+| `_r` | S: `origin_region`, the region of the append that wrote the event, by its canonical name, such as `us-east-1`; never a FIPS pseudo-region such as `fips-us-east-1`. |
 | `_it` | N: `ingest_time` in microseconds. |
 | `_ttl` | `ingest_time` plus `LOG RETENTION` (calendar units clamp to the end of the month), as §5.4. None with `LOG RETENTION FOREVER`. |
 | `_sync` | L of S: the IDs of the `SYNC` view versions that the append's transaction applied with the event, sorted ([sql.md §9.7](sql.md#97-mode)). Absent when there are none. |
@@ -611,8 +610,7 @@ that broke first keeps its `broken` map.
 ### 8.3 Job item
 
 One per view version that a backfill job was started for, in each region
-([lifecycle.md §5.4](lifecycle.md#54-jobs),
-[ADR 0011](../decisions/0011-backfill-coordinator.md)). The job's steps read and write it;
+([lifecycle.md §5.4](lifecycle.md#54-jobs)). The job's steps read and write it;
 it stays after the job ends.
 
 | Attribute | Value |
@@ -632,7 +630,7 @@ it stays after the job ends.
 | `read_after` | N, with the table source: the earliest time the scan may start. With the time split it is `split_late` plus the clock margin (60 s), otherwise `activated_at` plus the listing delay (90 s). |
 | `scanned_at` | N, with the table source: when the scan ended. The version holds every event from that time less the stream's `LOG RETENTION` and an hour ([lifecycle.md §5.2](lifecycle.md#52-sources)). |
 | `fresh` | BOOL, once `done`: whether the fresh-stream rule made the version live ([lifecycle.md §4.3](lifecycle.md#43-fresh-streams)). |
-| `staging` | S: the staging prefix in the region's bucket, `backfill/<version>/<created_at>/`. With the archive source it also holds the slice plan, `plan-<attempt>-<random>`, and each try of a slice's export, `unload/<plan>/<from>-<to>/<try>/` ([ADR 0016](../decisions/0016-archive-export-with-athena.md)). |
+| `staging` | S: the staging prefix in the region's bucket, `backfill/<version>/<created_at>/`. With the archive source it also holds the slice plan, `plan-<attempt>-<random>`, and each try of a slice's export, `unload/<plan>/<from>-<to>/<try>/`. |
 | `stage` | M: where staging resumes. With the table source: `segments` (N, the scan's segment count), `next` (M, a segment number → M with the `pk` and `sk` of the last item staged from it), `finished` (L of N, the segments read to their end). With the archive source, where a field that is zero, empty or false is absent: `plan_query` (S, the ID of the Athena query that lists the table's partitions, saved before the job waits for it), `plan` (S, the name of the committed plan object), `export` (M, the current try of the slice being staged: `from` and `to`, N in microseconds, `try` N, `failed` N, the slice's failed tries that count against its three, and `id` S, the query ID, saved before the job waits for it and absent until the try starts), `slice` (N, the index in the plan of the slice being staged; the slices before it are staged), `query` (S, that slice's succeeded query, whose manifest lists its files), `file` and `skip` (N, the manifest index of the file being staged and the rows already staged from it), `rows` (N, the rows staged from the slice, for its integrity check), `errors` (M: `after` S, the last object of the error prefix staged; `done` BOOL; `foreign` N, the lines skipped because Dynaflux didn't write them), `scanned` (N, the bytes Athena scanned for the job) and `tries` (N, the tries that failed and the restages, in all, which the token of the partitions' listing counts). |
 | `runs` | L of M: the committed runs, each with `name` (S), `records` (N), and `first` and `last` (B, the marks of its first and last records, as §7.6's `B` value). A run in the staging prefix that this list doesn't name is garbage. A run never spans a commit of `stage`. |
 | `merge` | M, during a merge pass: `inputs` (L of S, the run names), `outputs` (L, as `runs`), `mark` (B, the last mark written). |
@@ -665,8 +663,7 @@ passes 350,000 bytes (DF6019 in [config.md](config.md#codes)), so a body fits Dy
 
 One per stream, in each region: the region's archive mode for the stream, and the history
 that decides whether a backfill may trust the region's archive of it
-([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete),
-[ADR 0017](../decisions/0017-archive-completeness.md)).
+([lifecycle.md §5.5](lifecycle.md#55-when-the-archive-is-complete)).
 
 | Attribute | Value |
 |-----------|-------|
@@ -698,7 +695,7 @@ that decides whether a backfill may trust the region's archive of it
 
 One per event appended with `dynaflux.Waitable()`, in the append's region, written by that
 region's projector once it has handled the event's record
-([sql.md §9.7](sql.md#97-mode), [ADR 0015](../decisions/0015-wait-tokens-and-receipts.md)).
+([sql.md §9.7](sql.md#97-mode)).
 
 | `pk` | `sk` | Attributes |
 |------|------|------------|

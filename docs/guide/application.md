@@ -453,8 +453,7 @@ func recordView(ctx context.Context, c *flux.Client, view flux.PageView) ([]flux
 
 ## 6. Values
 
-Each SQL type has one Go type, in events, parameters and rows
-([ADR 0005](../decisions/0005-public-go-value-types.md)):
+Each SQL type has one Go type, in events, parameters and rows:
 
 | SQL type | Go type |
 |----------|---------|

@@ -8,10 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 This page is the wire format of the query function: how a client calls a named query
 annotated `-- expose: http` over HTTP or by direct Lambda invoke, what it gets back, and
 what each kind of authentication asks of the caller. Python and other non-Go clients need
-nothing else to call a query and decode its rows. The design is
-[ADR 0018](../decisions/0018-query-handler-and-front-doors.md). Related: the `http`
-settings in [config.md](config.md#http), the query rules in [sql.md §10](sql.md#10-named-queries),
-and readiness in [lifecycle.md §6](lifecycle.md#6-queries).
+nothing else to call a query and decode its rows. Related: the `http` settings in
+[config.md](config.md#http), the query rules in [sql.md §10](sql.md#10-named-queries), and
+readiness in [lifecycle.md §6](lifecycle.md#6-queries).
 
 ## Contents
 

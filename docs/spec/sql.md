@@ -1386,8 +1386,7 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
     definitions plus the retained versions in `dynaflux.lock` ([§9.9](#99-view-versions)).
   - a `SYNC` view whose `GROUP BY` doesn't include every `PRIMARY KEY` column of the stream
     gets a warning (DF3501): many partition keys share its rows, which makes them hot.
-- How `SYNC` appends behave
-  ([ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md)):
+- How `SYNC` appends behave:
   - Each event is its own transaction, also in batch appends, which write their events in
     input order.
   - Only `live` versions are applied in the transaction. A version still being backfilled
@@ -1410,8 +1409,7 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
   - Queries over a `SYNC` view use strongly consistent reads, which cost twice as much. A
     query sees the append at once only in the region that accepted it; other regions see
     it when their projector applies it.
-- A query can also wait for an append without `SYNC`
-  ([ADR 0015](../decisions/0015-wait-tokens-and-receipts.md)):
+- A query can also wait for an append without `SYNC`:
   - The append option `dynaflux.Waitable()` asks for it. The projector of the append's
     region then writes a receipt for each of the call's events once it has applied it: one
     more write per event, which other appends don't pay. The append returns a token, as
@@ -1462,9 +1460,7 @@ order_item  = expr [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ] ;
     `DateTime64(p, 'UTC')` and `Decimal(P)`
   - an explicit `PRIMARY KEY` equal to the whole `ORDER BY`
   - additive stream changes ([§8.9](#89-changing-a-stream))
-- `dynaflux.lock`, a generated file committed next to `dynaflux.yaml`, numbers the versions
-  ([ADR 0002](../decisions/0002-view-version-lock-file.md),
-  [ADR 0007](../decisions/0007-lock-file-format.md)):
+- `dynaflux.lock`, a generated file committed next to `dynaflux.yaml`, numbers the versions:
   - A fingerprint the lock doesn't hold gets one more than the view's highest number.
     Numbers are never reused.
   - A fingerprint of a retained version, an older version that is still deployed, makes

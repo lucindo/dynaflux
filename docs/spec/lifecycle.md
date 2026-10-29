@@ -205,8 +205,7 @@ job still waits about 28 minutes before that scan.
 An append to a stream with a `SYNC` view applies, in its transaction, the view's versions
 that it reads as `live`, and records them on the event. The projector of the append's
 region skips exactly those versions for that event; other regions apply it as usual
-([sql.md §9.7](sql.md#97-mode),
-[ADR 0014](../decisions/0014-sync-views-in-the-append-transaction.md)).
+([sql.md §9.7](sql.md#97-mode)).
 
 - A backfill job makes a version `live` only after it applied its whole part. So an event
   that an append applied came after the job: above every fence and after every table
@@ -295,8 +294,7 @@ Firehose stream, in CloudWatch, shows when, with a minute to spare for clocks. W
 Firehose holds nothing, the job waits until 2 hours 30 minutes after the cut instead, which
 covers Firehose's retries. CloudWatch forgets the metric of a stream that had no records
 for 14 days, and without it the job can't tell that Firehose is empty: append one event, or
-use `-source table`. `status` says why a job waits. Then the job
-([ADR 0016](../decisions/0016-archive-export-with-athena.md)):
+use `-source table`. `status` says why a job waits. Then the job:
 
 1. Reads the records that Firehose couldn't deliver, under `errors/firehose/<stream>/` in
    the bucket. An object there that doesn't hold Dynaflux records, such as the file list of
@@ -383,8 +381,7 @@ A region's archive of a stream is complete when it holds every event that the re
 change stream ever carried. Only then can a backfill split by fences and read it. Nothing in
 the archive itself shows that, so Dynaflux trusts it from a recorded **origin**, as long as
 no **hole** and no **gap** came after it. Each region keeps this history in a stream item
-of its meta table ([encoding.md §8.5](encoding.md#85-stream-item),
-[ADR 0017](../decisions/0017-archive-completeness.md)).
+of its meta table ([encoding.md §8.5](encoding.md#85-stream-item)).
 
 - **Origin.** `dynaflux backfill -all`, and `backfill <view>` for its view's stream,
   records the origin of a stream in a region that archives it with `events: all`, when the
