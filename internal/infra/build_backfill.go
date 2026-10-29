@@ -132,7 +132,7 @@ func (b *builder) backfillArchiveStatements() []Statement {
 	statements := []Statement{
 		{
 			Sid:       "ArchiveQueries",
-			Actions:   []string{"athena:GetQueryExecution", "athena:GetQueryResults", "athena:StartQueryExecution", "athena:StopQueryExecution"},
+			Actions:   []string{"athena:GetQueryExecution", "athena:GetQueryResults", "athena:StartQueryExecution"},
 			Resources: []Text{regionalARN("athena", "workgroup/"+ref(idBackfillWorkGroup, AttrName))},
 		},
 		// Athena needs these on the default database in every region.

@@ -783,7 +783,7 @@ names start with `Archive` exist only in archive regions: a job reads the archiv
 | `Metrics` | `cloudwatch:GetMetricData` | `*` | |
 | `Staging` | `s3:DeleteObject`, `GetObject`, `PutObject` | `backfill/*` in the bucket | |
 | `StagingList` | `s3:ListBucket` | The bucket | `s3:prefix` starts with `backfill/` |
-| `ArchiveQueries` | `athena:GetQueryExecution`, `GetQueryResults`, `StartQueryExecution`, `StopQueryExecution` | The backfill workgroup | |
+| `ArchiveQueries` | `athena:GetQueryExecution`, `GetQueryResults`, `StartQueryExecution` | The backfill workgroup | |
 | `ArchiveAthenaCatalog` | `glue:GetDatabase`, `GetDatabases` | The Glue catalog and `database/default`, which Athena needs in every region | |
 | `ArchiveCatalog` | `glue:GetDatabase`, `GetPartitions`, `GetTable`, `GetTables` | The Glue catalog, the archive database and its tables | |
 | `ArchiveFiles` | `s3:GetObject` | `warehouse/<database>/*` in the bucket | |

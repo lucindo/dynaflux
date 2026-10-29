@@ -280,7 +280,7 @@ func backfillCalls(t *testing.T, m *infra.Manifest, data []byte, d infra.Deploym
 	}
 	// The archive's reads: an export's manifest, which the job lists when S3 refuses it, to
 	// tell a missing one; its files; the error prefix; Lambda's gaps; the evidence.
-	for _, op := range []string{"StartQueryExecution", "GetQueryExecution", "GetQueryResults", "StopQueryExecution"} {
+	for _, op := range []string{"StartQueryExecution", "GetQueryExecution", "GetQueryResults"} {
 		add("athena:"+op, regional("athena", "workgroup/"+naming.BackfillWorkGroup()), nil)
 	}
 	manifest := "athena/backfill/q-1-manifest.csv"
@@ -407,8 +407,8 @@ func TestBackfillGrants(t *testing.T) {
 		"dynamodb:DescribeStream": "dynamodb:DescribeStream", "cloudwatch:GetMetricData": "cloudwatch:GetMetricData",
 		"cloudwatch:ListMetrics": "cloudwatch:ListMetrics", "athena:StartQueryExecution": "athena:StartQueryExecution",
 		"athena:GetQueryExecution": "athena:GetQueryExecution", "athena:GetQueryResults": "athena:GetQueryResults",
-		"athena:StopQueryExecution": "athena:StopQueryExecution", "firehose:DescribeDeliveryStream": "firehose:DescribeDeliveryStream",
-		"lambda:ListEventSourceMappings": "lambda:ListEventSourceMappings",
+		"firehose:DescribeDeliveryStream": "firehose:DescribeDeliveryStream",
+		"lambda:ListEventSourceMappings":  "lambda:ListEventSourceMappings",
 	}
 	if got, want := slices.Sorted(maps.Keys(actions)), slices.Sorted(slices.Values(ops)); !slices.Equal(got, want) {
 		t.Errorf("the table maps %q, but the adapters can send %q", got, want)

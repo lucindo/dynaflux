@@ -23,12 +23,12 @@ import (
 
 // Athena runs in memory the two statements of package archive that a backfill sends: the
 // partitions query and the UNLOAD of a range of event times. It knows each by its exact
-// text, never by parsing SQL, and answers StartQueryExecution, GetQueryExecution,
-// GetQueryResults and StopQueryExecution in Athena's JSON protocol. A query runs when it
-// starts, is RUNNING at its first poll, and ends at the next. An UNLOAD writes the rows of
-// its range as gzip JSON files, in the forms of the statement's projection, under its
-// destination, and its data manifest under athena/backfill/; it fails on a destination that
-// holds an object, as Athena does. It is safe for concurrent use.
+// text, never by parsing SQL, and answers StartQueryExecution, GetQueryExecution and
+// GetQueryResults in Athena's JSON protocol. A query runs when it starts, is RUNNING at its
+// first poll, and ends at the next. An UNLOAD writes the rows of its range as gzip JSON
+// files, in the forms of the statement's projection, under its destination, and its data
+// manifest under athena/backfill/; it fails on a destination that holds an object, as
+// Athena does. It is safe for concurrent use.
 type Athena struct {
 	s3      *S3
 	bucket  string
@@ -79,7 +79,6 @@ const (
 	stateRunning   = "RUNNING"
 	stateSucceeded = "SUCCEEDED"
 	stateFailed    = "FAILED"
-	stateCancelled = "CANCELLED"
 	errorUser      = 1100 // a statement Athena refuses to run, as on a destination that holds data
 	errorInternal  = 100
 	categoryUser   = 2
@@ -131,11 +130,6 @@ func (a *Athena) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, a.execution(in.QueryExecutionID, q))
 	case "GetQueryResults":
 		writeJSON(w, results(q))
-	case "StopQueryExecution":
-		if q.polls == 0 {
-			q.state, q.polls = stateCancelled, 1
-		}
-		writeJSON(w, map[string]any{})
 	default:
 		athenaError(w, "InvalidRequestException", "the fake doesn't serve "+op)
 	}

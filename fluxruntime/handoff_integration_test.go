@@ -231,8 +231,6 @@ func (fakeArchive) Status(context.Context, string) (backfill.QueryStatus, error)
 	return backfill.QueryStatus{State: backfill.QuerySucceeded}, nil
 }
 
-func (fakeArchive) Stop(context.Context, string) error { return nil }
-
 // Partitions lists one partition of every event time.
 func (fakeArchive) Partitions(context.Context, string) ([]backfill.Partition, error) {
 	return []backfill.Partition{{From: time.Unix(0, 0), To: time.Unix(1<<32, 0), Bytes: 1}}, nil

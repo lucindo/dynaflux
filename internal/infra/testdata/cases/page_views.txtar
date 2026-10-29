@@ -570,7 +570,6 @@ Resources:
             - athena:GetQueryExecution
             - athena:GetQueryResults
             - athena:StartQueryExecution
-            - athena:StopQueryExecution
             Resource: !Sub arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${BackfillWorkGroup}
           - Sid: ArchiveAthenaCatalog
             Effect: Allow

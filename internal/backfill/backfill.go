@@ -93,7 +93,6 @@ type Archive interface {
 	// token started. It fails with [ErrThrottled] when no query started for now.
 	Start(ctx context.Context, q Query, token string) (string, error)
 	Status(ctx context.Context, id string) (QueryStatus, error)
-	Stop(ctx context.Context, id string) error
 	// Partitions returns the partitions that a succeeded QueryPartitions listed.
 	Partitions(ctx context.Context, id string) ([]Partition, error)
 	// Files returns the files of a succeeded QueryExport, as its manifest lists them.

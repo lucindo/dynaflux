@@ -382,8 +382,6 @@ func (a *archiveFake) Status(_ context.Context, id string) (backfill.QueryStatus
 	return fq.status, err
 }
 
-func (a *archiveFake) Stop(context.Context, string) error { return nil }
-
 func (a *archiveFake) Partitions(_ context.Context, id string) ([]backfill.Partition, error) {
 	fq, err := a.query(id)
 	switch {

@@ -356,19 +356,6 @@ func (a archiveReader) Status(ctx context.Context, id string) (backfill.QuerySta
 	return q.status, nil
 }
 
-func (a archiveReader) Stop(ctx context.Context, id string) error {
-	lat, f := a.rg.enter(ctx, kindArchive, "stop "+id)
-	defer time.Sleep(lat)
-	if f == faultTransient {
-		return errTransient
-	}
-	q, err := a.rg.archive.query(id)
-	if err == nil && time.Now().Before(q.done) {
-		q.done, q.status = time.Now(), backfill.QueryStatus{State: backfill.QueryCancelled}
-	}
-	return err
-}
-
 func (a archiveReader) Partitions(ctx context.Context, id string) ([]backfill.Partition, error) {
 	lat, f := a.rg.enter(ctx, kindRead, "partitions "+id)
 	defer time.Sleep(lat)

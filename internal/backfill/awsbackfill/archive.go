@@ -131,14 +131,6 @@ func reason(s *athenatypes.QueryExecutionStatus) string {
 	return ""
 }
 
-// Stop implements [backfill.Archive].
-func (a *Archive) Stop(ctx context.Context, id string) error {
-	if _, err := a.c.Athena.StopQueryExecution(ctx, &athena.StopQueryExecutionInput{QueryExecutionId: &id}); err != nil {
-		return fmt.Errorf("awsbackfill: stop query %s: %w", id, err)
-	}
-	return nil
-}
-
 // Partitions implements [backfill.Archive]: the rows of archive.PartitionsQuery, each a
 // day, written as a date or as days since 1970, its records and bytes.
 func (a *Archive) Partitions(ctx context.Context, id string) ([]backfill.Partition, error) {
