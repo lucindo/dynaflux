@@ -7,13 +7,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"sync"
 )
 
 // Firehose answers DescribeDeliveryStream: ACTIVE for each delivery stream it holds, not
 // found for any other. It is safe for concurrent use.
 type Firehose struct {
-	mu      sync.Mutex
 	streams map[string]bool
 }
 
@@ -35,10 +33,7 @@ func (f *Firehose) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the fake serves DescribeDeliveryStream only", http.StatusBadRequest)
 		return
 	}
-	f.mu.Lock()
-	found := f.streams[in.DeliveryStreamName]
-	f.mu.Unlock()
-	if !found {
+	if !f.streams[in.DeliveryStreamName] {
 		athenaError(w, "ResourceNotFoundException", "Firehose "+in.DeliveryStreamName+" under account 123456789012 not found.")
 		return
 	}
@@ -57,7 +52,6 @@ type Mapping struct {
 // Lambda answers ListEventSourceMappings with the mappings of the request's EventSourceArn,
 // one page. It is safe for concurrent use.
 type Lambda struct {
-	mu       sync.Mutex
 	mappings []Mapping
 }
 
@@ -73,8 +67,6 @@ func (l *Lambda) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source := r.URL.Query().Get("EventSourceArn")
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	listed := []Mapping{}
 	for _, m := range l.mappings {
 		if m.EventSourceArn == source {
