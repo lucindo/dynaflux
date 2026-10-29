@@ -114,8 +114,8 @@ func throttle(w http.ResponseWriter, _ *http.Request) {
 
 func hang(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }
 
-// Bounds of TestNoRequestAfterDeadline. An attempt may start, or a request arrive, up to
-// slack after the deadline: the context's timer can fire late. Put must return within the
+// Bounds of TestNoRequestAfterDeadline. A request may arrive up to slack after Put returned:
+// the server may still be reading one written just before. Put must return within the
 // smallest reserve the core keeps, 0.5 s at a 5 s timeout, or the reply comes too late.
 const (
 	slack      = 50 * time.Millisecond
@@ -206,10 +206,8 @@ func putOnce(t *testing.T, srv *tlsServer, c aws.HTTPClient, timeout time.Durati
 		t.Errorf("Put = %v, want context.DeadlineExceeded", err)
 	}
 	res := putResult{calls: rec.Calls(), late: returned.Sub(deadline)}
-	for i, c := range res.calls {
-		if c.Start.After(deadline.Add(slack)) {
-			t.Errorf("attempt %d sent %v after the deadline", i, c.Start.Sub(deadline))
-		}
+	emulatortest.CheckStopsAtEnd(t, res.calls)
+	for _, c := range res.calls {
 		res.written = res.written || !c.Start.IsZero()
 	}
 	time.Sleep(pause)

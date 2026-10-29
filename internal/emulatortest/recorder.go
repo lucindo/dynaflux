@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -39,6 +40,7 @@ type Call struct {
 	Start      time.Time // request written whole by net/http; zero when it never was
 	End        time.Time // response read, or the attempt failed
 	Deadline   time.Time // the attempt's context deadline; zero without one
+	AfterEnd   bool      // the attempt's context had ended when the SDK handed it over
 	Status     int       // HTTP status; 0 for a transport error
 	ErrorCode  string    // x-amzn-ErrorType or __type, without the namespace
 }
@@ -101,6 +103,28 @@ func (r *Recorder) Do(req *http.Request) (*http.Response, error) {
 	return res, err
 }
 
+// CheckStopsAtEnd fails tb unless calls stop as an SDK call must once its context ends. The
+// SDK checks the context before each attempt, so it hands over at most one after the end,
+// and net/http refuses to write that one. Attempts are told apart by when the SDK handed them
+// over, not by the clock: on a busy machine, net/http can write an attempt handed over just
+// before the end long after it.
+func CheckStopsAtEnd(tb testing.TB, calls []Call) {
+	tb.Helper()
+	after := 0
+	for i, c := range calls {
+		if !c.AfterEnd {
+			continue
+		}
+		after++
+		if !c.Start.IsZero() {
+			tb.Errorf("attempt %d written though its context had ended", i)
+		}
+	}
+	if after > 1 {
+		tb.Errorf("%d attempts handed over after the context ended, want at most 1", after)
+	}
+}
+
 // newCall describes req and returns a copy of it whose body can still be sent.
 func newCall(req *http.Request) (Call, *http.Request, error) {
 	var body []byte
@@ -132,6 +156,7 @@ func newCall(req *http.Request) (Call, *http.Request, error) {
 		Condition:  in.ConditionExpression,
 	}
 	c.Deadline, _ = req.Context().Deadline()
+	c.AfterEnd = req.Context().Err() != nil
 	for _, name := range []string{in.TableName, in.DeliveryStreamName} {
 		if name != "" {
 			c.Resources = append(c.Resources, name)

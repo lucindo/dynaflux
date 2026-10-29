@@ -5,11 +5,14 @@ package emulatortest_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"runtime"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -72,6 +75,42 @@ func TestRecorderSeesEachAttempt(t *testing.T) {
 	}
 	if n := rec.InFlight(); n != 0 {
 		t.Errorf("InFlight = %d after the call returned", n)
+	}
+}
+
+// An attempt handed over after its context ended is flagged, and net/http never writes it.
+func TestRecorderFlagsAttemptsAfterTheEnd(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{}`) }))
+	t.Cleanup(srv.Close)
+	rec := emulatortest.NewRecorder(nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	send := func() error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, strings.NewReader(`{"TableName":"t"}`))
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		res, err := rec.Do(req)
+		if err == nil {
+			err = res.Body.Close()
+		}
+		return err
+	}
+	if err := send(); err != nil {
+		t.Fatalf("Do before the end: %v", err)
+	}
+	cancel()
+	if err := send(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Do after the end = %v, want context.Canceled", err)
+	}
+
+	type seen struct{ afterEnd, written bool }
+	var got []seen
+	for _, c := range rec.Calls() {
+		got = append(got, seen{c.AfterEnd, !c.Start.IsZero()})
+	}
+	if want := []seen{{false, true}, {true, false}}; !slices.Equal(got, want) {
+		t.Errorf("calls as {after the end, written} = %v, want %v", got, want)
 	}
 }
 

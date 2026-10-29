@@ -64,14 +64,14 @@ func throttle(w http.ResponseWriter, _ *http.Request) {
 
 func hang(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }
 
-// slack bounds how long after the deadline an attempt may start, or a request arrive: the
-// context's timer can fire late, and net/http may finish writing an attempt the SDK started
-// before it. Both take about a millisecond, well within the projector's reserve of 0.5 s.
+// slack bounds how long after Put returned a request may arrive: the server may still be
+// reading one written just before. It takes about a millisecond, well within the projector's
+// reserve of 0.5 s.
 const slack = 50 * time.Millisecond
 
 // putUntil sends one Put to a server that answers with then, under a context that ends
 // after timeout, and checks what the projector's cutoff relies on: once the context ends,
-// the SDK soon sends nothing more, the call returns without waiting for the server, and no
+// the SDK sends nothing more, the call returns without waiting for the server, and no
 // attempt is left in flight. It returns the attempts.
 func putUntil(t *testing.T, then http.HandlerFunc, timeout time.Duration) []emulatortest.Call {
 	t.Helper()
@@ -112,11 +112,7 @@ func putUntil(t *testing.T, then http.HandlerFunc, timeout time.Duration) []emul
 		t.Errorf("Put returned %v after the deadline", late)
 	}
 	calls := rec.Calls()
-	for i, c := range calls {
-		if c.Start.After(deadline.Add(slack)) {
-			t.Errorf("attempt %d sent %v after the deadline", i, c.Start.Sub(deadline))
-		}
-	}
+	emulatortest.CheckStopsAtEnd(t, calls)
 	// The server sees the connection close and gets nothing more.
 	time.Sleep(100 * time.Millisecond)
 	arrivals, open := srv.state()
