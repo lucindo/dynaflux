@@ -12,22 +12,27 @@ rule and every diagnostic code; the recipes link to the sections they rely on.
 ## Contents
 
 - [Before you start](#before-you-start)
-- Streams: [1. Choose a stream's PRIMARY KEY](#1-choose-a-streams-primary-key),
-  [2. Idempotent appends with DEDUP BY](#2-idempotent-appends-with-dedup-by),
-  [3. LOG RETENTION and the archive](#3-log-retention-and-the-archive),
-  [4. The ACCEPT window](#4-the-accept-window)
-- Views: [5. Start from the query](#5-start-from-the-query-then-derive-the-views-keys),
-  [6. Time buckets](#6-time-buckets), [7. Choose aggregates](#7-choose-aggregates),
-  [8. Filters and ARRAY JOIN](#8-filters-and-array-join),
-  [9. Expire rows with TTL](#9-expire-rows-with-ttl),
-  [10. Hot rows and SPLIT](#10-hot-rows-and-split),
-  [11. Read your writes with SYNC](#11-read-your-writes-with-sync),
-  [12. Count entities by their latest state](#12-count-entities-by-their-latest-state)
-- Queries: [13. Query shapes](#13-query-shapes),
-  [14. Serve a query over HTTP](#14-serve-a-query-over-http)
-- Changes and errors: [15. What makes a new version](#15-what-makes-a-new-version),
-  [16. Common diagnostics and their fixes](#16-common-diagnostics-and-their-fixes),
-  [17. How it differs from ClickHouse](#17-how-it-differs-from-clickhouse)
+- Streams
+  - [1. Choose a stream's PRIMARY KEY](#1-choose-a-streams-primary-key)
+  - [2. Idempotent appends with DEDUP BY](#2-idempotent-appends-with-dedup-by)
+  - [3. LOG RETENTION and the archive](#3-log-retention-and-the-archive)
+  - [4. The ACCEPT window](#4-the-accept-window)
+- Views
+  - [5. Start from the query](#5-start-from-the-query-then-derive-the-views-keys)
+  - [6. Time buckets](#6-time-buckets)
+  - [7. Choose aggregates](#7-choose-aggregates)
+  - [8. Filters and ARRAY JOIN](#8-filters-and-array-join)
+  - [9. Expire rows with TTL](#9-expire-rows-with-ttl)
+  - [10. Hot rows and SPLIT](#10-hot-rows-and-split)
+  - [11. Read your writes with SYNC](#11-read-your-writes-with-sync)
+  - [12. Count entities by their latest state](#12-count-entities-by-their-latest-state)
+- Queries
+  - [13. Query shapes](#13-query-shapes)
+  - [14. Serve a query over HTTP](#14-serve-a-query-over-http)
+- Changes and errors
+  - [15. What makes a new version](#15-what-makes-a-new-version)
+  - [16. Common diagnostics and their fixes](#16-common-diagnostics-and-their-fixes)
+  - [17. How it differs from ClickHouse](#17-how-it-differs-from-clickhouse)
 
 ## Before you start
 
