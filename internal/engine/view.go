@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"math"
 	"slices"
 	"time"
 
@@ -288,8 +289,8 @@ func (e *Engine) comboRows(ctx context.Context, cat *Catalog, q *query, r *read,
 	}
 	if perCombo > 0 {
 		// One item more than the rows ends the last row, or is the item an exclusive bound
-		// may let in.
-		sq.PageSize = perCombo*q.view.Split + 1
+		// may let in. A LIMIT near MaxInt is capped so that the product can't overflow.
+		sq.PageSize = min(perCombo, (math.MaxInt-1)/q.view.Split)*q.view.Split + 1
 	}
 	sq.Consistent = r.consistent
 	return e.viewRows(ctx, cat, q, sq)

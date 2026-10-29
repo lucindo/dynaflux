@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"math/rand/v2"
 	"slices"
 	"strconv"
@@ -453,6 +454,26 @@ func TestQueryLimitStopsTheRead(t *testing.T) {
 		// One more item than the rows tells where the last row ends.
 		if n := s.reads.items.Load(); n > 2 || !slices.Equal(got, []string{"a 12-31T23:00 1"}) {
 			t.Errorf("read %d items for %q, want at most 2 for the newest hour", n, got)
+		}
+	})
+}
+
+func TestQueryLimitPastMaxInt(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		s := newQueryStore(t, queries+`
+-- name: SplitLatestWide :many
+SELECT hour, views FROM split_hours
+WHERE site = {site:String}
+ORDER BY hour DESC
+LIMIT {n:UInt64};
+`)
+		for h := range 2 {
+			s.visit(t, "a", "u1", 10, expr.Null(), start.Add(-time.Duration(h+1)*time.Hour))
+		}
+		got, err := s.query(t, "SplitLatestWide", expr.String("a"), expr.Uint(math.MaxUint64))
+		if err != nil || !slices.Equal(got, []string{"12-31T23:00 1", "12-31T22:00 1"}) {
+			t.Errorf("SplitLatestWide = %q, %v; want both hours", got, err)
 		}
 	})
 }
