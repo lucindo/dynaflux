@@ -43,17 +43,8 @@ func IteratorAges(ctx context.Context, c CloudWatch, functions []string, since, 
 	}
 	queries := make([]types.MetricDataQuery, len(functions))
 	for i, f := range functions {
-		queries[i] = types.MetricDataQuery{
-			Id: aws.String("f" + strconv.Itoa(i)),
-			MetricStat: &types.MetricStat{
-				Metric: &types.Metric{
-					Namespace: aws.String("AWS/Lambda"), MetricName: aws.String("IteratorAge"),
-					Dimensions: []types.Dimension{{Name: aws.String("FunctionName"), Value: aws.String(f)}},
-				},
-				Period: aws.Int32(int32(time.Minute / time.Second)),
-				Stat:   aws.String("Maximum"),
-			},
-		}
+		dims := []types.Dimension{{Name: aws.String("FunctionName"), Value: aws.String(f)}}
+		queries[i] = metricQuery("f"+strconv.Itoa(i), "AWS/Lambda", "IteratorAge", dims, time.Minute, statMaximum)
 	}
 	in := &cloudwatch.GetMetricDataInput{
 		MetricDataQueries: queries, StartTime: aws.Time(since), EndTime: aws.Time(now), ScanBy: types.ScanByTimestampDescending,
