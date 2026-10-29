@@ -49,8 +49,8 @@ var (
 // 2106, an array of more than 1,000 elements, a PRIMARY KEY longer than DynamoDB allows, or
 // a missing event_time on a stream with DEDUP BY. Err matches [ErrInvalidValue].
 type ValueError struct {
-	// Name is the column, as in SQL; for a PRIMARY KEY too long for DynamoDB, the key's
-	// columns joined by ", ", such as "org_id, user_id".
+	// Name is the column or the query parameter, as in SQL; for a PRIMARY KEY too long for
+	// DynamoDB, the key's columns joined by ", ", such as "org_id, user_id".
 	Name string
 	Err  error
 }

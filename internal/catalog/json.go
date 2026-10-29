@@ -18,12 +18,12 @@ import (
 )
 
 // Versions of the catalog's JSON form. Every change to the form bumps FormatVersion, so an
-// older Dynaflux refuses a newer catalog rather than misreading it. [Unmarshal] reads every
-// version from MinFormatVersion to FormatVersion, so a new CLI can read the catalogs that
-// older releases deployed. A change that only adds omitzero fields keeps MinFormatVersion;
-// any other change raises it to the new FormatVersion. That strands the catalogs that older
-// generated code embeds, so it also replaces dynaflux.GeneratedCodeVersion1 with the next
-// version, and that code fails to compile instead of failing when it starts.
+// older Dynaflux refuses a newer catalog rather than misreading it, and generated code that
+// embeds the new form names the next dynaflux.GeneratedCodeVersionN, so it fails to compile
+// against an older module instead of failing when it starts. [Unmarshal] reads every version
+// from MinFormatVersion to FormatVersion, so a new release reads the catalogs that older
+// releases deployed and that older generated code embeds. MinFormatVersion stays 1 for all
+// of v1: raising it takes a new major version of the module (ADR 0019).
 const (
 	FormatVersion    = 1
 	MinFormatVersion = 1

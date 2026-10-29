@@ -1,0 +1,12 @@
+# Copyright 2026 The Dynaflux Authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Tokens that a fluxtest store returned for the catalog in catalog.json, in token format 1:
+# an event of page_views; a batch of api_calls whose second event was a duplicate, stored
+# 1 µs before the first; a Waitable append to page_views; and, from another store, a
+# Waitable batch of three api_calls whose second event was a duplicate, stored 1 µs before
+# the others without Waitable. Each line is a name and the token's text.
+one-event AQVsb2NhbApwYWdlX3ZpZXdzANxqz6wA2Yd-zm02iqwab4DA39mToNcBAA
+batch AQVsb2NhbAlhcGlfY2FsbHO7VlipJByKjufYl-_ttFSwgsDf2ZOg1wEAPDFd8Tv1KXY6kU2FHsqa5QEA
+waitable AQVsb2NhbApwYWdlX3ZpZXdzANxqz6wA2Yd-zm02iqwacIPA39mToNcBAQ
+batch-unordered AQVsb2NhbAlhcGlfY2FsbHOLml6YJEGsG1qbJN1gxvongcDf2ZOg1wEBz4qFOKLazag5N4RpkSzayQEAT07cA5pKrZYywBnelWStRQIB

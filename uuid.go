@@ -9,9 +9,10 @@ import (
 	"errors"
 )
 
-// UUID is a 128-bit UUID. Its methods behave as those of Go 1.27's [uuid.UUID], which it
-// will become an alias of; until then, the two types convert into each other. To make one,
-// read crypto/rand into it, rand.Read(id[:]), or on Go 1.27 convert [uuid.NewV7].
+// UUID is a 128-bit UUID. Its methods behave as those of Go 1.27's [uuid.UUID], and the two
+// types convert into each other for free. UUID stays a [16]byte type of its own for all of
+// v1. To make one, read crypto/rand into it, rand.Read(id[:]), or on Go 1.27 convert
+// [uuid.NewV7]: dynaflux.UUID(uuid.NewV7()).
 type UUID [16]byte
 
 // textLen is the length of the 8-4-4-4-12 form.
