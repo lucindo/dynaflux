@@ -482,6 +482,10 @@ Why it works ([sql.md §7.1](../spec/sql.md#71-summary)):
   every order and those with a coupon
   ([sql.md §7.3](../spec/sql.md#73-the--if-combinator)).
 - Use `Decimal` for money: `sum` over it is exact.
+- Also use `Decimal`, such as `Decimal(20, 0)`, for an integer column whose values your
+  callers choose. Two `Int64` or `UInt64` values near the limit take a `sum` past its type,
+  and then every read of that row fails
+  ([sql.md §7.2](../spec/sql.md#72-function-reference)).
 
 How a query combines each aggregate across rows
 ([sql.md §7.4](../spec/sql.md#74-read-time-aggregation-and--merge)):

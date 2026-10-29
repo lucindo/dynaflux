@@ -874,6 +874,10 @@ hint `uniqExact(x)` or `uniq(x)` (DF5207).
 - A view stores `sum` and `avg` totals with no range limit, not even DynamoDB's 38 digits:
   a limit on the running total would make the result depend on the order of events. Only
   the final total is checked, when read.
+- Two `Int64` or `UInt64` values near their type's limit take a total past it, and every
+  read of that row then fails until the row expires. When callers you don't trust choose a
+  summed column's values, declare it `Decimal(20, 0)`: its sum is a `Decimal(38, 0)`, which
+  no realistic number of events overflows.
 - A `Float64` sum is exact: Dynaflux keeps the exact sum of the values and rounds it to the
   nearest `Float64` once, when read. So every region, and live projection and backfill,
   return the same value (Dev 6). `Float64` can't hold most decimal fractions, such as 0.1,
