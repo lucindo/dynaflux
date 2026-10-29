@@ -971,10 +971,11 @@ account-wide. It shows the alarm states; the projectors' iterator age, invocatio
 and throttles; the archive's incoming and delivered records and its data freshness; consumed
 write capacity and throttles per table; replication latency from each other region; DynamoDB
 system errors; the backfill executions started, succeeded and failed; and the runtime's
-opened breakers, too-large rows and divergent duplicates
-(one dedup key written with different payloads, [encoding.md §6](encoding.md#6-stream-items)).
-Replication latency, view and meta table throttles, system errors, divergent duplicates and
-Firehose throttling have no alarm. The per-table widgets search by the store's name prefix,
+opened breakers, too-large rows, divergent duplicates
+(one dedup key written with different payloads, [encoding.md §6](encoding.md#6-stream-items))
+and values left out of views ([sql.md §5.8](sql.md#58-evaluation-errors)).
+Replication latency, view and meta table throttles, system errors, divergent duplicates,
+values left out and Firehose throttling have no alarm. The per-table widgets search by the store's name prefix,
 so new view versions appear without a change to the template.
 
 ## 11. Deploying

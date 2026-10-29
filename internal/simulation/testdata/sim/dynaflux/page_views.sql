@@ -60,12 +60,13 @@ AS SELECT site, toDate(event_time) AS day, count() AS views, uniqExact(user_id) 
 FROM page_views
 GROUP BY site, day;
 
--- Ties in ms go by event. A poison event's label, over 4 KB, fails the evaluation though it
--- is never the largest. Idempotent only, but uniqExact takes the fenced handoff.
+-- Ties in ms go by event. A label over 4 KB is left out of max(label); a poison event's ms,
+-- 0, fails the evaluation. Idempotent only, but uniqExact takes the fenced handoff.
 CREATE MATERIALIZED VIEW user_latest
 ORDER BY (user_id)
 AS SELECT user_id, argMax(page, ms) AS slowest_page, argMin(page, ms) AS fastest_page,
-    any(page) AS first_page, max(label) AS top_label, uniqExact(page) AS pages
+    any(page) AS first_page, max(label) AS top_label, max(intDiv(1000, ms)) AS top_rate,
+    uniqExact(page) AS pages
 FROM page_views
 GROUP BY user_id;
 

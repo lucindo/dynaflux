@@ -137,9 +137,9 @@ func (b *builder) graphs(s *Scope) []graph {
 	return append(gs,
 		b.backfillGraph(),
 		graph{Title: "DynamoDB system errors", Metrics: [][]any{search("Operation,"+dimTableName, "SystemErrors", statSum, tables)}},
-		graph{Title: "Opened breakers, too-large rows and divergent duplicates", Stat: statSum, Metrics: lines(
+		graph{Title: "Opened breakers, too-large rows, divergent duplicates and values left out", Stat: statSum, Metrics: lines(
 			catalog.MetricNamespace, catalog.MetricDimensionStore, []string{b.naming.Base()},
-			catalog.MetricBreakerOpened, catalog.MetricRowTooLarge, catalog.MetricDivergentDuplicates)},
+			catalog.MetricBreakerOpened, catalog.MetricRowTooLarge, catalog.MetricDivergentDuplicates, catalog.MetricLeftOut)},
 	)
 }
 

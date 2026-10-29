@@ -253,6 +253,8 @@ us-east-1: error DF7208: the event source mapping us-east-1-signups-shop-project
   hint: deploy regional.yaml in us-east-1 again
 us-east-1: warning DF7210: the archive of stream signups is 30m0s behind
   hint: read the log group /aws/kinesisfirehose/shop-archive
+us-east-1: warning DF7221: views left out 7 rows or aggregate inputs in the last 24 hours, for values too long to store
+  hint: the projectors' batch metrics log lines name the view versions under leftOut
 -- want/delivery_problems.stdout --
 version         us-east-1
 page_counts@v1  live
@@ -1018,7 +1020,7 @@ dynaflux status: us-east-1: the execution of the backfill of plan_counts@v2 coul
 dynaflux status: us-east-1: the history of stream page_views couldn't be read: backfill: the history of shop-stream-page_views: awsbackfill: read metrics: ThrottlingException: Rate exceeded
 dynaflux status: us-east-1: the history of stream signups couldn't be read: backfill: the history of shop-stream-signups: awsbackfill: read metrics: ThrottlingException: Rate exceeded
 dynaflux status: us-east-1: the projectors' lag couldn't be read: awsbackfill: read the projectors' IteratorAge: ThrottlingException: Rate exceeded
-dynaflux status: us-east-1: the archive's metrics couldn't be read: deployed: read metrics: ThrottlingException: Rate exceeded
+dynaflux status: us-east-1: the archive's and the views' metrics couldn't be read: deployed: read metrics: ThrottlingException: Rate exceeded
 -- want/metrics_and_executions_unreadable.stdout --
 version         us-east-1
 page_counts@v1  live

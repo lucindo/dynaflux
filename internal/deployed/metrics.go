@@ -12,14 +12,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+
+	"github.com/lucindo/dynaflux/internal/catalog"
 )
 
 const (
 	// Recent is how far back the latest IteratorAge and DataFreshness may be: Lambda and
 	// Firehose publish a minute's data a minute or two after it ends.
 	Recent = 10 * time.Minute
-	// FailedRowsWindow is how far back the archive's failed rows are counted.
-	FailedRowsWindow = 24 * time.Hour
+	// CountWindow is how far back the archive's failed rows and the values left out of views
+	// are counted.
+	CountWindow = 24 * time.Hour
 )
 
 // Metrics are a region's archive metrics. A delivery stream without data, such as one that
@@ -32,8 +35,11 @@ type Metrics struct {
 	// had delivered every record it took before then.
 	Delivered map[string]time.Time
 	// FailedRows is, by delivery stream, how many rows Firehose couldn't write to the
-	// archive in the last [FailedRowsWindow].
+	// archive in the last [CountWindow].
 	FailedRows map[string]int64
+	// LeftOut is how many source rows and aggregate inputs the store's views left out in the
+	// last [CountWindow], for a value too long to store (sql.md §5.8).
+	LeftOut int64
 }
 
 // series is a metric to read, and what to do with its values and their times, newest first.
@@ -42,10 +48,11 @@ type series struct {
 	add                                       func(values []float64, times []time.Time)
 }
 
-// ReadMetrics reads the freshness and failed rows of the delivery streams, up to now.
-func ReadMetrics(ctx context.Context, c CloudWatch, deliveryStreams []string, now time.Time) (Metrics, error) {
+// ReadMetrics reads the freshness and failed rows of the delivery streams, and the values
+// left out of the views of store, its dimension value, up to now.
+func ReadMetrics(ctx context.Context, c CloudWatch, store string, deliveryStreams []string, now time.Time) (Metrics, error) {
 	m := Metrics{Freshness: map[string]time.Duration{}, Delivered: map[string]time.Time{}, FailedRows: map[string]int64{}}
-	var recent, failed []series
+	var recent, counts []series
 	for _, d := range deliveryStreams {
 		recent = append(recent, series{"AWS/Firehose", "DeliveryToIceberg.DataFreshness", "DeliveryStreamName", d, "Maximum",
 			func(vs []float64, ts []time.Time) {
@@ -55,17 +62,23 @@ func ReadMetrics(ctx context.Context, c CloudWatch, deliveryStreams []string, no
 					m.Delivered[d] = ts[0].Add(-m.Freshness[d])
 				}
 			}})
-		failed = append(failed, series{"AWS/Firehose", "DeliveryToIceberg.FailedRowCount", "DeliveryStreamName", d, "Sum",
+		counts = append(counts, series{"AWS/Firehose", "DeliveryToIceberg.FailedRowCount", "DeliveryStreamName", d, "Sum",
 			func(vs []float64, _ []time.Time) {
 				for _, v := range vs {
 					m.FailedRows[d] += int64(v)
 				}
 			}})
 	}
+	counts = append(counts, series{catalog.MetricNamespace, catalog.MetricLeftOut, catalog.MetricDimensionStore, store, "Sum",
+		func(vs []float64, _ []time.Time) {
+			for _, v := range vs {
+				m.LeftOut += int64(v)
+			}
+		}})
 	if err := read(ctx, c, recent, int32(time.Minute/time.Second), now.Add(-Recent), now); err != nil {
 		return Metrics{}, err
 	}
-	if err := read(ctx, c, failed, int32(FailedRowsWindow/time.Second), now.Add(-FailedRowsWindow), now); err != nil {
+	if err := read(ctx, c, counts, int32(CountWindow/time.Second), now.Add(-CountWindow), now); err != nil {
 		return Metrics{}, err
 	}
 	return m, nil

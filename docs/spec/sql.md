@@ -423,7 +423,7 @@ transaction ([§9.7](#97-mode)).
 | `Date`, `DateTime64(p)` | Within the ranges in [§4.1](#41-scalar-types), also in `import` mode. | The bucket functions return `DateTime`, which ClickHouse silently wraps outside 1970–2106. The bound keeps every bucket exact. |
 | `DateTime64(p)` | Finer precision is truncated to p fractional digits. | Callers may pass more precision, such as Go's nanoseconds. ClickHouse truncates too. |
 | `Array(T)` | An appended array has at most 1,000 elements. | Bounds the rows one event adds to a view through `ARRAY JOIN` ([§9.5](#95-array-join)). |
-| Key columns | The encoded partition key must fit 2048 bytes and the encoded sort key 1024 bytes, including any shard or `SPLIT` suffix. | DynamoDB key limits. A stream key that's too long fails the append; a view key that's too long is an evaluation error ([§5.8](#58-evaluation-errors)). |
+| Key columns | The encoded partition key must fit 2048 bytes and the encoded sort key 1024 bytes, including any shard or `SPLIT` suffix. | DynamoDB key limits. A stream key that's too long fails the append; a view leaves out a row whose key is too long ([§5.8](#58-evaluation-errors)). |
 | Event | The encoded event item, with attribute names and bookkeeping, must fit 400 KB. | DynamoDB item limit. |
 | Event of an archived stream | Its archive record, with the longest shard ID, sequence number and arrival time, must fit 1,024,000 bytes. | Firehose's record limit: no projector could archive the event. |
 
@@ -742,8 +742,6 @@ Expressions are pure and deterministic. These failures are *evaluation errors*:
 | A non-finite `Float64` | `a / b` with `b = 0`; `1e308 * 10` |
 | A `Float64` that a view would store outside DynamoDB's range ([§4.3](#43-value-restrictions)), other than a `sum` or `avg` total ([§7.2](#72-function-reference)) | `max(x * 1e200)` |
 | `Decimal` overflow or division by zero | [§5.6](#56-arithmetic) |
-| In a view, a `String` value longer than 4 KB that reaches `min`, `max`, `argMax`, `argMin` or `any` | `argMax(url, event_time)` with a 5,000-byte `url` ([§7.2](#72-function-reference)) |
-| A view key longer than DynamoDB allows | [§4.3](#43-value-restrictions) |
 | An integer or `Decimal` total outside its result type, when read | [§7.2](#72-function-reference) |
 
 - In a view, an evaluation error opens that view's breaker: the view stops updating and its
@@ -764,6 +762,21 @@ Expressions are pure and deterministic. These failures are *evaluation errors*:
   - Only these skip operands: `if` and `multiIf` evaluate only the branch they return, and
     `AND` and `OR` evaluate left to right and stop as soon as the result is known. So
     `if(b = 0, NULL, a / b)` never fails.
+
+A value too long to store isn't an evaluation error. Any writer can send one, so a view
+leaves it out instead of breaking:
+
+- A source row whose view key is longer than DynamoDB allows
+  ([§4.3](#43-value-restrictions)) reaches no row of that view.
+- A `String` over 4 KB that reaches `min`, `max`, `argMax`, `argMin` or `any`
+  ([§7.2](#72-function-reference)) leaves that aggregate without the row's input. The
+  row's other aggregates still get theirs.
+
+What a view leaves out depends only on the event, so every region and every backfill
+leaves out the same rows. Live projection counts them in the `LeftOut` metric, and
+`dynaflux status` reports them (DF7221,
+[lifecycle.md §12](lifecycle.md#12-diagnostics)). To leave long values out of a view
+yourself, filter them: `WHERE length(url) <= 512`.
 
 ### 5.9 Where each construct may appear
 
@@ -892,10 +905,10 @@ and its type is always `Nullable(Float64)` (Dev 4).
 returns whichever value it saw first.
 
 In a view, every `String` value that reaches `min`, `max`, `argMax`, `argMin` or `any`, as
-`x`, `arg` or `val`, must be at most 4 KB (4,096 bytes); a longer one is an evaluation
-error ([§5.8](#58-evaluation-errors)). Values on rows that the `-If` condition or the `NULL`
-rule skips aren't checked. The cap applies to every value, not only the one the state
-keeps, so whether a view breaks doesn't depend on the order of events. It bounds the size
+`x`, `arg` or `val`, must be at most 4 KB (4,096 bytes); the aggregate leaves out a row with
+a longer one ([§5.8](#58-evaluation-errors)). Values on rows that the `-If` condition or the
+`NULL` rule skips aren't checked. The cap applies to every value, not only the one the
+state keeps, so what a view keeps doesn't depend on the order of events. It bounds the size
 of a view row ([encoding.md §7.8](encoding.md#78-size-bound)): a view whose largest row
 doesn't fit DynamoDB's 400 KB item limit, minus a 32 KB reserve for bookkeeping, is an error
 (DF3307).

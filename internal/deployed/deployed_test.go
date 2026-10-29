@@ -163,7 +163,7 @@ func (f fakeLambda) ListEventSourceMappings(_ context.Context, in *lambda.ListEv
 
 // ReadMetrics keeps the newest value of a series that continues on a later page, converts
 // seconds, takes the freshness from its datapoint's time for the delivered time, sums failed
-// rows over every page, and leaves out a series without data.
+// rows and the values left out over every page, and leaves out a series without data.
 func TestReadMetrics(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -181,12 +181,15 @@ func TestReadMetrics(t *testing.T) {
 				{Id: aws.String("m1"), StatusCode: complete}}, NextToken: aws.String("2")},
 			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{400}, Timestamps: minutes(4), StatusCode: complete}}},
 		},
+		// m2 is the views' LeftOut, after the failed rows of both delivery streams.
 		"DeliveryToIceberg.FailedRowCount": {
-			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{2}, Timestamps: minutes(60), StatusCode: partial}}, NextToken: aws.String("2")},
-			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{3}, Timestamps: minutes(120), StatusCode: complete}}},
+			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{2}, Timestamps: minutes(60), StatusCode: partial},
+				{Id: aws.String("m2"), Values: []float64{6}, Timestamps: minutes(30), StatusCode: partial}}, NextToken: aws.String("2")},
+			{MetricDataResults: []cwtypes.MetricDataResult{{Id: aws.String("m0"), Values: []float64{3}, Timestamps: minutes(120), StatusCode: complete},
+				{Id: aws.String("m2"), Values: []float64{1}, Timestamps: minutes(90), StatusCode: complete}}},
 		},
 	}}
-	m, err := deployed.ReadMetrics(t.Context(), cw, []string{"shop-archive-page_views", "shop-archive-clicks"}, now)
+	m, err := deployed.ReadMetrics(t.Context(), cw, "shop", []string{"shop-archive-page_views", "shop-archive-clicks"}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,6 +201,9 @@ func TestReadMetrics(t *testing.T) {
 	}
 	if got := m.FailedRows; len(got) != 1 || got["shop-archive-page_views"] != 5 {
 		t.Errorf("FailedRows %v, want 5", got)
+	}
+	if m.LeftOut != 7 {
+		t.Errorf("LeftOut %d, want 7", m.LeftOut)
 	}
 	if want := []string{"10m0s 60", "24h0m0s 86400"}; !slices.Equal(cw.windows, want) {
 		t.Errorf("windows and periods %q, want %q", cw.windows, want)

@@ -44,10 +44,15 @@ func logCounts(ctx context.Context, log *slog.Logger, dimension string, b projec
 	if len(st.Broken) > 0 || st.TooLarge > 0 {
 		level = slog.LevelError
 	}
+	leftOut := 0
+	for _, n := range st.LeftOut {
+		leftOut += n
+	}
 	counts := slices.DeleteFunc([]emf.Count{
 		{Name: catalog.MetricBreakerOpened, N: len(st.Broken)},
 		{Name: catalog.MetricRowTooLarge, N: st.TooLarge},
 		{Name: catalog.MetricDivergentDuplicates, N: st.Divergent},
+		{Name: catalog.MetricLeftOut, N: leftOut},
 	}, func(c emf.Count) bool { return c.N == 0 })
 	if len(counts) == 0 {
 		return
@@ -55,6 +60,9 @@ func logCounts(ctx context.Context, log *slog.Logger, dimension string, b projec
 	attrs := append(emf.Attrs(dimension, counts...), batchAttrs(ctx, b)...)
 	if len(st.Broken) > 0 {
 		attrs = append(attrs, slog.Any("broken", st.Broken))
+	}
+	if leftOut > 0 {
+		attrs = append(attrs, slog.Any("leftOut", st.LeftOut))
 	}
 	log.LogAttrs(ctx, level, "batch metrics", attrs...)
 }

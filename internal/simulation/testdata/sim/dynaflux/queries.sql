@@ -26,7 +26,7 @@ SELECT site, day, views, users, revenue FROM site_daily
 WHERE site IN {sites:Array(String)};
 
 -- name: UserLatest :many
-SELECT user_id, slowest_page, fastest_page, first_page, top_label, pages FROM user_latest
+SELECT user_id, slowest_page, fastest_page, first_page, top_label, top_rate, pages FROM user_latest
 WHERE user_id IN {users:Array(String)};
 
 -- name: PageTags :many

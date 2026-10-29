@@ -67,6 +67,9 @@ type Stats struct {
 	Broken []string
 	// TooLarge counts the rows that failed with [store.ErrTooLarge].
 	TooLarge int
+	// LeftOut counts, by view version, the source rows and aggregate inputs left out for a
+	// value too long to store (sql.md §5.8).
+	LeftOut map[string]int
 }
 
 // Archiver writes a batch's INSERT records to the stream's archive, from which a backfill
@@ -322,6 +325,7 @@ func (c *Core) apply(ctx, progressCtx context.Context, b Batch, s *Stream, recs 
 			}
 		}
 	}
+	res.Stats.LeftOut = rs.leftOut
 	groups := slices.DeleteFunc(rs.order, func(g *rowGroup) bool { return broken[g.v] })
 	failed, err := c.finish(ctx, b.Stream, rc.unit.Key, groups, res)
 	if err != nil {

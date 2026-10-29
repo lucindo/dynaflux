@@ -21,9 +21,14 @@ import (
 )
 
 // MaxStringBytes is the longest String that may reach min, max, argMax, argMin or any in a
-// view. A longer one is an evaluation error even when the state wouldn't keep it, so that a
-// row's size has a bound and whether a view breaks doesn't depend on the order of events.
+// view, so that a row's size has a bound. A longer one fails the input with [ErrTooLong]
+// even when the state wouldn't keep it, so that which inputs count doesn't depend on the
+// order of events.
 const MaxStringBytes = 4096
+
+// ErrTooLong is an input that a view leaves out (sql.md §5.8): one with a String longer
+// than [MaxStringBytes]. The state is unchanged.
+var ErrTooLong = errors.New("a String argument is too long for a view")
 
 // Spec describes an aggregate state.
 type Spec struct {

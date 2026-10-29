@@ -552,15 +552,18 @@ func TestHandleMetrics(t *testing.T) {
 			insert(seq(2), r.click(t, "u3", "/zero", 0)),
 			insert(seq(3), r.click(t, "u4", "/big", 100)),
 			record("MODIFY", seq(4), changed, old),
+			// 700 spaces, 3 bytes each in a key, pass a partition key's 2,048.
+			insert(seq(5), r.click(t, "u5", strings.Repeat(" ", 700), 100)),
 		))
 		if err != nil {
 			t.Fatal(err)
 		}
+		// page_rates, broken by /zero, gets nothing more from the batch.
 		const want = `{"timestamp":"2000-01-01T00:00:00Z","level":"ERROR","msg":"batch metrics","BreakerOpened":1,` +
-			`"RowTooLarge":1,"DivergentDuplicates":1,"Store":"app","_aws":{"Timestamp":946684800000,"CloudWatchMetrics":` +
+			`"RowTooLarge":1,"DivergentDuplicates":1,"LeftOut":1,"Store":"app","_aws":{"Timestamp":946684800000,"CloudWatchMetrics":` +
 			`[{"Namespace":"Dynaflux","Dimensions":[["Store"]],"Metrics":[{"Name":"BreakerOpened","Unit":"Count"},` +
-			`{"Name":"RowTooLarge","Unit":"Count"},{"Name":"DivergentDuplicates","Unit":"Count"}]}]},"requestId":"req-1",` +
-			`"stream":"clicks","unit":"` + shard + `","broken":["page_rates@v1"]}`
+			`{"Name":"RowTooLarge","Unit":"Count"},{"Name":"DivergentDuplicates","Unit":"Count"},{"Name":"LeftOut","Unit":"Count"}]}]},` +
+			`"requestId":"req-1","stream":"clicks","unit":"` + shard + `","broken":["page_rates@v1"],"leftOut":{"page_totals@v1":1}}`
 		if got, _, _ := strings.Cut(r.logs.String(), "\n"); got != want {
 			t.Errorf("EMF line:\n%s\nwant:\n%s", got, want)
 		}

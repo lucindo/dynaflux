@@ -428,6 +428,7 @@ func statusDeliveryCases() []statusCase {
 			a.metrics["IteratorAge shop-projector-page_views"] = []float64{float64(20 * time.Minute / time.Millisecond)}
 			a.metrics["DeliveryToIceberg.DataFreshness shop-archive-signups"] = []float64{1800}
 			a.metrics["DeliveryToIceberg.FailedRowCount shop-archive-page_views"] = []float64{3, 4}
+			a.metrics["LeftOut shop"] = []float64{2, 5}
 		}},
 		// A part of the region that can't be read hides nothing read from the meta table.
 		{"mappings unreadable", east, 2, func(t *testing.T, s *statusStore) {

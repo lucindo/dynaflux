@@ -67,6 +67,9 @@ const (
 	// MetricDivergentDuplicates counts events written twice under one dedup key with
 	// different payloads.
 	MetricDivergentDuplicates = "DivergentDuplicates"
+	// MetricLeftOut counts the view source rows and aggregate inputs left out for a value
+	// too long to store (sql.md §5.8).
+	MetricLeftOut = "LeftOut"
 	// MetricQueryFailures counts the query function's answers with status 500 or 504.
 	MetricQueryFailures = "QueryFailures"
 )

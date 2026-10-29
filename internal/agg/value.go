@@ -21,15 +21,15 @@ const pickFields = 3
 
 // checkValue applies a view's limits to a value that reaches min, max, argMax, argMin or
 // any: a String of at most [MaxStringBytes], and a Float64 that a DynamoDB number can hold.
-// Every value is checked, not only the one the state keeps, so whether a view breaks
-// doesn't depend on the order of events or on how they are spread over items.
+// Every value is checked, not only the one the state keeps, so what a view keeps doesn't
+// depend on the order of events or on how they are spread over items.
 func (f *Func) checkValue(i int, v expr.Value) error {
 	t := f.args[i]
 	switch {
 	case f.readTime:
 	case t.Kind == catalog.KindString && len(v.AsString()) > MaxStringBytes:
-		return evalError("%s argument %d is a String of %d bytes, longer than %d",
-			f.fn, i+1, len(v.AsString()), MaxStringBytes)
+		return fmt.Errorf("%w: %s argument %d is a String of %d bytes, longer than %d",
+			ErrTooLong, f.fn, i+1, len(v.AsString()), MaxStringBytes)
 	case t.Kind == catalog.KindFloat64:
 		if _, _, err := keys.EncodeValue(t, v); err != nil {
 			return evalError("%s argument %d: %v", f.fn, i+1, err)

@@ -82,7 +82,10 @@ type regionStatus struct {
 	// version's activation, and past the newest deployed.MaxGaps.
 	olderGaps, cappedGaps int
 	gapsUnread            bool
-	unread                []error // the parts of the region that couldn't be read
+	// leftOut is how many source rows and aggregate inputs the views left out in the last
+	// deployed.CountWindow, for a value too long to store.
+	leftOut int64
+	unread  []error // the parts of the region that couldn't be read
 }
 
 // streamStatus is how a region delivers a stream's events.
@@ -299,10 +302,11 @@ func (r *regionStatus) readDelivery(ctx context.Context, f *fleet, now time.Time
 	if err != nil {
 		r.unread = append(r.unread, fmt.Errorf("the projectors' lag couldn't be read: %w", err))
 	}
-	m, merr := deployed.ReadMetrics(ctx, r.clients.metrics, archives, now)
+	m, merr := deployed.ReadMetrics(ctx, r.clients.metrics, f.naming.Base(), archives, now)
 	if merr != nil {
-		r.unread = append(r.unread, fmt.Errorf("the archive's metrics couldn't be read: %w", merr))
+		r.unread = append(r.unread, fmt.Errorf("the archive's and the views' metrics couldn't be read: %w", merr))
 	}
+	r.leftOut = m.LeftOut
 	for i := range r.streams {
 		s := &r.streams[i]
 		s.lagUnread, s.archiveUnread = err != nil, merr != nil && s.archive != ""

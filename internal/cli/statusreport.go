@@ -115,7 +115,17 @@ func (r *regionStatus) findings(f *fleet, h hintFlags, now time.Time) []finding 
 	for _, s := range r.streams {
 		fs = append(fs, r.streamFindings(f, s, h)...)
 	}
-	return fs
+	return append(fs, r.leftOutFindings()...)
+}
+
+// leftOutFindings is DF7221 when r's views left out values too long to store.
+func (r *regionStatus) leftOutFindings() []finding {
+	if r.leftOut == 0 {
+		return nil
+	}
+	return []finding{regionFinding(r.region, diag.SeverityWarning, "DF7221",
+		fmt.Sprintf("views left out %d rows or aggregate inputs in the last 24 hours, for values too long to store", r.leftOut),
+		"the projectors' batch metrics log lines name the view versions under leftOut")}
 }
 
 // fill returns the command that fills version id in r: dev on DynamoDB Local, where backfill

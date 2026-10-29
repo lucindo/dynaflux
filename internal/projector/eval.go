@@ -5,6 +5,7 @@ package projector
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -61,7 +62,13 @@ type rows struct {
 	owner  byte // keys.OwnerLive, or keys.OwnerBackfill for the backfill's namespace B
 	groups map[groupKey]*rowGroup
 	order  []*rowGroup
+	// leftOut counts, by view version, the source rows and aggregate inputs left out for a
+	// value too long to store (sql.md §5.8).
+	leftOut map[string]int
 }
+
+// errKeyTooLong is a row key past DynamoDB's limits, whose source row a view leaves out.
+var errKeyTooLong = errors.New("projector: the row key is past DynamoDB's limits")
 
 // sourceRow is one input row of a view: an event, or one element of its ARRAY JOIN array
 // at the 1-based position index.
@@ -71,13 +78,12 @@ type sourceRow struct {
 }
 
 // add evaluates one event for v and adds its contributions: per source row, WHERE, then the
-// keys, then each aggregate's condition and arguments. An error is deterministic: it opens
-// v's breaker.
+// keys, then each aggregate's condition and arguments. A row key or an argument too long to
+// store leaves out the source row or the input. An error is deterministic: it opens v's
+// breaker.
 func (rs *rows) add(v *view, rec *record, vals []expr.Value, bad []error) error {
-	for _, i := range v.reads {
-		if bad != nil && bad[i] != nil {
-			return bad[i]
-		}
+	if err := v.readError(bad); err != nil {
+		return err
 	}
 	srcs, err := v.sourceRows(vals)
 	if err != nil {
@@ -100,6 +106,10 @@ func (rs *rows) add(v *view, rec *record, vals []expr.Value, bad []error) error 
 			continue
 		}
 		k, lsk, kerr := v.itemKey(kvs, by)
+		if errors.Is(kerr, errKeyTooLong) {
+			rs.leave(v, 1)
+			continue
+		}
 		if kerr != nil {
 			return kerr
 		}
@@ -111,11 +121,34 @@ func (rs *rows) add(v *view, rec *record, vals []expr.Value, bad []error) error 
 			byRow[k] = c
 		}
 		in.ArrayIndex = src.index
-		if err = v.addInputs(c, &src.frame, in); err != nil {
-			return err
+		left, ierr := v.addInputs(c, &src.frame, in)
+		if ierr != nil {
+			return ierr
+		}
+		rs.leave(v, left)
+	}
+	return nil
+}
+
+// readError returns the decode error of a column that v reads, or nil.
+func (v *view) readError(bad []error) error {
+	for _, i := range v.reads {
+		if bad != nil && bad[i] != nil {
+			return bad[i]
 		}
 	}
 	return nil
+}
+
+// leave counts n source rows or inputs that v leaves out.
+func (rs *rows) leave(v *view, n int) {
+	if n == 0 {
+		return
+	}
+	if rs.leftOut == nil {
+		rs.leftOut = map[string]int{}
+	}
+	rs.leftOut[v.id] += n
 }
 
 func (v *view) sourceRows(vals []expr.Value) ([]sourceRow, error) {
@@ -178,9 +211,9 @@ func (v *view) itemKey(kvs []expr.Value, by string) (store.Key, string, error) {
 	case sk == "":
 		sk = keys.NoSortKey
 	}
+	// The SPLIT suffix has one width, so whether a key fits doesn't depend on the unit.
 	if len(pk) > store.MaxPKLen || len(sk) > store.MaxSKLen {
-		return store.Key{}, "", fmt.Errorf("%w: the row key is %d and %d bytes, over DynamoDB's %d and %d",
-			expr.ErrEval, len(pk), len(sk), store.MaxPKLen, store.MaxSKLen)
+		return store.Key{}, "", errKeyTooLong
 	}
 	return store.Key{PK: pk, SK: sk}, lsk, nil
 }
@@ -210,26 +243,36 @@ func (rs *rows) contribution(v *view, k store.Key, lsk string, kvs []expr.Value,
 
 // addInputs adds a source row's input to each aggregate whose -If condition holds and whose
 // arguments aren't NULL. A uniqExact value is kept once per record and row.
-func (v *view) addInputs(c *contribution, f *expr.Frame, in agg.Input) error {
+// addInputs adds a source row's inputs to c, and returns how many it left out with a String
+// too long for the state ([agg.ErrTooLong]).
+func (v *view) addInputs(c *contribution, f *expr.Frame, in agg.Input) (int, error) {
+	left := 0
 	for i, a := range v.aggs {
 		args, ok, err := agg.EvalArgs(a.cond, a.args, f)
 		switch {
 		case err != nil:
-			return err
+			return left, err
 		case !ok:
 		case a.markers:
 			c.addValue(i, string(keys.Canonical(nil, a.argTypes[0], args[0])), args[0])
 		default:
-			if c.states[i] == nil {
-				c.states[i] = a.fn.New()
+			// A new state is kept only once an input reached it: an empty one has no attribute.
+			s := c.states[i]
+			if s == nil {
+				s = a.fn.New()
 			}
 			in.Args = args
-			if err = c.states[i].Add(in); err != nil {
-				return err
+			switch err = s.Add(in); {
+			case errors.Is(err, agg.ErrTooLong):
+				left++
+			case err != nil:
+				return left, err
+			default:
+				c.states[i] = s
 			}
 		}
 	}
-	return nil
+	return left, nil
 }
 
 func (c *contribution) addValue(i int, canon string, v expr.Value) {

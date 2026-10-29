@@ -124,8 +124,8 @@ FROM readings
 ARRAY JOIN tags AS tag
 GROUP BY sensor;
 
--- A label over 4 KB fails label_max, not label_skips: its -If condition and NULL val skip
--- the row before the cap applies.
+-- A label over 4 KB is left out of label_max, but never reaches label_skips: its -If
+-- condition and NULL val skip the row before the cap applies.
 CREATE MATERIALIZED VIEW label_max
 ORDER BY (sensor)
 AS SELECT sensor, max(label) AS top
@@ -713,22 +713,52 @@ func TestHandleAppliesEveryAggregate(t *testing.T) {
 	})
 }
 
-// TestHandleCapsStringsAfterIfAndNull checks that the 4 KB cap applies only to values that
-// pass the -If condition and the NULL rule (sql.md §7.2).
-func TestHandleCapsStringsAfterIfAndNull(t *testing.T) {
+// TestHandleLeavesOutRowsWithLongKeys checks that a source row whose key would pass
+// DynamoDB's limit is left out of the view, counted by version, and breaks nothing (sql.md
+// §5.8). A space takes 3 bytes in a key, so 700 of them pass a partition key's 2,048.
+func TestHandleLeavesOutRowsWithLongKeys(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		f := newFixture(t, nil)
-		long := f.reading(t, strings.Repeat("a", 4097), 1)
+		long := strings.Repeat(" ", 700)
+		res := f.handle(t, insert(1, f.click(t, "u1", long, 100)), insert(2, f.click(t, "u1", "/a", 100)))
+		if len(res.Stats.Broken) > 0 || res.Stats.LeftOut["page_keys@v1"] != 1 {
+			t.Fatalf("Handle = %+v; want nothing broken and 1 row left out of page_keys@v1", res)
+		}
+		got := []string{f.row(t, "page_keys@v1", page(long)), f.row(t, "page_keys@v1", page("/a"))}
+		if want := []string{"", "/a"}; !slices.Equal(got, want) {
+			t.Errorf("page_keys rows %q, want %q", got, want)
+		}
+	})
+}
+
+// TestHandleLeavesOutLongStrings checks that a String over 4 KB leaves out each input of
+// min, max, argMax, argMin or any that it reaches, counted by version, and breaks no view.
+// The cap applies only to values that pass the -If condition and the NULL rule (sql.md §5.8,
+// §7.2).
+func TestHandleLeavesOutLongStrings(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		f := newFixture(t, nil)
+		recs := []projector.Record{insert(1, f.reading(t, strings.Repeat("~", 4097), 1)), insert(2, f.reading(t, "b", 2))}
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
-		res, err := f.core.Handle(ctx, projector.Batch{Stream: "readings", Unit: unit, Records: []projector.Record{insert(1, long)}})
-		// sensor_stats reads every label in argMax, argMin and any.
-		if want := []string{"label_max@v1", "sensor_stats@v1"}; err != nil || !slices.Equal(res.Stats.Broken, want) {
-			t.Fatalf("Handle = %+v, %v; want %v broken", res, err, want)
+		res, err := f.core.Handle(ctx, projector.Batch{Stream: "readings", Unit: unit, Records: recs})
+		// sensor_stats reads the label in argMax, argMin and any.
+		want := map[string]int{"label_max@v1": 1, "sensor_stats@v1": 3}
+		if err != nil || len(res.Stats.Broken) > 0 || !maps.Equal(res.Stats.LeftOut, want) {
+			t.Fatalf("Handle = %+v, %v; want nothing broken and %v left out", res, err, want)
+		}
+		// The long label would be the max, the argMin at x 1 and the first; uniq still counts it.
+		s1 := expr.String("s1")
+		if got, want := f.row(t, "label_max@v1", s1), "s1 b"; got != want {
+			t.Errorf("label_max s1 = %q, want %q", got, want)
+		}
+		if got, want := f.row(t, "sensor_stats@v1", s1), "s1 2 b b 2 2.0198035579060063 1.5 1.0099017789530031 0 b 0"; got != want {
+			t.Errorf("sensor_stats s1 = %q, want %q", got, want)
 		}
 		// No input reached either aggregate: maxIf reads '' and argMax NULL.
-		if got, want := f.row(t, "label_skips@v1", expr.String("s1")), "s1 NULL "; got != want {
+		if got, want := f.row(t, "label_skips@v1", s1), "s1 NULL "; got != want {
 			t.Errorf("label_skips s1 = %q, want %q", got, want)
 		}
 	})

@@ -50,6 +50,7 @@ const (
 	maxUnits  = 100
 	customers = 16
 	quotaEach = 4             // every quotaEach-th event is a quota request or a charge, in turn
+	longEach  = 8             // about one page view in longEach has a label too long for max
 	spread    = 3 * time.Hour // how far back event times go
 )
 
@@ -208,8 +209,8 @@ func every(prefix string, n int) expr.Value {
 }
 
 // Event returns a page view, or every quotaEach-th a quota request or a charge, in turn.
-// Half the charges are retried with another amount. A poison event is a page view that fails
-// page_rates or user_latest.
+// Half the charges are retried with another amount. A poison event is a page view whose ms,
+// 0, fails page_rates and user_latest.
 func (*pageViews) Event(r *rand.Rand, n int, poison bool) simulation.Event {
 	// A run draws its events when it starts, so event times go back from then.
 	at := time.Now().Add(-time.Duration(r.Int64N(int64(spread))))
@@ -236,11 +237,12 @@ func (*pageViews) Event(r *rand.Rand, n int, poison bool) simulation.Event {
 		return ev
 	}
 	ms, label := 1+r.Uint64N(maxMS), value("l", r.IntN(labels))
-	if poison && r.IntN(2) == 0 {
+	switch {
+	case poison:
 		ms = 0
-	} else if poison {
-		// Below every other label, so a max never keeps it.
-		label = expr.String(strings.Repeat("a", agg.MaxStringBytes+1))
+	case r.IntN(longEach) == 0:
+		// Above every other label, so max(label) would keep it if it weren't left out.
+		label = expr.String(strings.Repeat("~", agg.MaxStringBytes+1))
 	}
 	tagVals := make([]expr.Value, r.IntN(maxTags+1))
 	for i := range tagVals {
@@ -405,14 +407,20 @@ func expectSites(o *simulation.Oracle, ev pageView, at time.Time) {
 
 func expectUser(o *simulation.Oracle, ev pageView, id simulation.RecordID) {
 	row := simulation.RowID{View: userLatest, Key: ev.user}
-	if len(ev.label) > agg.MaxStringBytes {
+	if ev.ms.Sign() == 0 {
 		o.Poison(userLatest, id)
 		return
 	}
 	o.Pick(row, "slowest_page", catalog.AggArgMax, ev.page, ev.ms, ev.tie)
 	o.Pick(row, "fastest_page", catalog.AggArgMin, ev.page, ev.ms, ev.tie)
 	o.Pick(row, "first_page", catalog.AggAny, ev.page, nil, ev.tie)
-	o.MaxString(row, "top_label", ev.label)
+	// A label over 4 KB is left out (sql.md §5.8): with no label, max reads ''.
+	label := ev.label
+	if len(label) > agg.MaxStringBytes {
+		label = ""
+	}
+	o.MaxString(row, "top_label", label)
+	o.Max(row, "top_rate", new(big.Rat).SetInt(new(big.Int).Quo(big.NewInt(1000), ev.ms.Num())))
 	o.UniqExact(row, "pages", ev.page)
 }
 

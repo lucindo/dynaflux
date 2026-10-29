@@ -107,31 +107,35 @@ func TestPickTieBreaks(t *testing.T) {
 	}
 }
 
-// TestViewValueLimits checks the evaluation errors of sql.md §5.8 for values that reach
-// min, max, argMax, argMin or any: a String over 4 KB and a Float64 outside DynamoDB's
-// range, checked on every value, kept or not. Read-time aggregates have no such limit.
+// TestViewValueLimits checks the limits of sql.md §5.8 on values that reach min, max,
+// argMax, argMin or any, on every value, kept or not: a String over 4 KB is left out, and a
+// Float64 outside DynamoDB's range is an evaluation error. Neither changes the state.
+// Read-time aggregates have no such limit.
 func TestViewValueLimits(t *testing.T) {
 	t.Parallel()
 	strT, f64, i64 := typ(catalog.KindString), typ(catalog.KindFloat64), typ(catalog.KindInt64)
-	long := expr.String(strings.Repeat("a", agg.MaxStringBytes+1))
+	// long sorts last, so a max or an argMax by it would keep it.
+	long := expr.String(strings.Repeat("~", agg.MaxStringBytes+1))
 	full := expr.String(strings.Repeat("z", agg.MaxStringBytes))
 	cases := []struct {
 		name string
 		spec agg.Spec
-		// first is added before in, which then fails in a view.
+		// first is added before in, which then fails in a view with want.
 		first, in agg.Input
+		want      error
 	}{
-		{"max of a long String it wouldn't keep", spec(catalog.AggMax, nil, strT), input(full), input(long)},
-		{"min of a long String", spec(catalog.AggMin, nil, strT), input(full), input(long)},
+		{"max of a long String", spec(catalog.AggMax, nil, strT), input(full), input(long), agg.ErrTooLong},
+		{"min of a long String it wouldn't keep", spec(catalog.AggMin, nil, strT), input(full), input(long), agg.ErrTooLong},
 		{"argMax of a long arg", spec(catalog.AggArgMax, nil, strT, i64),
-			input(full, expr.Int(9)), input(long, expr.Int(1))},
-		{"argMin by a long val", spec(catalog.AggArgMin, nil, i64, strT),
-			input(expr.Int(1), full), input(expr.Int(2), long)},
-		{"any of a long String", spec(catalog.AggAny, nil, strT), input(full), input(long)},
-		{"max of a tiny Float64", spec(catalog.AggMax, nil, f64), input(expr.Float(1)), input(expr.Float(1e-131))},
-		{"min of a huge Float64", spec(catalog.AggMin, nil, f64), input(expr.Float(math.Nextafter(1e126, 0))), input(expr.Float(1e126))},
+			input(full, expr.Int(1)), input(long, expr.Int(9)), agg.ErrTooLong},
+		{"argMax by a long val", spec(catalog.AggArgMax, nil, i64, strT),
+			input(expr.Int(1), full), input(expr.Int(2), long), agg.ErrTooLong},
+		{"any of a long String", spec(catalog.AggAny, nil, strT), input(full), input(long), agg.ErrTooLong},
+		{"max of a tiny Float64", spec(catalog.AggMax, nil, f64), input(expr.Float(1)), input(expr.Float(1e-131)), expr.ErrEval},
+		{"min of a huge Float64", spec(catalog.AggMin, nil, f64), input(expr.Float(math.Nextafter(1e126, 0))), input(expr.Float(1e126)),
+			expr.ErrEval},
 		{"argMin by a huge Float64", spec(catalog.AggArgMin, nil, strT, f64),
-			input(full, expr.Float(-1e125)), input(full, expr.Float(-1e300))},
+			input(full, expr.Float(-1e125)), input(full, expr.Float(-1e300)), expr.ErrEval},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -143,8 +147,12 @@ func TestViewValueLimits(t *testing.T) {
 				t.Fatalf("Add of a value at the limit: %v", err)
 			}
 			s = decode(t, f, encode(t, s))
-			if err := s.Add(c.in); !errors.Is(err, expr.ErrEval) {
-				t.Fatalf("Add = %v, want an evaluation error", err)
+			before := encode(t, s)
+			if err := s.Add(c.in); !errors.Is(err, c.want) {
+				t.Fatalf("Add = %v, want %v", err, c.want)
+			}
+			if after := encode(t, s); !reflect.DeepEqual(after, before) {
+				t.Errorf("Add that failed changed the state from %v to %v", before, after)
 			}
 			rt := compile(t, readTime(c.spec)).New()
 			if err := rt.Add(c.in); err != nil {
