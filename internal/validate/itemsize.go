@@ -95,7 +95,7 @@ func keySize(ks []catalog.NamedExpr) (int, bool) {
 			continue
 		}
 		f, err := keys.AppendField(nil, t, widest(t))
-		if err == nil {
+		if err == nil { // always: checkItemSizes skips views whose keys aren't valid key types
 			size += len(f)
 		}
 		if i > 0 {
