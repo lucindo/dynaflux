@@ -46,3 +46,4 @@ it.
 | [runbooks/simulation.md](runbooks/simulation.md) | The simulation harness: its test tiers and how long they take, rerunning a failing seed, and the negative controls. |
 | [runbooks/e2e.md](runbooks/e2e.md) | The end-to-end suite on DynamoDB Local, and the maintainer's procedure for it on AWS, with the one-time experiments whose answers go into the specifications. |
 | [runbooks/benchmarks.md](runbooks/benchmarks.md) | The Go benchmarks: what they measure, running them, and comparing a run with the recorded baseline. The throughput benchmark: checking it on DynamoDB Local with `make bench-emulator`, and the maintainer's run on AWS with `make bench-aws`, its report and its cost. |
+| [runbooks/release.md](runbooks/release.md) | Making a release: the release-prep commit, the gates, the tag, the checks after it, the acceptance run on each release candidate, and checking the release config without publishing. |

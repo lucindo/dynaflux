@@ -20,10 +20,11 @@ make setup-git-hooks
 ## Build and test
 
 - `make help` lists the development targets. `make verify` runs the formatters,
-  `go mod tidy`, a check that no module needs a Go newer than 1.26, the linters, the
-  vulnerability check, the tests, each benchmark once and a `linux/arm64` build of the
-  example's Lambda binary. If the linter reports an unknown linter, your `golangci-lint` is
-  older than `.golangci.yml`: run `make tools-update`.
+  `go mod tidy`, `make notices`, which rewrites `THIRD_PARTY_NOTICES`, a check that no
+  module needs a Go newer than 1.26, the linters, the vulnerability check, the tests, each
+  benchmark once and a `linux/arm64` build of the example's Lambda binary. If the linter
+  reports an unknown linter, your `golangci-lint` is older than `.golangci.yml`: run
+  `make tools-update`.
 - `Float64` results must be the same on every CPU, so `make cross-arch` runs the
   cross-architecture tests as amd64: natively on an amd64 machine, and through Rosetta on
   Apple silicon. It isn't part of `make verify`.

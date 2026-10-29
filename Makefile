@@ -46,7 +46,7 @@ DOCKERFILES = $(shell git ls-files --cached --others --exclude-standard -- '*Doc
 SHELL_SCRIPTS = $(shell git ls-files --cached --others --exclude-standard -- 'scripts/*.sh')
 
 .PHONY: help check-git-hooks warn-git-hooks setup-git-hooks tools tools-update \
-        test bench bench-compare bench-smoke cross-arch lambda-build fmt fix lint vuln osv gomod check-go-bound mod-download verify \
+        test bench bench-compare bench-smoke cross-arch lambda-build fmt fix lint vuln osv gomod notices check-go-bound mod-download verify \
         check-clean sim sim-controls sim-seed emulators-up emulators-down integration \
         e2e-emulator e2e-aws bench-emulator bench-aws hadolint checkov infra-lint shellcheck trivy semgrep
 
@@ -150,6 +150,11 @@ osv: tools ## Scan every lockfile in the repo with OSV-Scanner (needs network; n
 gomod: ## Run `go mod tidy`.
 	go mod tidy
 
+# The release archives carry THIRD_PARTY_NOTICES (docs/runbooks/release.md). verify rewrites
+# it, so CI's check-clean fails when the committed file is stale.
+notices: ## Write THIRD_PARTY_NOTICES: the licenses and NOTICE files of the code in the dynaflux binary.
+	scripts/third-party-notices.sh
+
 # Dynaflux supports Go 1.26 and later, so no module may need a newer Go. The bound is fixed
 # here: `go get` and `go mod tidy` raise go.mod's own go line to the highest of any
 # dependency, so comparing with that line could never fail.
@@ -177,7 +182,7 @@ check-go-bound: ## Fail if go.mod's go or toolchain line, or any module's go lin
 mod-download: ## Run `go mod download`.
 	go mod download
 
-verify: check-git-hooks tools fmt gomod check-go-bound lint vuln test bench-smoke lambda-build ## Run fmt, gomod, the Go version bound, lint, vuln, test, the benchmarks once and the Lambda build.
+verify: check-git-hooks tools fmt gomod notices check-go-bound lint vuln test bench-smoke lambda-build ## Run fmt, gomod, notices, the Go version bound, lint, vuln, test, the benchmarks once and the Lambda build.
 
 check-clean: ## Fail if the working tree is dirty (CI guard: verify must not rewrite files).
 	@status="$$(git status --porcelain)"; \

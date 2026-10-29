@@ -95,3 +95,69 @@ jobs:
       # sh blocks, which delete AWS resources.
       - run: command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
       - run: make shellcheck
+
+  # release.yml's GoReleaser run, without publishing, on a change that could break it
+  # (docs/runbooks/release.md).
+  release-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commits before this push, for the diff below.
+          fetch-depth: 0
+          persist-credentials: false
+      # A pull request's merge commit has the base branch as its first parent. git diff fails
+      # on a commit it lacks, such as the zeros before a new branch: then the job runs.
+      - id: changed
+        env:
+          BASE: ${{ github.event_name == 'push' && github.event.before || 'HEAD^1' }}
+        run: |
+          if git diff --quiet "$BASE" HEAD -- .goreleaser.yaml .github/workflows/release.yml .github/workflows/ci.yml CHANGELOG.md scripts/release-notes.sh; then
+            echo "run=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "run=true" >>"$GITHUB_OUTPUT"
+          fi
+      - if: steps.changed.outputs.run == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - if: steps.changed.outputs.run == 'true'
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+      - if: steps.changed.outputs.run == 'true'
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          install-only: true
+      - if: steps.changed.outputs.run == 'true'
+        run: goreleaser check
+      # The notes of the newest release in CHANGELOG.md. The run goes in a copy of the commit
+      # with no remote, under a tag that is never a real version. Its branch tracks itself,
+      # which GoReleaser takes in place of a remote, and its config disables the release, so
+      # the run builds, archives, writes the SBOMs and reads the notes, and publishes nothing.
+      - if: steps.changed.outputs.run == 'true'
+        name: Release a scratch tag without publishing
+        shell: bash
+        run: |
+          version="$(awk -F '[][]' '/^## \[[0-9]/ { print $2; exit }' CHANGELOG.md)"
+          if [[ -n "$version" ]]; then
+            scripts/release-notes.sh "v$version" >"$RUNNER_TEMP/notes.md"
+          else
+            echo "No release yet." >"$RUNNER_TEMP/notes.md"
+          fi
+          awk '{ print } /^release:$/ { print "  disable: true" }' .goreleaser.yaml >"$RUNNER_TEMP/goreleaser.yaml"
+          copy="$RUNNER_TEMP/scratch"
+          mkdir "$copy"
+          git archive HEAD | tar -x -C "$copy"
+          cd "$copy"
+          git init --quiet --initial-branch=main
+          git add --all
+          git -c user.name=ci -c user.email=ci@example.invalid commit --quiet --message=scratch
+          git tag v0.0.0-scratch.1
+          git config branch.main.remote .
+          git config branch.main.merge refs/heads/main
+          goreleaser release --config="$RUNNER_TEMP/goreleaser.yaml" --clean --skip=publish,announce \
+            --release-notes="$RUNNER_TEMP/notes.md" --verbose 2>&1 | tee "$RUNNER_TEMP/goreleaser.log"
+          grep --quiet 'loading file' "$RUNNER_TEMP/goreleaser.log"

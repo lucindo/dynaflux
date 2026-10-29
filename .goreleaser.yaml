@@ -1,0 +1,75 @@
+# Copyright 2026 The Dynaflux Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Archives of the dynaflux CLI for a tag, and a draft release that holds them
+# (docs/runbooks/release.md). go tool and go install stay the main ways to get the CLI.
+# .github/workflows/release.yml runs it; `goreleaser check` validates it.
+version: 2
+
+project_name: dynaflux
+
+builds:
+  - id: dynaflux
+    main: ./cmd/dynaflux
+    binary: dynaflux
+    env:
+      - CGO_ENABLED=0
+    # No Windows: nothing tests the CLI there.
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    # No -X: `dynaflux version` reads the module version that Go stamps from the tag, as it
+    # does for go install. GoReleaser's default ldflags set main.version, which doesn't exist.
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+# Fixed owners, and times from the commit, so two clones of a tag give the same archives.
+archives:
+  - id: dynaflux
+    ids: [dynaflux]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - src: LICENSE
+        info: {owner: root, group: root, mtime: "{{ .CommitDate }}"}
+      - src: README.md
+        info: {owner: root, group: root, mtime: "{{ .CommitDate }}"}
+      - src: THIRD_PARTY_NOTICES
+        info: {owner: root, group: root, mtime: "{{ .CommitDate }}"}
+    builds_info: {owner: root, group: root, mtime: "{{ .CommitDate }}"}
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# One SPDX document per archive, from the Go build info in the binary. Needs syft on PATH.
+sboms:
+  - artifacts: archive
+
+# No changelog block: the notes come from CHANGELOG.md through --release-notes, which turns
+# off the generated ones. `changelog: {disable: true}` would drop that file too.
+
+# No github block: GoReleaser takes the repository from the origin remote, so a clone
+# without one can't publish to the real repository.
+release:
+  # The maintainer reviews the draft, then publishes it. A rerun replaces the draft and its
+  # files instead of adding a second one.
+  draft: true
+  replace_existing_draft: true
+  replace_existing_artifacts: true
+  prerelease: auto
+  footer: |
+    ## Install
+
+    Pin the CLI in your module, so it always matches the library:
+
+        go get -tool github.com/lucindo/dynaflux/cmd/dynaflux@{{ .Tag }}
+        go tool dynaflux version
+
+    Or install it: `go install github.com/lucindo/dynaflux/cmd/dynaflux@{{ .Tag }}`.
+
+    The archives hold the same CLI for machines without Go. Check one with
+    `sha256sum --ignore-missing -c checksums.txt`, and where it was built with
+    `gh attestation verify <archive> --repo lucindo/dynaflux`.
