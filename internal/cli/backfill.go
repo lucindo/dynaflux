@@ -575,9 +575,9 @@ func (p *regionPlanner) chooseSplit(it *planItem, vv *catalog.ViewVersion) (meta
 // partialSince returns about when a table source that reads now holds events from, or zero
 // when it holds every event: the stream table is younger than its LOG RETENTION.
 func partialSince(cat *catalog.Catalog, stream string, split meta.Split, born time.Time) time.Time {
-	s, ok := cat.Stream(stream)
+	s, _ := cat.Stream(stream)
 	r, expires := s.LogRetention.Period()
-	if !ok || !expires || split == meta.SplitFence {
+	if !expires || split == meta.SplitFence {
 		return time.Time{}
 	}
 	start, err := expr.AddInterval(time.Now().UnixMicro(), catalog.Interval{N: -r.N, Unit: r.Unit})

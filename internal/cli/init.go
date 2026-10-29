@@ -55,17 +55,7 @@ dynaflux.yaml doesn't allow.
 
 type initOptions struct {
 	store   string
-	regions regionList
-}
-
-// regionList is a repeatable flag.
-type regionList []string
-
-func (r *regionList) String() string { return strings.Join(*r, ",") }
-
-func (r *regionList) Set(s string) error {
-	*r = append(*r, s)
-	return nil
+	regions repeated
 }
 
 func (c *cli) init(o initOptions, args []string) int {
